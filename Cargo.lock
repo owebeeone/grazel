@@ -1074,6 +1074,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "razel-actions"
+version = "0.1.0"
+dependencies = [
+ "razel-core",
+]
+
+[[package]]
 name = "razel-analysis"
 version = "0.1.0"
 dependencies = [
