@@ -1109,6 +1109,7 @@ dependencies = [
 name = "razel-loading"
 version = "0.1.0"
 dependencies = [
+ "allocative",
  "anyhow",
  "razel-core",
  "razel-ir",

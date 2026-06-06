@@ -6,6 +6,9 @@
 //! and ignored for now. `glob()` matches against the package's file list. Legacy macros
 //! (plain Starlark `def`s that call rules) work for free via evaluation.
 
+pub mod rules;
+pub use rules::{StarlarkTargetDecl, load_starlark_rules};
+
 use razel_ir::TargetKind;
 use starlark::collections::SmallMap;
 use starlark::environment::{GlobalsBuilder, Module};

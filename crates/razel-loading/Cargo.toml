@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+allocative = "0.3.6"
 anyhow = "1.0.102"
 razel-core = { version = "0.1.0", path = "../razel-core" }
 razel-ir = { version = "0.1.0", path = "../razel-ir" }
