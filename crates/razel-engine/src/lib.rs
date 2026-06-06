@@ -194,8 +194,8 @@ mod tests {
         let e = Engine::new();
         e.add_input("A", d("a0"));
         e.add_input("B", d("b0"));
-        e.add_derived("C", &["A"], |v| concat(v));
-        e.add_derived("D", &["C", "B"], |v| concat(v));
+        e.add_derived("C", &["A"], concat);
+        e.add_derived("D", &["C", "B"], concat);
         e
     }
 
@@ -221,7 +221,7 @@ mod tests {
         let e = Engine::new();
         e.add_input("A", d("a0"));
         e.add_derived("C", &["A"], |_| d("CONST")); // C ignores A
-        e.add_derived("D", &["C"], |v| concat(v));
+        e.add_derived("D", &["C"], concat);
         e.request("D").unwrap();
         e.reset_recomputes();
 
@@ -242,8 +242,8 @@ mod tests {
         let fresh = Engine::new();
         fresh.add_input("A", d("a9"));
         fresh.add_input("B", d("b9"));
-        fresh.add_derived("C", &["A"], |v| concat(v));
-        fresh.add_derived("D", &["C", "B"], |v| concat(v));
+        fresh.add_derived("C", &["A"], concat);
+        fresh.add_derived("D", &["C", "B"], concat);
         let from_scratch = fresh.request("D").unwrap();
 
         assert_eq!(incremental, from_scratch);
@@ -252,8 +252,8 @@ mod tests {
     #[test]
     fn detects_cycles() {
         let e = Engine::new();
-        e.add_derived("X", &["Y"], |v| concat(v));
-        e.add_derived("Y", &["X"], |v| concat(v));
+        e.add_derived("X", &["Y"], concat);
+        e.add_derived("Y", &["X"], concat);
         assert!(e.request("X").is_err());
     }
 
@@ -265,7 +265,7 @@ mod tests {
             e.add_input("n0", d("seed"));
             for i in 1..=n {
                 let dep = format!("n{}", i - 1);
-                e.add_derived(&format!("n{i}"), &[&dep], |v| concat(v));
+                e.add_derived(&format!("n{i}"), &[&dep], concat);
             }
             e.request(&format!("n{n}")).unwrap();
             assert_eq!(
