@@ -1097,6 +1097,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "razel-loading"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "razel-core",
+ "razel-ir",
+ "starlark",
+]
+
+[[package]]
 name = "razel-vfs"
 version = "0.1.0"
 dependencies = [
