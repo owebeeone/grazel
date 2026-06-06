@@ -7,7 +7,7 @@
 //! linker dedup semantics and are deferred (tracked) rather than approximated.
 
 pub mod analysis;
-pub use analysis::{Analysis, DefaultInfo, analyze};
+pub use analysis::{Analysis, DefaultInfo, analyze, wire_to_ir};
 
 use std::collections::HashSet;
 use std::hash::Hash;

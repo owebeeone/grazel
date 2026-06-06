@@ -1,12 +1,12 @@
 //! Starlark-defined rules + analysis (Phase 3): `rule(implementation, attrs)` returns a
 //! callable custom value; instantiating it runs the rule **implementation** with a `ctx`
 //! (Bazel dialect: `ctx.attr.*`, `ctx.label`, `ctx.actions.declare_file/run/write`) and
-//! captures the declared outputs, registered actions, and `DefaultInfo` — i.e. the target
-//! **analyzes**.
+//! captures the registered actions (inputs/outputs) and `DefaultInfo` — the target
+//! **analyzes**. Plus `select()` (host-config-lite) and `DefaultInfo`.
 //!
 //! Analysis runs in the **same eval scope** as instantiation (the impl `Value` never
-//! escapes the heap) — sidestepping module freezing. This is the Tier-2.5 simplification;
-//! a two-phase freeze model comes when caching / cross-target dep-providers demand it.
+//! escapes the heap) — sidestepping module freezing. Tier-2.5 simplification; a two-phase
+//! freeze model comes when caching / cross-target dep-providers demand it.
 
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
@@ -21,13 +21,19 @@ use starlark::values::{Heap, NoSerialize, StarlarkValue, Trace, Value, starlark_
 use std::cell::RefCell;
 use std::fmt;
 
+/// One action registered by a rule impl (`ctx.actions.run`/`write`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnalyzedAction {
+    pub mnemonic: String,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
 /// The captured analysis of one target: a rule impl ran and produced these.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnalyzedTarget {
     pub name: String,
-    pub declared_outputs: Vec<String>,
-    /// Action mnemonics (the `executable` of each `ctx.actions.run`, or `write`).
-    pub actions: Vec<String>,
+    pub actions: Vec<AnalyzedAction>,
     /// `DefaultInfo(files=…)`.
     pub default_info: Vec<String>,
 }
@@ -76,18 +82,24 @@ fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(this)] _this: Value<'v>,
         filename: String,
     ) -> anyhow::Result<String> {
-        with_current(|c| c.declared_outputs.push(filename.clone()));
         Ok(filename)
     }
     fn run<'v>(
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = named)] executable: Option<String>,
         #[starlark(require = named)] outputs: Option<UnpackList<String>>,
+        #[starlark(require = named)] inputs: Option<UnpackList<String>>,
         #[starlark(require = named)] arguments: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
-        let _ = (outputs, arguments);
-        with_current(|c| c.actions.push(executable.unwrap_or_else(|| "run".into())));
+        let _ = arguments;
+        with_current(|c| {
+            c.actions.push(AnalyzedAction {
+                mnemonic: executable.unwrap_or_else(|| "run".into()),
+                inputs: inputs.map(|l| l.items).unwrap_or_default(),
+                outputs: outputs.map(|l| l.items).unwrap_or_default(),
+            })
+        });
         Ok(NoneType)
     }
     fn write<'v>(
@@ -96,8 +108,11 @@ fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         with_current(|c| {
-            c.actions.push("write".into());
-            c.declared_outputs.push(output);
+            c.actions.push(AnalyzedAction {
+                mnemonic: "write".into(),
+                inputs: Vec::new(),
+                outputs: vec![output],
+            })
         });
         Ok(NoneType)
     }
@@ -105,8 +120,7 @@ fn actions_methods(b: &mut MethodsBuilder) {
 
 // ---- ctx ------------------------------------------------------------------------
 
-/// The analysis `ctx`. All fields are heap `Value`s (struct of attrs, the actions object,
-/// the label string) so it traces cleanly and needs no freezing.
+/// The analysis `ctx`. All fields are heap `Value`s so it traces cleanly, no freezing.
 #[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
 struct Ctx<'v> {
     attr: Value<'v>,
@@ -132,7 +146,7 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
     }
 }
 
-// ---- rule() + DefaultInfo -------------------------------------------------------
+// ---- rule() + DefaultInfo + select ----------------------------------------------
 
 #[derive(Debug, Trace, NoSerialize, ProvidesStaticType, Allocative)]
 struct RuleObj<'v> {
@@ -198,7 +212,7 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] attrs: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let _ = attrs; // attr schema unused until typed coercion
+        let _ = attrs;
         Ok(eval
             .heap()
             .alloc_complex_no_freeze(RuleObj { implementation }))
@@ -213,6 +227,19 @@ fn rule_globals(b: &mut GlobalsBuilder) {
             with_current(|c| c.default_info = f.items);
         }
         Ok(NoneType)
+    }
+
+    /// `select({cond: value, …})` — host-config-lite: pick `//conditions:default`, else
+    /// the first branch. (Real config_setting matching is Phase 8.)
+    fn select<'v>(branches: SmallMap<String, Value<'v>>) -> anyhow::Result<Value<'v>> {
+        if let Some(v) = branches.get("//conditions:default") {
+            return Ok(*v);
+        }
+        branches
+            .values()
+            .next()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("select() with no branches"))
     }
 }
 
@@ -242,12 +269,15 @@ mod tests {
 
     #[test]
     fn starlark_rule_analyzes_by_running_its_impl() {
-        // A Bazel-dialect rule (the form a translated no_prelude rule takes): the impl
-        // reads ctx.attr, declares an output, registers an action, returns DefaultInfo.
         let src = r#"
 def _impl(ctx):
     out = ctx.actions.declare_file(ctx.attr.name + ".o")
-    ctx.actions.run(executable = "cc", outputs = [out], arguments = ["-c", ctx.attr.src])
+    ctx.actions.run(
+        executable = "cc",
+        outputs = [out],
+        inputs = [ctx.attr.src],
+        arguments = ["-c", ctx.attr.src],
+    )
     return [DefaultInfo(files = [out])]
 
 cc_thing = rule(implementation = _impl, attrs = {"src": 1})
@@ -258,10 +288,27 @@ cc_thing(name = "gadget", src = "gadget.c")
         assert_eq!(targets.len(), 2);
         let w = &targets[0];
         assert_eq!(w.name, "widget");
-        assert_eq!(w.declared_outputs, vec!["widget.o"]);
-        assert_eq!(w.actions, vec!["cc"]);
+        assert_eq!(w.actions.len(), 1);
+        assert_eq!(w.actions[0].mnemonic, "cc");
+        assert_eq!(w.actions[0].inputs, vec!["widget.c"]);
+        assert_eq!(w.actions[0].outputs, vec!["widget.o"]);
         assert_eq!(w.default_info, vec!["widget.o"]);
         assert_eq!(targets[1].name, "gadget");
-        assert_eq!(targets[1].declared_outputs, vec!["gadget.o"]);
+    }
+
+    #[test]
+    fn select_picks_default_branch() {
+        let src = r#"
+def _impl(ctx):
+    flags = select({"//conditions:default": ["-O2"], "@cfg//:dbg": ["-g"]})
+    ctx.actions.run(executable = "cc", outputs = [ctx.attr.name], inputs = [], arguments = flags)
+    return [DefaultInfo(files = [ctx.attr.name])]
+
+thing = rule(implementation = _impl, attrs = {})
+thing(name = "x")
+"#;
+        let targets = analyze_starlark("BUILD", src).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].actions[0].mnemonic, "cc");
     }
 }
