@@ -64,9 +64,166 @@ pub enum NodeRef {
     Target(TargetId),
 }
 
+/// A parsed Bazel **canonical** label: `@@repo//package:name` (repo `""` = main repo).
+/// Edge cases ported from Bazel `cmdline/LabelTest.java` (Class E). Canonical form only;
+/// repo-context resolution (`parseWithRepoContext`, relative `:t`/`pkg`) is deferred —
+/// it needs a repo map (Phase 2 follow-up / F6).
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct Label {
+    repo: String,
+    package: String,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct LabelError(pub String);
+
+impl fmt::Display for LabelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid label: {}", self.0)
+    }
+}
+impl std::error::Error for LabelError {}
+
+impl Label {
+    /// `""` for the main repository.
+    pub fn repository(&self) -> &str {
+        &self.repo
+    }
+    pub fn package_name(&self) -> &str {
+        &self.package
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Parse a canonical label: `@@repo//pkg:name`, `@repo//pkg:name`, `@repo`
+    /// (= `@repo//:repo`), `//pkg:name`, `//pkg` (name defaults to the last package
+    /// segment), `//:name` (empty package).
+    pub fn parse_canonical(s: &str) -> Result<Label, LabelError> {
+        let err = |m: &str| LabelError(format!("{m}: `{s}`"));
+
+        let (rest, had_repo) = match s.strip_prefix("@@").or_else(|| s.strip_prefix('@')) {
+            Some(r) => (r, true),
+            None => (s, false),
+        };
+
+        if had_repo {
+            match rest.find("//") {
+                // `@foo` shorthand → repo=foo, pkg="", name="foo".
+                None if rest.is_empty() => Err(err("empty repository name")),
+                None => Ok(Label {
+                    repo: rest.to_string(),
+                    package: String::new(),
+                    name: rest.to_string(),
+                }),
+                Some(idx) => {
+                    let repo_name = &rest[..idx];
+                    if repo_name.is_empty() {
+                        return Err(err("empty repository name"));
+                    }
+                    Self::finish(repo_name, &rest[idx + 2..])
+                        .ok_or_else(|| err("invalid label body"))
+                }
+            }
+        } else {
+            let body = s
+                .strip_prefix("//")
+                .ok_or_else(|| err("label must start with `//` or `@`"))?;
+            Self::finish("", body).ok_or_else(|| err("invalid label body"))
+        }
+    }
+
+    /// Parse the `package[:name]` body. Name defaults to the package's last segment.
+    fn finish(repo: &str, body: &str) -> Option<Label> {
+        let (package, name) = match body.split_once(':') {
+            Some((pkg, name)) => (pkg.to_string(), name.to_string()),
+            None => (
+                body.to_string(),
+                body.rsplit('/').next().unwrap_or("").to_string(),
+            ),
+        };
+        if name.is_empty() {
+            return None;
+        }
+        Some(Label {
+            repo: repo.to_string(),
+            package,
+            name,
+        })
+    }
+}
+
+impl fmt::Display for Label {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.repo.is_empty() {
+            write!(f, "//{}:{}", self.package, self.name)
+        } else {
+            write!(f, "@@{}//{}:{}", self.repo, self.package, self.name)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lbl(s: &str) -> Label {
+        Label::parse_canonical(s).unwrap()
+    }
+
+    #[test]
+    fn label_canonical_cases_from_bazel_labeltest() {
+        let l = lbl("//foo/bar:baz");
+        assert_eq!(
+            (l.repository(), l.package_name(), l.name()),
+            ("", "foo/bar", "baz")
+        );
+        assert_eq!(
+            (lbl("//foo/bar").package_name(), lbl("//foo/bar").name()),
+            ("foo/bar", "bar")
+        );
+        assert_eq!(
+            (lbl("//:bar").package_name(), lbl("//:bar").name()),
+            ("", "bar")
+        );
+        let l = lbl("@foo");
+        assert_eq!(
+            (l.repository(), l.package_name(), l.name()),
+            ("foo", "", "foo")
+        );
+        let l = lbl("@foo//bar");
+        assert_eq!(
+            (l.repository(), l.package_name(), l.name()),
+            ("foo", "bar", "bar")
+        );
+        let l = lbl("@@foo//bar");
+        assert_eq!(
+            (l.repository(), l.package_name(), l.name()),
+            ("foo", "bar", "bar")
+        );
+        let l = lbl("//@foo");
+        assert_eq!(
+            (l.repository(), l.package_name(), l.name()),
+            ("", "@foo", "@foo")
+        );
+        let l = lbl("//xyz/@foo:abc");
+        assert_eq!((l.package_name(), l.name()), ("xyz/@foo", "abc"));
+    }
+
+    #[test]
+    fn label_rejects_invalid() {
+        assert!(Label::parse_canonical("").is_err());
+        assert!(Label::parse_canonical("foo").is_err()); // relative — needs repo context
+        assert!(Label::parse_canonical(":foo").is_err());
+        assert!(Label::parse_canonical("//foo:").is_err()); // empty name
+    }
+
+    #[test]
+    fn label_display_roundtrips() {
+        assert_eq!(lbl("//foo/bar:baz").to_string(), "//foo/bar:baz");
+        assert_eq!(lbl("@@foo//bar:bar").to_string(), "@@foo//bar:bar");
+    }
 
     #[test]
     fn digest_is_deterministic_and_content_sensitive() {
