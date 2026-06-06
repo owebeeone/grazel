@@ -1112,6 +1112,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "razel-engine"
+version = "0.1.0"
+dependencies = [
+ "razel-core",
+]
+
+[[package]]
 name = "razel-exec"
 version = "0.1.0"
 dependencies = [
