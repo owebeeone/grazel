@@ -6,3 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+razel-core = { version = "0.1.0", path = "../razel-core" }
+razel-ir = { version = "0.1.0", path = "../razel-ir" }
+razel-loading = { version = "0.1.0", path = "../razel-loading" }

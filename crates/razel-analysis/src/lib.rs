@@ -6,6 +6,9 @@
 //! and **preorder** (directs before transitives). `LINK_ORDER`/`TOPOLOGICAL` have intricate
 //! linker dedup semantics and are deferred (tracked) rather than approximated.
 
+pub mod analysis;
+pub use analysis::{Analysis, DefaultInfo, analyze};
+
 use std::collections::HashSet;
 use std::hash::Hash;
 
