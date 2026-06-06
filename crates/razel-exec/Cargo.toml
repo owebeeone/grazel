@@ -1,0 +1,13 @@
+[package]
+name = "razel-exec"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+razel-actions = { version = "0.1.0", path = "../razel-actions" }
+razel-core = { version = "0.1.0", path = "../razel-core" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
