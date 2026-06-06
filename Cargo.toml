@@ -1,0 +1,18 @@
+# razel — workspace root.
+# Plan & decisions: ../../bazel-dev/RazelPlan.md  (engine-as-product, D6).
+# Crates are added per roll-build phase, TDD-first (AGENTS.md Rule 0) — none yet.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0 OR MIT"   # F10
+rust-version = "1.95"
+
+# §13.2 / §9: small single static binary.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

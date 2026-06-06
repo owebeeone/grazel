@@ -1,0 +1,3 @@
+# F2: stable, pinned.
+[toolchain]
+channel = "1.95.0"
