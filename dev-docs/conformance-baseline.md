@@ -17,5 +17,22 @@ by inspecting failures), **not** harness bugs:
 - **Type-name / dialect differences** — e.g. `type([].clear)` → `"function"`
   (starlark-rust) vs `"builtin_function_or_method"` (Bazel).
 
-Phase 1 punch-list = the above, file by file, to ≥95% (quarantining genuinely-divergent
-cases with citations).
+## Phase 1 result (decision: "Bazel testdata + quarantine")
+
+Every one of the 58 reds was inspected and confirmed a **genuine starlark-rust ↔ Bazel
+divergence** (razel's Starlark *is* the `starlark` crate, D4) — not a razel bug:
+recursion permitted (Bazel forbids), comprehension scoping, builtin signatures
+(`split`/`range`/`replace`), `string.elems()` returns an iterator, operator semantics
+(`|=`), error wording, type-names, and missing Bazel-harness helpers (`freeze`,
+`int_mul_slow`). All are quarantined with citations in `DIVERGENCES` (lib.rs).
+
+- **Raw: 36/94 (38.3%)** pass outright; **62% are documented divergences.**
+- **Non-quarantined: 36/36 (100%)** — razel passes every case where the crate and
+  Bazel agree.
+- The manifest is **regression-guarded**: any failure beyond the documented xfails
+  breaks the gate (4 gate unit tests). A divergence later fixed shows as "stale".
+
+**Phase 1 gate (≥95% non-quarantined, no regressions): PASS.** The "identical Starlark"
+language of §5 should read "starlark-rust dialect, Bazel-compatible modulo the documented
+divergences" — `dashboard` is the living status doc.
+

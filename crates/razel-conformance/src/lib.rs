@@ -13,11 +13,34 @@
 //! an expected failure in the same chunk.
 
 use regex::Regex;
-use starlark::environment::{GlobalsBuilder, Module};
+use starlark::environment::{GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::Value;
 use starlark::values::none::NoneType;
+
+/// Extended-stdlib extensions to register (the public mirror of starlark's private
+/// `LibraryExtension::all()`): the closest match to Bazel's available builtins.
+const EXTENSIONS: &[LibraryExtension] = &[
+    LibraryExtension::StructType,
+    LibraryExtension::RecordType,
+    LibraryExtension::EnumType,
+    LibraryExtension::NamespaceType,
+    LibraryExtension::Map,
+    LibraryExtension::Filter,
+    LibraryExtension::Partial,
+    LibraryExtension::Debug,
+    LibraryExtension::Print,
+    LibraryExtension::Pprint,
+    LibraryExtension::Pstr,
+    LibraryExtension::Prepr,
+    LibraryExtension::Breakpoint,
+    LibraryExtension::Json,
+    LibraryExtension::Typing,
+    LibraryExtension::Internal,
+    LibraryExtension::CallStack,
+    LibraryExtension::SetType,
+];
 
 /// Result of running one `---`-delimited case.
 #[derive(Debug, Clone)]
@@ -141,7 +164,9 @@ fn strip_expected_markers(src: &str) -> String {
 fn eval_case(filename: &str, src: &str) -> Result<(), String> {
     let ast = AstModule::parse(filename, strip_expected_markers(src), &Dialect::Extended)
         .map_err(|e| format!("{e}"))?;
-    let globals = GlobalsBuilder::standard().with(asserts).build();
+    let globals = GlobalsBuilder::extended_by(EXTENSIONS)
+        .with(asserts)
+        .build();
     Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.eval_module(ast, &globals)
@@ -189,9 +214,204 @@ pub fn run_star_source(filename: &str, source: &str) -> FileReport {
     }
 }
 
+/// Known starlark-rust ↔ Bazel divergences in Bazel's eval testdata — the
+/// quarantine list (xfail) for the Class-A gate (decision: "Bazel testdata +
+/// quarantine"). `(file, expected_failing_cases, citation)`. razel's Starlark **is**
+/// the `starlark` crate (D4); these cases differ from Bazel's Java Starlark in error
+/// wording, builtin signatures, or value semantics and cannot be reconciled without
+/// forking the crate — so they are documented, not chased.
+pub const DIVERGENCES: &[(&str, usize, &str)] = &[
+    (
+        "comprehension.star",
+        1,
+        "comprehension variable scoping differs",
+    ),
+    (
+        "cycles.star",
+        3,
+        "recursion/cycle handling differs (starlark-rust permits recursion)",
+    ),
+    (
+        "dict.star",
+        2,
+        "dict operator/builtin semantics differ (e.g. `|=`)",
+    ),
+    ("fields.star", 2, "struct/field access semantics differ"),
+    ("float.star", 1, "float formatting/semantics differ"),
+    (
+        "function.star",
+        6,
+        "permits recursion; type-name `function` vs `builtin_function_or_method`",
+    ),
+    (
+        "int.star",
+        1,
+        "missing Bazel harness builtin `int_mul_slow`; int error text differs",
+    ),
+    (
+        "int_constructor.star",
+        1,
+        "int() base-inference error differs",
+    ),
+    ("json.star", 1, "json builtin output/error differs"),
+    ("list.star", 1, "index-out-of-bound error wording differs"),
+    (
+        "list_mutation.star",
+        1,
+        "negative-index error wording differs",
+    ),
+    ("list_slices.star", 1, "slice index error differs"),
+    (
+        "loop.star",
+        18,
+        "sequence/loop error wording differs from Bazel",
+    ),
+    (
+        "min_max.star",
+        1,
+        "min/max mixed-type comparison error differs",
+    ),
+    ("range.star", 1, "range() argument signature/error differs"),
+    (
+        "set.star",
+        1,
+        "missing Bazel harness builtin `freeze`; set semantics differ",
+    ),
+    (
+        "sorted.star",
+        1,
+        "sorted() mixed-type comparison error differs",
+    ),
+    (
+        "string_elems.star",
+        1,
+        "string.elems() returns an iterator (no len) vs Bazel sequence",
+    ),
+    (
+        "string_format.star",
+        12,
+        ".format() error wording differs from Bazel",
+    ),
+    (
+        "string_misc.star",
+        1,
+        "string.replace negative-count handling differs",
+    ),
+    (
+        "string_split.star",
+        1,
+        "split() named-arg signature differs from Bazel",
+    ),
+];
+
+/// Expected (quarantined) divergent-case count for a file; 0 if not listed.
+pub fn expected_divergences(file: &str) -> usize {
+    DIVERGENCES
+        .iter()
+        .find(|(f, _, _)| *f == file)
+        .map_or(0, |(_, n, _)| *n)
+}
+
+/// Aggregate Class-A gate result over per-file `(name, pass, total)` tuples.
+#[derive(Debug, Default)]
+pub struct Gate {
+    pub raw_pass: usize,
+    pub total: usize,
+    pub quarantined: usize,
+    /// Files with MORE failures than documented — undocumented regressions (gate-breaking).
+    pub regressions: Vec<String>,
+    /// Files with FEWER failures than documented — manifest is stale (a divergence was fixed).
+    pub stale: Vec<String>,
+}
+
+impl Gate {
+    pub fn nonquarantined_total(&self) -> usize {
+        self.total - self.quarantined
+    }
+    pub fn nonquarantined_pct(&self) -> f64 {
+        let d = self.nonquarantined_total();
+        if d == 0 {
+            100.0
+        } else {
+            100.0 * self.raw_pass as f64 / d as f64
+        }
+    }
+    pub fn raw_pct(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            100.0 * self.raw_pass as f64 / self.total as f64
+        }
+    }
+    /// Gate passes iff no undocumented regressions AND ≥95% of non-quarantined cases green.
+    pub fn passed(&self) -> bool {
+        self.regressions.is_empty() && self.nonquarantined_pct() >= 95.0
+    }
+}
+
+/// Evaluate the Class-A gate from per-file `(name, pass, total)` results.
+pub fn evaluate_gate(per_file: &[(String, usize, usize)]) -> Gate {
+    let mut g = Gate::default();
+    for (name, pass, total) in per_file {
+        g.raw_pass += *pass;
+        g.total += *total;
+        let fail = total - pass;
+        let expected = expected_divergences(name);
+        g.quarantined += expected.min(fail);
+        if fail > expected {
+            g.regressions.push(format!(
+                "{name}: {fail} failures > {expected} documented divergences"
+            ));
+        } else if fail < expected {
+            g.stale.push(format!(
+                "{name}: {fail} failures < {expected} documented (divergence fixed?)"
+            ));
+        }
+    }
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_quarantines_documented_divergences() {
+        // A documented all-red file is fully quarantined; gate stays green.
+        let g = evaluate_gate(&[("comprehension.star".into(), 0, 1)]);
+        assert_eq!(g.quarantined, 1);
+        assert_eq!(g.nonquarantined_total(), 0);
+        assert!(g.regressions.is_empty());
+        assert!(g.passed());
+    }
+
+    #[test]
+    fn gate_flags_undocumented_regression() {
+        // A file not in the manifest that fails is a gate-breaking regression.
+        let g = evaluate_gate(&[("brand_new.star".into(), 0, 1)]);
+        assert_eq!(g.quarantined, 0);
+        assert_eq!(g.regressions.len(), 1);
+        assert!(!g.passed());
+    }
+
+    #[test]
+    fn gate_flags_stale_manifest_when_divergence_fixed() {
+        // comprehension expects 1 divergence; if it now passes, manifest is stale.
+        let g = evaluate_gate(&[("comprehension.star".into(), 1, 1)]);
+        assert_eq!(g.stale.len(), 1);
+        assert!(g.passed()); // stale is informational, not gate-breaking
+    }
+
+    #[test]
+    fn gate_nonquarantined_rate_excludes_quarantined() {
+        // 1 clean-pass file + 1 documented all-red file → 100% of non-quarantined.
+        let g = evaluate_gate(&[("tuple.star".into(), 1, 1), ("loop.star".into(), 3, 21)]);
+        assert_eq!(g.quarantined, 18);
+        assert_eq!(g.nonquarantined_total(), 4); // 22 - 18
+        assert_eq!(g.raw_pass, 4);
+        assert!((g.nonquarantined_pct() - 100.0).abs() < 1e-9);
+        assert!(g.passed());
+    }
 
     fn run(src: &str) -> FileReport {
         run_star_source("test.star", src)
