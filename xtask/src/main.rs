@@ -1,7 +1,7 @@
 //! `cargo xtask` — project automation.
 //!
-//! `codegen [--check]`  regenerate `crates/razel-wire/src/generated.rs` from the
-//!                      taut IR (types + CBOR codec)
+//! `codegen [--check]`  regenerate `crates/razel-wire/src/{generated,cbor}.rs` from
+//!                      the taut IR (types + codec, and the vendored CBOR runtime)
 //! `corpus  [--check]`  regenerate `crates/razel-wire/src/vectors.rs` — the golden
 //!                      cross-language corpus, encoded by taut's Python codec
 //!
@@ -76,13 +76,17 @@ fn flags(check: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
     finalize(&raw, &target, "flags", check)
+        .err()
+        .unwrap_or(ExitCode::SUCCESS)
 }
 
-/// Regenerate the wire types + codec from the taut IR via `tautc`.
+/// Regenerate the wire types **and** the CBOR runtime from the taut IR via `tautc`.
+/// taut ≥0.4 emits the vendored runtime (`--with-runtime`), so `cbor.rs` is now
+/// generated too rather than hand-maintained — both files are drift-gated.
 fn codegen(check: bool) -> ExitCode {
     let root = workspace_root();
     let schema = root.join("crates/razel-wire/wire/razel.taut.py");
-    let target = root.join("crates/razel-wire/src/generated.rs");
+    let wire = root.join("crates/razel-wire/src");
     let out_dir = std::env::temp_dir().join("razel-wire-codegen");
     let _ = std::fs::remove_dir_all(&out_dir);
 
@@ -95,7 +99,7 @@ fn codegen(check: bool) -> ExitCode {
         .arg(&schema)
         .arg("-o")
         .arg(&out_dir)
-        .args(["-l", "rust", "--api-only"])
+        .args(["-l", "rust", "--api-only", "--with-runtime"])
         .status();
     if let Err(code) = ok_status(
         status,
@@ -104,7 +108,20 @@ fn codegen(check: bool) -> ExitCode {
     ) {
         return code;
     }
-    finalize(&out_dir.join("rust/api.rs"), &target, "codegen", check)
+    let rust = out_dir.join("rust");
+    for (src, dst, label) in [
+        (rust.join("api.rs"), wire.join("generated.rs"), "codegen"),
+        (
+            rust.join("cbor.rs"),
+            wire.join("cbor.rs"),
+            "codegen-runtime",
+        ),
+    ] {
+        if let Err(code) = finalize(&src, &dst, label, check) {
+            return code;
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// Regenerate the golden corpus via `corpus.py --stdout`.
@@ -134,35 +151,37 @@ fn corpus(check: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
     finalize(&raw, &target, "corpus", check)
+        .err()
+        .unwrap_or(ExitCode::SUCCESS)
 }
 
-/// rustfmt `raw` in place, then compare to / overwrite `target`.
-fn finalize(raw: &Path, target: &Path, label: &str, check: bool) -> ExitCode {
+/// rustfmt `raw` in place, then compare to / overwrite `target`. `Ok(())` on
+/// success; `Err(exit)` on drift (exit 2) or a tooling failure — so callers that
+/// finalize several files can bail on the first problem.
+fn finalize(raw: &Path, target: &Path, label: &str, check: bool) -> Result<(), ExitCode> {
     let fmt = Command::new("rustfmt")
         .args(["--edition", "2024"])
         .arg(raw)
         .status();
-    if let Err(code) = ok_status(fmt, &"rustfmt".into(), "is rustfmt installed?") {
-        return code;
-    }
+    ok_status(fmt, &"rustfmt".into(), "is rustfmt installed?")?;
     let fresh = std::fs::read_to_string(raw).expect("read generated output");
 
     if check {
         let committed = std::fs::read_to_string(target).unwrap_or_default();
         if committed == fresh {
             println!("{label}: {} is up to date", target.display());
-            ExitCode::SUCCESS
+            Ok(())
         } else {
             eprintln!(
                 "{label} DRIFT: {} is stale.\n  run `cargo xtask {label}` and commit.",
                 target.display()
             );
-            ExitCode::from(2)
+            Err(ExitCode::from(2))
         }
     } else {
         std::fs::write(target, fresh).expect("write generated output");
         println!("{label}: wrote {}", target.display());
-        ExitCode::SUCCESS
+        Ok(())
     }
 }
 

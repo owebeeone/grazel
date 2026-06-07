@@ -8,15 +8,18 @@
 //!
 //! Generation is **out of the Cargo build graph** on purpose (the generator is
 //! Python/`tautc`, and `cargo build`/`install` must stay pure-Rust and offline):
-//!   - `cargo xtask codegen`          regenerates `src/generated.rs`
-//!   - `cargo xtask codegen --check`  fails if the committed output is stale
+//!   - `cargo xtask codegen` regenerates `src/generated.rs` (types+codec) and
+//!     `src/cbor.rs` (the vendored CBOR runtime, `tautc --with-runtime`, taut ≥0.4)
+//!   - `cargo xtask codegen --check` fails if either committed output is stale
 //!
 //! The contract is `(name, in, out, shape)` per method; see `wire/razel.taut.py`
 //! for the surface (build / sync_file / version / affected / build.subscribe).
 
+// Generated code (`tautc` output, do not edit) — both the CBOR runtime and the
+// types/codec are emitted from the taut IR; exempt from style lints, their shape
+// is the generator's responsibility, not razel's.
+#[allow(clippy::redundant_closure)]
 pub mod cbor;
-// Generated code (`tautc` output, do not edit) — exempt from style lints; its
-// shape is the generator's responsibility, not razel's.
 #[allow(clippy::redundant_closure)]
 mod generated;
 
