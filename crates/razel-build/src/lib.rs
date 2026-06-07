@@ -103,4 +103,48 @@ cc_obj(name = "widget", src = "widget.c")
         assert_eq!(produced2, vec!["widget.o"]);
         assert!(exec2.path().join("widget.o").exists());
     }
+
+    // The D7 path: a `define_config` transform generates the compile command; the rule
+    // unpacks it into ctx.actions.run; razel executes it into a real object.
+    const BUILD_TRANSFORM: &str = r#"
+def _gnu_compile(req):
+    return struct(
+        executable = req.tool,
+        args = ["-c", req.src, "-o", req.out],
+        inputs = [req.src],
+        outputs = [req.out],
+    )
+
+gnu = define_config(name = "gnu", compile = _gnu_compile)
+
+def _impl(ctx):
+    out = ctx.attr.name + ".o"
+    spec = gnu.compile(struct(tool = "/usr/bin/cc", src = ctx.attr.src, out = out))
+    ctx.actions.run(
+        executable = spec.executable,
+        arguments = spec.args,
+        inputs = spec.inputs,
+        outputs = spec.outputs,
+    )
+    return [DefaultInfo(files = spec.outputs)]
+
+cc_obj = rule(implementation = _impl, attrs = {"src": 1})
+cc_obj(name = "gadget", src = "gadget.c")
+"#;
+
+    #[test]
+    fn compiles_via_a_define_config_transform() {
+        if !Path::new("/usr/bin/cc").exists() {
+            return;
+        }
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("gadget.c"), "int g(void){return 7;}").unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let produced = build_target(BUILD_TRANSFORM, "gadget", exec.path(), &cache).unwrap();
+        assert_eq!(produced, vec!["gadget.o"]);
+        assert!(exec.path().join("gadget.o").exists());
+        // define_config registered the toolchain config engine-side (for selection).
+        assert_eq!(razel_loading::registered_configs(), vec!["gnu".to_string()]);
+    }
 }

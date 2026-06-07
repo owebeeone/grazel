@@ -11,7 +11,7 @@
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
-use starlark::environment::{GlobalsBuilder, Methods, MethodsBuilder, Module};
+use starlark::environment::{GlobalsBuilder, LibraryExtension, Methods, MethodsBuilder, Module};
 use starlark::eval::{Arguments, Evaluator};
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::list::UnpackList;
@@ -48,6 +48,16 @@ struct AnalysisState {
 
 thread_local! {
     static STATE: RefCell<AnalysisState> = RefCell::new(AnalysisState::default());
+}
+
+thread_local! {
+    /// Toolchain configs declared via `define_config` (for host-config selection, D7).
+    static CONFIGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Names of configs declared via `define_config` in the last `analyze_starlark` run.
+pub fn registered_configs() -> Vec<String> {
+    CONFIGS.with_borrow(|c| c.clone())
 }
 
 fn with_current<F: FnOnce(&mut AnalyzedTarget)>(f: F) {
@@ -247,6 +257,27 @@ fn rule_globals(b: &mut GlobalsBuilder) {
             .copied()
             .ok_or_else(|| anyhow::anyhow!("select() with no branches"))
     }
+
+    /// `define_config(name, compile, archive=None, link=None)` — declare + register a
+    /// toolchain transform (D7). Returns a struct of the transform fns (so a rule can call
+    /// `cfg.compile(req)`); also records the name engine-side for host-config selection.
+    fn define_config<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] compile: Value<'v>,
+        #[starlark(require = named)] archive: Option<Value<'v>>,
+        #[starlark(require = named)] link: Option<Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        CONFIGS.with_borrow_mut(|c| c.push(name));
+        let mut fields: Vec<(String, Value<'v>)> = vec![("compile".to_string(), compile)];
+        if let Some(a) = archive {
+            fields.push(("archive".to_string(), a));
+        }
+        if let Some(l) = link {
+            fields.push(("link".to_string(), l));
+        }
+        Ok(eval.heap().alloc(AllocStruct(fields)))
+    }
 }
 
 /// Evaluate a `BUILD`/`.bzl` that defines and instantiates Starlark rules, running each
@@ -256,9 +287,12 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
         s.targets.clear();
         s.current = None;
     });
+    CONFIGS.with_borrow_mut(|c| c.clear());
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
-    let globals = GlobalsBuilder::standard().with(rule_globals).build();
+    let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
+        .with(rule_globals)
+        .build();
     let res: Result<(), String> = Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.eval_module(ast, &globals)
