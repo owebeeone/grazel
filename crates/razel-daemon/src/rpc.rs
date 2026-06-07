@@ -1,21 +1,22 @@
 //! UDS + CBOR transport for the razel daemon.
 //!
 //! A length-prefixed CBOR envelope over a Unix domain socket: one request → one
-//! response per connection. The dispatch runs the *same* `build_target` the CLI
-//! uses and answers in the `razel-wire` contract types — so a daemon build and a
-//! local build produce byte-identical results.
+//! response per connection. The dispatch runs the same driver the CLI uses and
+//! answers in the `razel-wire` contract types — so a daemon build and a local
+//! build produce byte-identical results.
 //!
-//! This is the transport layer + real **cold** builds over it. Reusing the warm
-//! incremental engine ([`crate::Workspace`]) so a daemon build recomputes only
-//! the affected subgraph — and the streaming `build.subscribe`/`affected`
-//! surfaces over a persistent connection — are the next arc. The envelope shape
-//! is deliberately request/response only for now.
+//! The daemon is **warm**: an unchanged BUILD is analyzed once and reused across
+//! builds ([`Server::warm_analyze`]); action-level incrementality comes from the
+//! content cache (`recomputes == 0` on a fully-cached rebuild). Served methods:
+//! `version`, `build`, `affected`. The remaining streaming surface
+//! (`build.subscribe`, an atom over a persistent connection) is the next arc; the
+//! envelope is request/response for now.
 //!
 //! Envelope (CBOR maps, integer tags):
 //!   request  `{1: method:text, 2: args:cbor}`
 //!   response `{1: ok:bool, 2: payload:cbor|null, 3: error:text|null}`
 
-use razel_build::{affected, build_target_report};
+use razel_build::{AnalyzedTarget, affected, analyze_build, execute};
 use razel_core::Digest;
 use razel_exec::Cache;
 use razel_wire::{
@@ -25,6 +26,8 @@ use razel_wire::{
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Wire protocol revision (kept in step with the CLI's `version`).
 pub const PROTOCOL: i64 = 1;
@@ -50,10 +53,20 @@ fn read_frame(stream: &mut impl Read) -> io::Result<Vec<u8>> {
 
 // --- server -----------------------------------------------------------------
 
-/// A daemon bound to one workspace + cache. Serves request/response over UDS.
+/// Analysis cached in RAM, keyed by the BUILD file's content digest.
+struct WarmAnalysis {
+    build_digest: Digest,
+    targets: Vec<AnalyzedTarget>,
+}
+
+/// A daemon bound to one workspace + cache. Serves request/response over UDS, and
+/// keeps **warm** state: an unchanged BUILD is parsed/analyzed once, then reused
+/// across builds (action-level incrementality still comes from the content cache).
 pub struct Server {
     workspace: PathBuf,
     cache_dir: PathBuf,
+    warm: Mutex<Option<WarmAnalysis>>,
+    analyses: AtomicUsize,
 }
 
 impl Server {
@@ -61,7 +74,35 @@ impl Server {
         Self {
             workspace,
             cache_dir,
+            warm: Mutex::new(None),
+            analyses: AtomicUsize::new(0),
         }
+    }
+
+    /// How many times analysis has actually run (cold + each BUILD change). Stays
+    /// flat across rebuilds of an unchanged BUILD — the warm-reuse signal.
+    pub fn analyses_run(&self) -> usize {
+        self.analyses.load(Ordering::SeqCst)
+    }
+
+    /// Analyze `build_src`, reusing the warm cache when its content digest is
+    /// unchanged. Returns the analyzed targets (cloned out so execution doesn't
+    /// hold the lock).
+    fn warm_analyze(&self, build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
+        let digest = Digest::of(build_src.as_bytes());
+        let mut warm = self.warm.lock().unwrap();
+        if let Some(w) = warm.as_ref()
+            && w.build_digest == digest
+        {
+            return Ok(w.targets.clone()); // warm hit — no re-analysis
+        }
+        let targets = analyze_build(build_src)?;
+        self.analyses.fetch_add(1, Ordering::SeqCst);
+        *warm = Some(WarmAnalysis {
+            build_digest: digest,
+            targets: targets.clone(),
+        });
+        Ok(targets)
     }
 
     /// Bind `socket` (removing a stale file first) and serve until the listener
@@ -123,38 +164,37 @@ impl Server {
             .ok_or_else(|| format!("no BUILD in {}", self.workspace.display()))?;
         let build_src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
         let cache = Cache::new(&self.cache_dir).map_err(|e| e.to_string())?;
+        let targets = self.warm_analyze(&build_src)?;
 
         // Build success vs. action failure both yield a BuildResult (Built/Failed);
         // Err is reserved for protocol/IO problems (no BUILD, unreadable, …).
-        Ok(
-            match build_target_report(&build_src, &name, &self.workspace, &cache) {
-                Ok(report) => BuildResult {
-                    target: target_arg,
-                    status: if report.executed == 0 {
-                        BuildStatus::Cached
-                    } else {
-                        BuildStatus::Built
-                    },
-                    recomputes: report.executed as i64,
-                    outputs: report
-                        .produced
-                        .iter()
-                        .map(|p| OutputArtifact {
-                            path: p.clone(),
-                            digest: digest_of(&self.workspace.join(p)),
-                        })
-                        .collect(),
-                    message: None,
+        Ok(match execute(&targets, &name, &self.workspace, &cache) {
+            Ok(report) => BuildResult {
+                target: target_arg,
+                status: if report.executed == 0 {
+                    BuildStatus::Cached
+                } else {
+                    BuildStatus::Built
                 },
-                Err(e) => BuildResult {
-                    target: target_arg,
-                    status: BuildStatus::Failed,
-                    recomputes: 0,
-                    outputs: vec![],
-                    message: Some(e),
-                },
+                recomputes: report.executed as i64,
+                outputs: report
+                    .produced
+                    .iter()
+                    .map(|p| OutputArtifact {
+                        path: p.clone(),
+                        digest: digest_of(&self.workspace.join(p)),
+                    })
+                    .collect(),
+                message: None,
             },
-        )
+            Err(e) => BuildResult {
+                target: target_arg,
+                status: BuildStatus::Failed,
+                recomputes: 0,
+                outputs: vec![],
+                message: Some(e),
+            },
+        })
     }
 
     fn do_affected(&self, args: &Cbor) -> Result<ImpactSet, String> {
@@ -302,6 +342,38 @@ mod tests {
             (2, Cbor::Null),
         ]));
         assert!(payload(&resp).is_err());
+    }
+
+    #[test]
+    fn warm_daemon_reuses_analysis_until_build_changes() {
+        let ws = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        // A no-op action (no toolchain needed) so the test is cc-independent.
+        let v1 = r#"
+def _impl(ctx):
+    ctx.actions.run(executable = "/usr/bin/true", outputs = [], inputs = [], arguments = [])
+    return [DefaultInfo(files = [])]
+noop = rule(implementation = _impl, attrs = {})
+noop(name = "widget")
+"#;
+        std::fs::write(ws.path().join("BUILD"), v1).unwrap();
+        let srv = Server::new(ws.path().to_path_buf(), cache.path().to_path_buf());
+
+        let build = |s: &Server| payload(&s.dispatch(&req_build("widget"))).expect("build ok");
+
+        // Two builds of the unchanged BUILD: analysis runs once, reused on the 2nd.
+        build(&srv);
+        build(&srv);
+        assert_eq!(srv.analyses_run(), 1, "unchanged BUILD analyzed once");
+
+        // Change the BUILD content → analysis re-runs.
+        std::fs::write(
+            ws.path().join("BUILD"),
+            format!("{v1}\nnoop(name = \"extra\")\n"),
+        )
+        .unwrap();
+        build(&srv);
+        assert_eq!(srv.analyses_run(), 2, "changed BUILD re-analyzed");
     }
 
     #[test]

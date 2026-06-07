@@ -14,7 +14,9 @@ use razel_analysis::wire_to_ir;
 use razel_core::{Digest, FileId, TargetId};
 use razel_exec::{Cache, build_action};
 use razel_ir::TargetKind;
-use razel_loading::{AnalyzedTarget, analyze_starlark};
+use razel_loading::analyze_starlark;
+// Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
+pub use razel_loading::AnalyzedTarget;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
@@ -102,6 +104,12 @@ pub fn build_target(
     Ok(build_target_report(build_src, target, exec_root, cache)?.produced)
 }
 
+/// Analysis only: run the BUILD's rules and capture each target's actions. Split out
+/// from execution so a warm daemon can cache it and skip re-parsing an unchanged BUILD.
+pub fn analyze_build(build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
+    analyze_starlark("BUILD", build_src)
+}
+
 /// Like [`build_target`] but also reports how many actions executed (cache misses) —
 /// the basis for `Cached` vs `Built` status and the `recomputes` metric.
 pub fn build_target_report(
@@ -110,9 +118,21 @@ pub fn build_target_report(
     exec_root: &Path,
     cache: &Cache,
 ) -> Result<BuildReport, String> {
-    let by_name: HashMap<String, AnalyzedTarget> = analyze_starlark("BUILD", build_src)?
-        .into_iter()
-        .map(|t| (t.name.clone(), t))
+    execute(&analyze_build(build_src)?, target, exec_root, cache)
+}
+
+/// Execute a pre-analyzed target graph: order deps-first and run every action in
+/// `exec_root` (cache hit → 0 exec). Separated from [`analyze_build`] so callers
+/// (the daemon) can reuse warm analysis across builds.
+pub fn execute(
+    targets: &[AnalyzedTarget],
+    target: &str,
+    exec_root: &Path,
+    cache: &Cache,
+) -> Result<BuildReport, String> {
+    let by_name: HashMap<String, AnalyzedTarget> = targets
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
         .collect();
 
     let mut order = Vec::new();
