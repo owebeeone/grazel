@@ -472,6 +472,42 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
     }
 
     #[test]
+    fn copts_and_propagated_defines_reach_the_compiler() {
+        if !Path::new("/usr/bin/c++").exists() || !Path::new("/usr/bin/ar").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // lib exports a define; the binary inherits it (propagation) and adds its own
+        // via copts (local). main computes LIBVAL + BINVAL.
+        w(
+            "lib/BUILD",
+            "load(\"@rules_cc//cc:cc_library.bzl\", \"cc_library\")\ncc_library(name = \"v\", srcs = [\"v.cc\"], defines = [\"LIBVAL=10\"])\n",
+        );
+        w("lib/v.cc", "int v_unused() { return 0; }\n");
+        w(
+            "app/BUILD",
+            "load(\"@rules_cc//cc:cc_binary.bzl\", \"cc_binary\")\ncc_binary(name = \"prog\", srcs = [\"main.cc\"], deps = [\"//lib:v\"], copts = [\"-DBINVAL=5\"])\n",
+        );
+        w(
+            "app/main.cc",
+            "#include <iostream>\nint main() { std::cout << (LIBVAL + BINVAL) << std::endl; return 0; }\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // Without copts/defines wired, main.cc wouldn't compile (LIBVAL/BINVAL undefined).
+        build_workspace(root.path(), "//app:prog", &cache).unwrap();
+        let out = std::process::Command::new(root.path().join("app/prog"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "15");
+    }
+
+    #[test]
     fn builds_via_a_custom_bzl_macro() {
         if !Path::new("/usr/bin/c++").exists() {
             return;

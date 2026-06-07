@@ -47,6 +47,9 @@ pub struct AnalyzedTarget {
     /// Headers this target exports to dependents (cc_library `hdrs`, transitively).
     /// Bazel makes these explicit, so they double as the dependents' sandbox inputs.
     pub hdrs: Vec<String>,
+    /// Compile flags this target exports to dependents — its `defines` (`-D…`) and
+    /// `includes` (`-I…`), transitively. (Local `copts` are NOT exported.)
+    pub cflags: Vec<String>,
 }
 
 #[derive(Default)]
@@ -443,34 +446,46 @@ fn record_target(t: AnalyzedTarget) {
     STATE.with_borrow_mut(|s| s.targets.push(t));
 }
 
-/// Resolve a dep label to (its linkable outputs, its exported hdrs, bare name).
-/// Resolve a dep label to (its linkable outputs, exported hdrs, canonical label).
-/// In workspace mode a cross-package dep whose package isn't loaded yet is loaded
-/// on demand; in single-package mode a forward/cross reference errors clearly.
-fn resolve_dep(label: &str) -> anyhow::Result<(Vec<String>, Vec<String>, String)> {
+/// What a dep contributes to its users: linkable outputs, exported hdrs, exported
+/// compile flags (defines/includes), and its canonical label.
+struct DepInfo {
+    libs: Vec<String>,
+    hdrs: Vec<String>,
+    cflags: Vec<String>,
+    canon: String,
+}
+
+/// Resolve a dep label to its [`DepInfo`]. In workspace mode a cross-package dep
+/// whose package isn't loaded yet is loaded on demand; otherwise a forward/cross
+/// reference errors clearly.
+fn resolve_dep(label: &str) -> anyhow::Result<DepInfo> {
     let canon = canon_label(label);
-    let hit = RESULTS.with_borrow(|r| {
-        r.get(&canon)
-            .map(|t| (t.default_info.clone(), t.hdrs.clone()))
-    });
-    if let Some((libs, hdrs)) = hit {
-        return Ok((libs, hdrs, canon));
-    }
-    // Workspace mode: pull in the dep's package, then retry.
-    if WORKSPACE.with_borrow(|w| w.is_some())
-        && let Some(pkg) = pkg_of(&canon)
-    {
-        load_package(&pkg).map_err(|e| anyhow::anyhow!(e))?;
-        if let Some((libs, hdrs)) = RESULTS.with_borrow(|r| {
+    let get = || {
+        RESULTS.with_borrow(|r| {
             r.get(&canon)
-                .map(|t| (t.default_info.clone(), t.hdrs.clone()))
-        }) {
-            return Ok((libs, hdrs, canon));
+                .map(|t| (t.default_info.clone(), t.hdrs.clone(), t.cflags.clone()))
+        })
+    };
+    let hit = get().or_else(|| {
+        // Workspace mode: pull in the dep's package, then retry.
+        if WORKSPACE.with_borrow(|w| w.is_some()) {
+            if let Some(pkg) = pkg_of(&canon) {
+                let _ = load_package(&pkg);
+            }
         }
-    }
-    Err(anyhow::anyhow!(
-        "dep `{label}` not analyzed — declare it before its users (cyclic or missing package)"
-    ))
+        get()
+    });
+    let Some((libs, hdrs, cflags)) = hit else {
+        return Err(anyhow::anyhow!(
+            "dep `{label}` not analyzed — declare it before its users (cyclic or missing package)"
+        ));
+    };
+    Ok(DepInfo {
+        libs,
+        hdrs,
+        cflags,
+        canon,
+    })
 }
 
 #[starlark::starlark_module]
@@ -480,22 +495,31 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] srcs: Option<UnpackList<String>>,
         #[starlark(require = named)] hdrs: Option<UnpackList<String>>,
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] copts: Option<UnpackList<String>>,
+        #[starlark(require = named)] defines: Option<UnpackList<String>>,
+        #[starlark(require = named)] includes: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
-        let srcs = srcs.map(|l| l.items).unwrap_or_default();
-        let hdrs = hdrs.map(|l| l.items).unwrap_or_default();
-        let deps = deps.map(|l| l.items).unwrap_or_default();
+        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
+        let hdrs: Vec<String> = unpack(hdrs).iter().map(|h| qualify(h)).collect();
+        let copts = unpack(copts);
 
-        // Package-qualify own srcs/hdrs (workspace mode); resolve deps to canon labels.
-        let srcs: Vec<String> = srcs.iter().map(|s| qualify(s)).collect();
-        let hdrs: Vec<String> = hdrs.iter().map(|h| qualify(h)).collect();
-        let (mut dep_names, mut dep_hdrs) = (Vec::new(), Vec::new());
-        for d in &deps {
-            let (_, h, n) = resolve_dep(d)?;
-            dep_hdrs.extend(h);
-            dep_names.push(n);
+        let (mut dep_names, mut dep_hdrs, mut dep_cflags) = (Vec::new(), Vec::new(), Vec::new());
+        for d in &unpack(deps) {
+            let dep = resolve_dep(d)?;
+            dep_hdrs.extend(dep.hdrs);
+            dep_cflags.extend(dep.cflags);
+            dep_names.push(dep.canon);
         }
-        // own + transitive headers are present for compiling this lib's srcs.
+
+        // Exported flags (propagate to dependents): own defines/includes + dep cflags.
+        let mut export_cflags = define_flags(defines);
+        export_cflags.extend(include_flags(includes));
+        export_cflags.extend(dep_cflags);
+        // This lib's own compiles also see its local copts.
+        let mut compile_flags = copts;
+        compile_flags.extend(export_cflags.iter().cloned());
+
         let mut avail_hdrs = hdrs.clone();
         avail_hdrs.extend(dep_hdrs.iter().cloned());
 
@@ -504,7 +528,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             let o = format!("{s}.o");
             let mut inputs = vec![s.clone()];
             inputs.extend(avail_hdrs.iter().cloned());
-            actions.push(compile_action(s, &o, inputs));
+            actions.push(compile_action(s, &o, &compile_flags, inputs));
             objs.push(o);
         }
         let lib = qualify(&format!("lib{name}.a"));
@@ -525,6 +549,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             actions,
             default_info: vec![lib],
             hdrs: export_hdrs,
+            cflags: export_cflags,
         });
         Ok(NoneType)
     }
@@ -533,26 +558,29 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<UnpackList<String>>,
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] copts: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
-        let srcs = srcs.map(|l| l.items).unwrap_or_default();
-        let deps = deps.map(|l| l.items).unwrap_or_default();
-
-        let srcs: Vec<String> = srcs.iter().map(|s| qualify(s)).collect();
-        let (mut dep_names, mut dep_libs, mut dep_hdrs) = (Vec::new(), Vec::new(), Vec::new());
-        for d in &deps {
-            let (libs, h, n) = resolve_dep(d)?;
-            dep_libs.extend(libs);
-            dep_hdrs.extend(h);
-            dep_names.push(n);
+        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
+        let (mut dep_names, mut dep_libs, mut dep_hdrs, mut dep_cflags) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for d in &unpack(deps) {
+            let dep = resolve_dep(d)?;
+            dep_libs.extend(dep.libs);
+            dep_hdrs.extend(dep.hdrs);
+            dep_cflags.extend(dep.cflags);
+            dep_names.push(dep.canon);
         }
+        // Binary compiles see local copts + the deps' exported flags.
+        let mut compile_flags = unpack(copts);
+        compile_flags.extend(dep_cflags);
 
         let (mut actions, mut objs) = (Vec::new(), Vec::new());
         for s in &srcs {
             let o = format!("{s}.o");
             let mut inputs = vec![s.clone()];
             inputs.extend(dep_hdrs.iter().cloned());
-            actions.push(compile_action(s, &o, inputs));
+            actions.push(compile_action(s, &o, &compile_flags, inputs));
             objs.push(o);
         }
         let out = qualify(&name);
@@ -573,25 +601,39 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             actions,
             default_info: vec![out],
             hdrs: Vec::new(),
+            cflags: Vec::new(),
         });
         Ok(NoneType)
     }
 }
 
+fn unpack(list: Option<UnpackList<String>>) -> Vec<String> {
+    list.map(|l| l.items).unwrap_or_default()
+}
+
+/// `defines = ["FOO=1"]` → `["-DFOO=1"]`.
+fn define_flags(defines: Option<UnpackList<String>>) -> Vec<String> {
+    unpack(defines).iter().map(|d| format!("-D{d}")).collect()
+}
+
+/// `includes = ["inc"]` → `["-Ipkg/inc"]` (package-qualified include dirs).
+fn include_flags(includes: Option<UnpackList<String>>) -> Vec<String> {
+    unpack(includes)
+        .iter()
+        .map(|i| format!("-I{}", qualify(i)))
+        .collect()
+}
+
 /// A C++ compile action. `-iquote .` makes workspace-root-relative quote-includes
-/// (`#include "pkg/x.h"`) resolve from the sandbox root (= exec root).
-fn compile_action(src: &str, obj: &str, inputs: Vec<String>) -> AnalyzedAction {
+/// (`#include "pkg/x.h"`) resolve from the sandbox root (= exec root); `flags` are
+/// the target's copts + transitive defines/includes.
+fn compile_action(src: &str, obj: &str, flags: &[String], inputs: Vec<String>) -> AnalyzedAction {
+    let mut argv = vec![CXX.into(), "-iquote".into(), ".".into()];
+    argv.extend(flags.iter().cloned());
+    argv.extend(["-c".into(), src.into(), "-o".into(), obj.into()]);
     AnalyzedAction {
         mnemonic: "CppCompile".into(),
-        argv: vec![
-            CXX.into(),
-            "-iquote".into(),
-            ".".into(),
-            "-c".into(),
-            src.into(),
-            "-o".into(),
-            obj.into(),
-        ],
+        argv,
         inputs,
         outputs: vec![obj.into()],
     }
