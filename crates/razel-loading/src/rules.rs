@@ -358,6 +358,31 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc(RuleObjGen { implementation }))
     }
 
+    /// `Label("//pkg:name")` — a minimal Label exposing `.package`/`.name`/
+    /// `.workspace_root`/`.workspace_name`. razel treats everything as the main repo,
+    /// so workspace_root/workspace_name are empty (matching Bazel on the main repo).
+    #[allow(non_snake_case)]
+    fn Label<'v>(
+        #[starlark(require = pos)] s: String,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let after = s.rsplit_once("//").map(|(_, a)| a).unwrap_or(s.as_str());
+        let (pkg, name) = match after.split_once(':') {
+            Some((p, n)) => (p.to_string(), n.to_string()),
+            None => (
+                after.to_string(),
+                after.rsplit('/').next().unwrap_or(after).to_string(),
+            ),
+        };
+        let heap = eval.heap();
+        Ok(heap.alloc(AllocStruct([
+            ("package".to_string(), heap.alloc(pkg)),
+            ("name".to_string(), heap.alloc(name)),
+            ("workspace_root".to_string(), heap.alloc(String::new())),
+            ("workspace_name".to_string(), heap.alloc(String::new())),
+        ])))
+    }
+
     /// BUILD package-declaration builtins. razel doesn't enforce visibility/licenses
     /// and tracks no separate file-export set, so these are no-op declarations —
     /// recognized so real BUILD files evaluate. (`package`, `package_group`,
@@ -486,29 +511,33 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] exclude: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<Vec<String>> {
-        let include = include.items;
-        let exclude = exclude.map(|l| l.items).unwrap_or_default();
-        let dir = WORKSPACE
-            .with_borrow(|w| w.clone())
-            .zip(CURRENT_PKG.with_borrow(|p| p.clone()))
-            .map(|(root, pkg)| root.join(&pkg));
-        let Some(dir) = dir else {
-            return Err(anyhow::anyhow!(
-                "glob() needs a package on disk — use the workspace build path"
-            ));
-        };
-        let mut files = Vec::new();
-        walk_files(&dir, &dir, &mut files);
-        let mut out: Vec<String> = files
-            .into_iter()
-            .filter(|f| {
-                include.iter().any(|p| crate::glob_match(p, f))
-                    && !exclude.iter().any(|p| crate::glob_match(p, f))
-            })
-            .collect();
-        out.sort();
-        Ok(out)
+        do_glob(include.items, exclude.map(|l| l.items).unwrap_or_default())
     }
+}
+
+/// Shared `glob()`/`native.glob()` implementation: scan the current package dir
+/// against the include/exclude patterns, package-relative, sorted.
+fn do_glob(include: Vec<String>, exclude: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let dir = WORKSPACE
+        .with_borrow(|w| w.clone())
+        .zip(CURRENT_PKG.with_borrow(|p| p.clone()))
+        .map(|(root, pkg)| root.join(&pkg));
+    let Some(dir) = dir else {
+        return Err(anyhow::anyhow!(
+            "glob() needs a package on disk — use the workspace build path"
+        ));
+    };
+    let mut files = Vec::new();
+    walk_files(&dir, &dir, &mut files);
+    let mut out: Vec<String> = files
+        .into_iter()
+        .filter(|f| {
+            include.iter().any(|p| crate::glob_match(p, f))
+                && !exclude.iter().any(|p| crate::glob_match(p, f))
+        })
+        .collect();
+    out.sort();
+    Ok(out)
 }
 
 /// Recursively collect files under `dir` as paths relative to `base` (skipping
@@ -885,11 +914,64 @@ copy_file = native_copy_file\n";
     })
 }
 
+/// Helpers from Bazel's **auto-configured** repos (`@local_config_rocm`,
+/// `@local_config_cuda`, …). Bazel generates these by probing the host for a
+/// CUDA/ROCm install; razel has no such toolchain, so every `if_<x>_is_configured`
+/// resolves to **not configured** — it returns its false branch (default `[]`), the
+/// same value real Bazel yields on a CPU-only checkout.
+#[starlark::starlark_module]
+fn auto_config_fns(b: &mut GlobalsBuilder) {
+    fn native_if_not_configured<'v>(
+        #[starlark(require = pos)] _if_true: Value<'v>,
+        #[starlark(require = pos)] if_false: Option<Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(if_false.unwrap_or_else(|| eval.heap().alloc(Vec::<Value<'v>>::new())))
+    }
+}
+
+/// A synthetic auto-config repo module: maps every `if_<x>_is_configured` name to the
+/// not-configured helper.
+fn auto_config_module(reexport: &str) -> Result<FrozenModule, String> {
+    let globals = GlobalsBuilder::standard().with(auto_config_fns).build();
+    Module::with_temp_heap(|module| {
+        let ast = AstModule::parse("@local_config", reexport.to_owned(), &Dialect::Extended)
+            .map_err(|e| format!("{e}"))?;
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.eval_module(ast, &globals)
+                .map_err(|e| format!("{e}"))?;
+        }
+        module.freeze().map_err(|e| format!("{e:?}"))
+    })
+}
+
 /// The globals available to BUILD and `.bzl` evaluation: `rule()`, `DefaultInfo`,
 /// `select`, `define_config`, `glob`, + struct. (cc rules arrive via `load()`.)
+/// The Bazel `native.*` namespace (minimal): package/repo introspection + `glob`.
+/// razel treats the analyzed package as the only context (main repo), so
+/// `package_name` is the current package and `repository_name` is `@`.
+#[starlark::starlark_module]
+fn native_members(b: &mut GlobalsBuilder) {
+    fn package_name() -> anyhow::Result<String> {
+        Ok(CURRENT_PKG.with_borrow(|p| p.clone()).unwrap_or_default())
+    }
+    fn repository_name() -> anyhow::Result<String> {
+        Ok("@".to_string())
+    }
+    fn glob<'v>(
+        #[starlark(require = pos)] include: UnpackList<String>,
+        #[starlark(require = named)] exclude: Option<UnpackList<String>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<Vec<String>> {
+        do_glob(include.items, exclude.map(|l| l.items).unwrap_or_default())
+    }
+}
+
 fn build_globals() -> Globals {
     GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
         .with(rule_globals)
+        .with(|b| b.namespace("native", native_members))
         .build()
 }
 
@@ -976,6 +1058,16 @@ fn ruleset_modules() -> Result<Vec<Ruleset>, String> {
         Ruleset {
             prefix: "@bazel_skylib//",
             module: rules_skylib_module()?,
+        },
+        Ruleset {
+            prefix: "@local_config_rocm//",
+            module: auto_config_module("if_rocm_is_configured = native_if_not_configured\n")?,
+        },
+        // CUDA config helper lives in a specific @xla file — register the exact path
+        // (not the whole @xla// prefix, which is a real source repo, not a shim).
+        Ruleset {
+            prefix: "@xla//xla/tsl/platform/default:cuda_build_defs.bzl",
+            module: auto_config_module("if_cuda_is_configured = native_if_not_configured\n")?,
         },
         Ruleset {
             prefix: "@rules_rust//",

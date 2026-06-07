@@ -689,6 +689,43 @@ cc_binary(name = \"prog\", srcs = [\"main.cc\"])\n",
     }
 
     #[test]
+    fn label_native_and_autoconfig_helpers_evaluate() {
+        // Label(), native.package_name(), and an auto-config helper (if_rocm_is_configured
+        // → not configured) are exercised during BUILD eval; the cc_binary still builds
+        // (gpu.cc is dropped because ROCm is "not configured").
+        if !Path::new("/usr/bin/c++").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "pkg/BUILD",
+            "load(\"@rules_cc//cc:cc_binary.bzl\", \"cc_binary\")\n\
+load(\"@local_config_rocm//rocm:build_defs.bzl\", \"if_rocm_is_configured\")\n\
+_lbl = Label(\"//pkg:prog\")\n\
+_here = native.package_name()\n\
+cc_binary(name = \"prog\", srcs = [\"main.cc\"] + if_rocm_is_configured([\"gpu.cc\"]))\n",
+        );
+        w(
+            "pkg/main.cc",
+            "#include <iostream>\nint main() { std::cout << \"ok\" << std::endl; return 0; }\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // gpu.cc doesn't exist; if the not-configured helper didn't drop it, this fails.
+        let report = build_workspace(root.path(), "//pkg:prog", &cache).unwrap();
+        assert!(report.produced.contains(&"pkg/prog".to_string()));
+        let out = std::process::Command::new(root.path().join("pkg/prog"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+    }
+
+    #[test]
     fn builds_via_a_rule_defined_in_a_loaded_bzl() {
         // The freeze-fix payoff: a custom `rule()` defined in a .bzl and load()ed.
         // Before RuleObj was freezable, freezing the loaded .bzl module errored here.
