@@ -384,6 +384,55 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
+    /// Native build-graph builtins razel recognizes so real BUILD files evaluate.
+    /// `config_setting`/`test_suite`/`alias` carry no buildable output here, so they
+    /// record an empty target under their label (analysis-visible, builds to nothing);
+    /// `filegroup` forwards its `srcs` as its outputs so dependents resolve them.
+    fn config_setting<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_target(AnalyzedTarget {
+            name: canon_label(&name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+    fn test_suite<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_target(AnalyzedTarget {
+            name: canon_label(&name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+    fn alias<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_target(AnalyzedTarget {
+            name: canon_label(&name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+    fn filegroup<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        let files: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
+        record_target(AnalyzedTarget {
+            name: canon_label(&name),
+            default_info: files.clone(),
+            hdrs: files,
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+
     /// `DefaultInfo(files=[…])` — the standard output provider (other kwargs absorbed).
     fn DefaultInfo<'v>(
         #[starlark(require = named)] files: Option<UnpackList<String>>,
@@ -721,6 +770,121 @@ fn rules_cc_module() -> Result<FrozenModule, String> {
     })
 }
 
+/// Record an analysis-visible target with no actions (a build-graph placeholder).
+fn record_named(name: &str) {
+    record_target(AnalyzedTarget {
+        name: canon_label(name),
+        ..Default::default()
+    });
+}
+
+/// `@bazel_skylib` rules razel recognizes as no-op/minimal targets: `bzl_library`,
+/// the build/diff test wrappers, the `common_settings` build-setting flags, and the
+/// small codegen rules. razel enforces no build settings and tracks no .bzl
+/// libraries, so these are analysis-visible placeholders (they build to nothing).
+/// skylib's *lib* helpers (`selects`/`paths`/`sets`) are pure-Starlark namespaces —
+/// handled separately as TF reaches them.
+#[allow(non_snake_case)]
+#[starlark::starlark_module]
+fn skylib_rules(b: &mut GlobalsBuilder) {
+    fn native_bzl_library<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_build_test<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_diff_test<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_string_flag<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_bool_flag<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_int_flag<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_string_list_flag<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_string_setting<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_expand_template<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+    fn native_copy_file<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        record_named(&name);
+        Ok(NoneType)
+    }
+}
+
+/// The synthetic `@bazel_skylib` module — re-exports the skylib rules under their
+/// load names.
+fn rules_skylib_module() -> Result<FrozenModule, String> {
+    let globals = GlobalsBuilder::standard().with(skylib_rules).build();
+    let reexport = "bzl_library = native_bzl_library\n\
+build_test = native_build_test\n\
+diff_test = native_diff_test\n\
+string_flag = native_string_flag\n\
+bool_flag = native_bool_flag\n\
+int_flag = native_int_flag\n\
+string_list_flag = native_string_list_flag\n\
+string_setting = native_string_setting\n\
+expand_template = native_expand_template\n\
+copy_file = native_copy_file\n";
+    Module::with_temp_heap(|module| {
+        let ast = AstModule::parse("@bazel_skylib", reexport.to_owned(), &Dialect::Extended)
+            .map_err(|e| format!("{e}"))?;
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.eval_module(ast, &globals)
+                .map_err(|e| format!("{e}"))?;
+        }
+        module.freeze().map_err(|e| format!("{e:?}"))
+    })
+}
+
 /// The globals available to BUILD and `.bzl` evaluation: `rule()`, `DefaultInfo`,
 /// `select`, `define_config`, `glob`, + struct. (cc rules arrive via `load()`.)
 fn build_globals() -> Globals {
@@ -808,6 +972,10 @@ fn ruleset_modules() -> Result<Vec<Ruleset>, String> {
         Ruleset {
             prefix: "@rules_cc//",
             module: rules_cc_module()?,
+        },
+        Ruleset {
+            prefix: "@bazel_skylib//",
+            module: rules_skylib_module()?,
         },
         Ruleset {
             prefix: "@rules_rust//",

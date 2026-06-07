@@ -649,6 +649,46 @@ cc_binary(name = \"prog\", srcs = [\"main.cc\"])\n",
     }
 
     #[test]
+    fn recognizes_build_graph_and_skylib_builtins() {
+        // config_setting/filegroup/alias/test_suite + skylib (bzl_library/string_flag)
+        // are recognized so a real BUILD evaluates; the cc_binary alongside still builds.
+        if !Path::new("/usr/bin/c++").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "pkg/BUILD",
+            "load(\"@rules_cc//cc:cc_binary.bzl\", \"cc_binary\")\n\
+load(\"@bazel_skylib//:bzl_library.bzl\", \"bzl_library\")\n\
+load(\"@bazel_skylib//rules:common_settings.bzl\", \"string_flag\")\n\
+config_setting(name = \"dbg\", values = {\"compilation_mode\": \"dbg\"})\n\
+filegroup(name = \"data\", srcs = [\"a.txt\"])\n\
+alias(name = \"prog_alias\", actual = \":prog\")\n\
+test_suite(name = \"all_tests\", tests = [])\n\
+string_flag(name = \"mode\", build_setting_default = \"x\")\n\
+bzl_library(name = \"defs_lib\", srcs = [\"defs.bzl\"])\n\
+cc_binary(name = \"prog\", srcs = [\"main.cc\"])\n",
+        );
+        w(
+            "pkg/main.cc",
+            "#include <iostream>\nint main() { std::cout << \"ok\" << std::endl; return 0; }\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let report = build_workspace(root.path(), "//pkg:prog", &cache).unwrap();
+        assert!(report.produced.contains(&"pkg/prog".to_string()));
+        let out = std::process::Command::new(root.path().join("pkg/prog"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+    }
+
+    #[test]
     fn builds_via_a_rule_defined_in_a_loaded_bzl() {
         // The freeze-fix payoff: a custom `rule()` defined in a .bzl and load()ed.
         // Before RuleObj was freezable, freezing the loaded .bzl module errored here.
