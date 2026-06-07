@@ -29,6 +29,12 @@ pub enum Materialize {
     /// Hardlink the source into the sandbox — zero copy, same inode, stays
     /// "inside" (survives a future mount-namespace). Requires the same
     /// filesystem; falls back to a symlink across devices.
+    ///
+    /// Caveat for *reused* sandboxes: a hardlink tracks the inode, so an in-place
+    /// edit (truncate+write) is reflected automatically, but a *rename-replace*
+    /// edit (new inode) leaves a stale link until re-materialized. Digest-aware
+    /// refresh on content change is the remote-exec-grade follow-up; symlink mode
+    /// (the default) tracks the path and has no such caveat.
     Hardlink,
 }
 
@@ -200,6 +206,26 @@ mod tests {
             .sync_inputs(exec.path(), &["a".into(), "c".into()])
             .unwrap();
         assert_eq!(n3, 0, "input set unchanged → no link work");
+    }
+
+    #[test]
+    fn hardlink_materialization_is_zero_copy() {
+        use std::os::unix::fs::MetadataExt;
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("a"), "data").unwrap();
+        // Sandbox under exec → guaranteed same filesystem → real hardlink (no fallback).
+        let mut sb = Sandbox::persistent(exec.path().join(".sb"), Materialize::Hardlink).unwrap();
+        sb.sync_inputs(exec.path(), &["a".into()]).unwrap();
+
+        let entry = sb.dir().join("a");
+        // It's a real file (a hardlink), NOT a symlink...
+        let lst = std::fs::symlink_metadata(&entry).unwrap();
+        assert!(!lst.file_type().is_symlink(), "hardlink, not symlink");
+        // ...sharing the source's inode (zero byte copy), source link count >= 2.
+        let src = std::fs::metadata(exec.path().join("a")).unwrap();
+        let dst = std::fs::metadata(&entry).unwrap();
+        assert_eq!(src.ino(), dst.ino(), "hardlink shares the inode");
+        assert!(src.nlink() >= 2, "source now has >= 2 links");
     }
 
     #[test]

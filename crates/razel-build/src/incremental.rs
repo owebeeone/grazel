@@ -290,6 +290,35 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
     }
 
     #[test]
+    fn builds_correctly_with_hardlink_materialization() {
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("x.txt"), "hello").unwrap();
+        std::fs::write(exec.path().join("y.txt"), "world").unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // Zero-copy hardlink materialization (sandbox is under exec → same fs).
+        let mut b =
+            IncrementalBuilder::new(exec.path(), cache).with_materialize(Materialize::Hardlink);
+        b.configure(BUILD).unwrap();
+
+        assert_eq!(b.build("lib").unwrap(), 3);
+        assert_eq!(
+            std::fs::read_to_string(exec.path().join("x.txt.out")).unwrap(),
+            "hello"
+        );
+
+        // In-place edit (truncate+write) → only the affected action recomputes,
+        // and the hardlink reflects the new content.
+        std::fs::write(exec.path().join("x.txt"), "HELLO").unwrap();
+        b.sync_file("x.txt");
+        assert_eq!(b.build("lib").unwrap(), 2, "only act(x) + tgt recompute");
+        assert_eq!(
+            std::fs::read_to_string(exec.path().join("x.txt.out")).unwrap(),
+            "HELLO"
+        );
+    }
+
+    #[test]
     fn incremental_matches_a_fresh_build_of_the_final_state() {
         if !Path::new("/bin/sh").exists() {
             return;
