@@ -1,12 +1,21 @@
 //! `cargo xtask` — project automation.
 //!
-//! `codegen`         regenerate `crates/razel-wire/src/generated.rs` from the taut IR
-//! `codegen --check` fail (exit 2) if the committed output is stale vs. the IR
+//! `codegen [--check]`  regenerate `crates/razel-wire/src/generated.rs` from the
+//!                      taut IR (types + CBOR codec)
+//! `corpus  [--check]`  regenerate `crates/razel-wire/src/vectors.rs` — the golden
+//!                      cross-language corpus, encoded by taut's Python codec
 //!
-//! Generation shells out to `tautc` (the Python taut codegen CLI) — deliberately
-//! kept OUT of `cargo build` so the crate graph stays pure-Rust and offline. The
-//! command is `tautc` by default; override with `$TAUTC` (e.g. for an uninstalled
-//! checkout: `TAUTC="python3 -m taut.cli" PYTHONPATH=../taut/src cargo xtask codegen`).
+//! `--check` fails (exit 2) if the committed output is stale. Both shell out to
+//! Python (`tautc` / `corpus.py`) — deliberately kept OUT of `cargo build` so the
+//! crate graph stays pure-Rust and offline — then run the output through rustfmt
+//! so the committed file is repo-consistent AND drift-stable (regeneration is
+//! deterministic, so committed == freshly-formatted).
+//!
+//! Tool resolution is via env, with the caller supplying `taut` on PYTHONPATH:
+//!   TAUTC   codegen CLI       (default `tautc`)
+//!   PYTHON  interpreter       (default `python3`, used for corpus.py)
+//! e.g. `TAUTC="python3 -m taut.cli" PYTHONPATH=../taut/src cargo xtask codegen`
+//!      `PYTHONPATH=../taut/src cargo xtask corpus --check`
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -21,18 +30,19 @@ fn workspace_root() -> PathBuf {
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("codegen") => {
-            let check = args.next().as_deref() == Some("--check");
-            codegen(check)
-        }
+    let cmd = args.next();
+    let check = args.next().as_deref() == Some("--check");
+    match cmd.as_deref() {
+        Some("codegen") => codegen(check),
+        Some("corpus") => corpus(check),
         other => {
-            eprintln!("unknown xtask {other:?}\nusage: cargo xtask codegen [--check]");
+            eprintln!("unknown xtask {other:?}\nusage: cargo xtask <codegen|corpus> [--check]");
             ExitCode::from(64)
         }
     }
 }
 
+/// Regenerate the wire types + codec from the taut IR via `tautc`.
 fn codegen(check: bool) -> ExitCode {
     let root = workspace_root();
     let schema = root.join("crates/razel-wire/wire/razel.taut.py");
@@ -40,7 +50,6 @@ fn codegen(check: bool) -> ExitCode {
     let out_dir = std::env::temp_dir().join("razel-wire-codegen");
     let _ = std::fs::remove_dir_all(&out_dir);
 
-    // `tautc gen <schema> -o <tmp> -l rust --api-only`  (override binary via $TAUTC)
     let tautc = std::env::var("TAUTC").unwrap_or_else(|_| "tautc".into());
     let mut parts = tautc.split_whitespace();
     let prog = parts.next().expect("empty $TAUTC");
@@ -52,58 +61,90 @@ fn codegen(check: bool) -> ExitCode {
         .arg(&out_dir)
         .args(["-l", "rust", "--api-only"])
         .status();
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("tautc failed: {s}");
+    if let Err(code) = ok_status(
+        status,
+        &tautc,
+        "is taut installed? (pip install -e ../taut)",
+    ) {
+        return code;
+    }
+    finalize(&out_dir.join("rust/api.rs"), &target, "codegen", check)
+}
+
+/// Regenerate the golden corpus via `corpus.py --stdout`.
+fn corpus(check: bool) -> ExitCode {
+    let root = workspace_root();
+    let script = root.join("crates/razel-wire/wire/corpus.py");
+    let target = root.join("crates/razel-wire/src/vectors.rs");
+    let raw = std::env::temp_dir().join("razel-wire-vectors.rs");
+
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
+    let out = Command::new(&python).arg(&script).arg("--stdout").output();
+    let out = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(o) => {
+            eprintln!("corpus.py failed: {}", String::from_utf8_lossy(&o.stderr));
             return ExitCode::FAILURE;
         }
         Err(e) => {
             eprintln!(
-                "could not run tautc ({tautc:?}): {e}\nis the taut tool installed? (pip install -e ../taut)"
+                "could not run {python:?} on corpus.py: {e}\n  PYTHONPATH must include taut (PYTHONPATH=../taut/src)"
             );
             return ExitCode::FAILURE;
         }
+    };
+    if let Err(e) = std::fs::write(&raw, out) {
+        eprintln!("could not write temp corpus: {e}");
+        return ExitCode::FAILURE;
     }
+    finalize(&raw, &target, "corpus", check)
+}
 
-    // Format the raw tautc output with rustfmt so the committed file is both
-    // repo-consistent and drift-stable: `cargo fmt` can't change it (already
-    // formatted) and `--check` compares formatted-to-formatted. rustfmt is
-    // deterministic, so regeneration reproduces byte-identical output.
-    let raw = out_dir.join("rust/api.rs");
+/// rustfmt `raw` in place, then compare to / overwrite `target`.
+fn finalize(raw: &Path, target: &Path, label: &str, check: bool) -> ExitCode {
     let fmt = Command::new("rustfmt")
         .args(["--edition", "2024"])
-        .arg(&raw)
+        .arg(raw)
         .status();
-    match fmt {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("rustfmt failed: {s}");
-            return ExitCode::FAILURE;
-        }
-        Err(e) => {
-            eprintln!("could not run rustfmt: {e}");
-            return ExitCode::FAILURE;
-        }
+    if let Err(code) = ok_status(fmt, &"rustfmt".into(), "is rustfmt installed?") {
+        return code;
     }
-    let fresh = std::fs::read_to_string(&raw).expect("read generated api.rs");
+    let fresh = std::fs::read_to_string(raw).expect("read generated output");
 
     if check {
-        let committed = std::fs::read_to_string(&target).unwrap_or_default();
+        let committed = std::fs::read_to_string(target).unwrap_or_default();
         if committed == fresh {
-            println!("codegen: generated.rs is up to date with the IR");
+            println!("{label}: {} is up to date", target.display());
             ExitCode::SUCCESS
         } else {
             eprintln!(
-                "codegen DRIFT: {} is stale vs {}.\n  run `cargo xtask codegen` and commit.",
-                target.display(),
-                schema.display()
+                "{label} DRIFT: {} is stale.\n  run `cargo xtask {label}` and commit.",
+                target.display()
             );
             ExitCode::from(2)
         }
     } else {
-        std::fs::write(&target, fresh).expect("write generated.rs");
-        println!("codegen: wrote {}", target.display());
+        std::fs::write(target, fresh).expect("write generated output");
+        println!("{label}: wrote {}", target.display());
         ExitCode::SUCCESS
+    }
+}
+
+/// Map a spawned command's status to Ok / an ExitCode to bubble up.
+fn ok_status(
+    status: std::io::Result<std::process::ExitStatus>,
+    prog: &String,
+    hint: &str,
+) -> Result<(), ExitCode> {
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => {
+            eprintln!("{prog} failed: {s}");
+            Err(ExitCode::FAILURE)
+        }
+        Err(e) => {
+            eprintln!("could not run {prog:?}: {e}\n  {hint}");
+            Err(ExitCode::FAILURE)
+        }
     }
 }
