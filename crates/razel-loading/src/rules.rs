@@ -468,10 +468,10 @@ fn resolve_dep(label: &str) -> anyhow::Result<DepInfo> {
     };
     let hit = get().or_else(|| {
         // Workspace mode: pull in the dep's package, then retry.
-        if WORKSPACE.with_borrow(|w| w.is_some()) {
-            if let Some(pkg) = pkg_of(&canon) {
-                let _ = load_package(&pkg);
-            }
+        if WORKSPACE.with_borrow(|w| w.is_some())
+            && let Some(pkg) = pkg_of(&canon)
+        {
+            let _ = load_package(&pkg);
         }
         get()
     });
@@ -490,6 +490,8 @@ fn resolve_dep(label: &str) -> anyhow::Result<DepInfo> {
 
 #[starlark::starlark_module]
 fn cc_rules(b: &mut GlobalsBuilder) {
+    // cc_library legitimately has many named attrs (name/srcs/hdrs/deps/copts/...).
+    #[allow(clippy::too_many_arguments)]
     fn native_cc_library<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<UnpackList<String>>,
