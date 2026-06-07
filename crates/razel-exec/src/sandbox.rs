@@ -21,9 +21,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Cross-platform file symlink. On Windows this needs Developer Mode /
+/// `SeCreateSymbolicLinkPrivilege`, which is why [`Materialize::Hardlink`] is the
+/// unprivileged default there.
+#[cfg(unix)]
+fn symlink_file(src: &Path, dst: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+#[cfg(windows)]
+fn symlink_file(src: &Path, dst: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_file(src, dst)
+}
 
 /// How a declared input is placed into the sandbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -82,9 +93,16 @@ pub fn seatbelt_available() -> bool {
 }
 
 impl Sandbox {
-    /// A fresh, self-deleting sandbox under `root`, named by `tag`.
+    /// A fresh, self-deleting sandbox under `root`, named by `tag`. Defaults to
+    /// hardlink materialization on Windows (symlinks need privilege there),
+    /// symlink elsewhere.
     pub fn transient(root: &Path, tag: &str) -> io::Result<Self> {
-        Self::at(root.join(tag), true, Materialize::Symlink)
+        let how = if cfg!(windows) {
+            Materialize::Hardlink
+        } else {
+            Materialize::Symlink
+        };
+        Self::at(root.join(tag), true, how)
     }
 
     /// A reusable sandbox at a fixed `dir` (not deleted on drop). Across rebuilds
@@ -151,10 +169,10 @@ impl Sandbox {
         }
         let _ = std::fs::remove_file(&link);
         match self.how {
-            Materialize::Symlink => symlink(source, &link),
+            Materialize::Symlink => symlink_file(source, &link),
             // Hardlink needs same-fs; fall back to a symlink across devices.
             Materialize::Hardlink => {
-                std::fs::hard_link(source, &link).or_else(|_| symlink(source, &link))
+                std::fs::hard_link(source, &link).or_else(|_| symlink_file(source, &link))
             }
         }
     }
@@ -283,6 +301,7 @@ mod tests {
         assert_eq!(n3, 0, "input set unchanged → no link work");
     }
 
+    #[cfg(unix)]
     #[test]
     fn hardlink_materialization_is_zero_copy() {
         use std::os::unix::fs::MetadataExt;

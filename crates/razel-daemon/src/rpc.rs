@@ -18,6 +18,7 @@
 //!   request  `{1: method:text, 2: args:cbor}`
 //!   response `{1: ok:bool, 2: payload:cbor|null, 3: error:text|null}`  (one per frame)
 
+use crate::transport;
 use razel_build::{AnalyzedTarget, affected, analyze_build, execute};
 use razel_core::Digest;
 use razel_exec::Cache;
@@ -26,7 +27,6 @@ use razel_wire::{
     VersionInfo, decode, encode,
 };
 use std::io::{self, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -109,23 +109,20 @@ impl Server {
         self.inner.dispatch(req)
     }
 
-    /// Bind `socket` (removing a stale file first) and serve until the listener
-    /// errors. Each connection is handled on its own thread. Blocks.
+    /// Bind the rendezvous `socket` (UDS on unix, loopback TCP on Windows) and
+    /// serve; each connection is handled on its own thread. Blocks.
     pub fn serve(&self, socket: &Path) -> io::Result<()> {
-        let _ = std::fs::remove_file(socket);
-        let listener = UnixListener::bind(socket)?;
-        for conn in listener.incoming() {
-            let conn = conn?;
+        let listener = transport::bind(socket)?;
+        loop {
+            let mut conn = listener.accept()?;
             let inner = self.inner.clone();
             std::thread::spawn(move || {
-                let mut conn = conn;
                 if let Err(e) = inner.handle_conn(&mut conn) {
                     // Best-effort error frame; a dead connection's write just fails.
                     let _ = write_frame(&mut conn, &encode(&err(&e.to_string())));
                 }
             });
         }
-        Ok(())
     }
 }
 
@@ -152,7 +149,8 @@ impl Inner {
 
     /// One connection: a `build.subscribe` request streams build-graph state until
     /// the client disconnects; everything else is one request → one response.
-    fn handle_conn(&self, conn: &mut UnixStream) -> io::Result<()> {
+    /// Generic over the byte stream — the transport decides the concrete type.
+    fn handle_conn<C: Read + Write>(&self, conn: &mut C) -> io::Result<()> {
         let req = decode(&read_frame(conn)?);
         let Cbor::Text(method) = req.get(1) else {
             return write_frame(conn, &encode(&err("malformed request: missing method")));
@@ -167,7 +165,7 @@ impl Inner {
 
     /// `build.subscribe` (atom): send the current state, then a fresh snapshot each
     /// time a build advances the revision, until the client disconnects.
-    fn stream_build_state(&self, conn: &mut UnixStream) -> io::Result<()> {
+    fn stream_build_state<C: Write>(&self, conn: &mut C) -> io::Result<()> {
         let mut last = i64::MIN;
         loop {
             let snapshot = {
@@ -398,21 +396,21 @@ pub fn req_subscribe() -> Cbor {
 
 /// Send one request envelope to the daemon at `socket`; return its response.
 pub fn call(socket: &Path, req: &Cbor) -> io::Result<Cbor> {
-    let mut stream = UnixStream::connect(socket)?;
-    write_frame(&mut stream, &encode(req))?;
-    Ok(decode(&read_frame(&mut stream)?))
+    let mut conn = transport::connect(socket)?;
+    write_frame(&mut conn, &encode(req))?;
+    Ok(decode(&read_frame(&mut conn)?))
 }
 
 /// Open a `build.subscribe` stream: returns the connection to read frames from
 /// (each frame via [`next_frame`]). The initial frame is the current state.
-pub fn subscribe(socket: &Path) -> io::Result<UnixStream> {
-    let mut stream = UnixStream::connect(socket)?;
-    write_frame(&mut stream, &encode(&req_subscribe()))?;
-    Ok(stream)
+pub fn subscribe(socket: &Path) -> io::Result<Box<dyn transport::Conn>> {
+    let mut conn = transport::connect(socket)?;
+    write_frame(&mut conn, &encode(&req_subscribe()))?;
+    Ok(conn)
 }
 
 /// Read the next streamed frame (a response envelope) from a [`subscribe`] stream.
-pub fn next_frame(stream: &mut UnixStream) -> io::Result<Cbor> {
+pub fn next_frame(stream: &mut impl Read) -> io::Result<Cbor> {
     Ok(decode(&read_frame(stream)?))
 }
 

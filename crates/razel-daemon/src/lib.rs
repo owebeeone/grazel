@@ -12,6 +12,7 @@
 //! integration layer on top — they transport these operations, they don't change them.
 
 pub mod rpc;
+pub mod transport;
 
 use razel_core::Digest;
 use razel_engine::Engine;
