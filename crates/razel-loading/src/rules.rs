@@ -185,31 +185,49 @@ fn actions_methods(b: &mut MethodsBuilder) {
     }
     fn run<'v>(
         #[starlark(this)] _this: Value<'v>,
-        #[starlark(require = named)] executable: Option<String>,
-        #[starlark(require = named)] outputs: Option<UnpackList<String>>,
-        #[starlark(require = named)] inputs: Option<UnpackList<String>>,
-        #[starlark(require = named)] arguments: Option<UnpackList<String>>,
+        #[starlark(require = named)] executable: Option<Value<'v>>,
+        #[starlark(require = named)] outputs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] inputs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] arguments: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
-        let exe = executable.unwrap_or_else(|| "run".into());
+        let exe = executable.map(file_path).unwrap_or_else(|| "run".into());
         let mut argv = vec![exe.clone()];
-        argv.extend(arguments.map(|l| l.items).unwrap_or_default());
+        // arguments may contain plain strings, lists, File values, and args() objects.
+        for a in arguments.map(|l| l.items).unwrap_or_default() {
+            argv.extend(flatten_arg(a));
+        }
+        let paths = |l: Option<UnpackList<Value<'v>>>| -> Vec<String> {
+            l.map(|l| l.items.into_iter().map(file_path).collect())
+                .unwrap_or_default()
+        };
         with_current(|c| {
             c.actions.push(AnalyzedAction {
                 mnemonic: exe,
                 argv,
-                inputs: inputs.map(|l| l.items).unwrap_or_default(),
-                outputs: outputs.map(|l| l.items).unwrap_or_default(),
+                inputs: paths(inputs),
+                outputs: paths(outputs),
             })
         });
         Ok(NoneType)
     }
+    /// `ctx.actions.args()` — a mutable argument accumulator (`add`/`add_all`),
+    /// flattened into the argv when passed to `run(arguments=[args])`.
+    fn args<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(eval.heap().alloc_complex_no_freeze(Args {
+            items: RefCell::new(Vec::new()),
+        }))
+    }
     fn write<'v>(
         #[starlark(this)] _this: Value<'v>,
-        #[starlark(require = named)] output: String,
+        #[starlark(require = named)] output: Value<'v>,
         #[starlark(require = named)] content: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
+        let output = file_path(output);
         // Real write: a /bin/sh action printf-ing the content into the output file.
         let script = format!(
             "printf '%s' {} > {}",
@@ -226,6 +244,122 @@ fn actions_methods(b: &mut MethodsBuilder) {
         });
         Ok(NoneType)
     }
+}
+
+// ---- ctx.actions.args() ----------------------------------------------------------
+
+/// A `ctx.actions.args()` accumulator. Mutated in place by `add`/`add_all`; flattened
+/// into the argv when the action runs. (Created + consumed within one analysis scope,
+/// so it never freezes.)
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+struct Args {
+    #[allocative(skip)]
+    #[trace(unsafe_ignore)]
+    items: RefCell<Vec<String>>,
+}
+
+impl fmt::Display for Args {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<Args>")
+    }
+}
+
+#[starlark_value(type = "Args")]
+impl<'v> StarlarkValue<'v> for Args {
+    fn get_methods() -> Option<&'static Methods> {
+        Some(ARGS_METHODS.methods())
+    }
+}
+
+starlark::methods_static!(ARGS_METHODS = args_methods);
+
+#[starlark::starlark_module]
+fn args_methods(b: &mut MethodsBuilder) {
+    fn add<'v>(
+        #[starlark(this)] this: Value<'v>,
+        #[starlark(require = pos)] arg: Value<'v>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        if let Some(a) = this.downcast_ref::<Args>() {
+            a.items.borrow_mut().push(file_path(arg));
+        }
+        Ok(NoneType)
+    }
+    fn add_all<'v>(
+        #[starlark(this)] this: Value<'v>,
+        #[starlark(require = pos)] values: Value<'v>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        if let Some(a) = this.downcast_ref::<Args>() {
+            for s in flatten_arg(values) {
+                a.items.borrow_mut().push(s);
+            }
+        }
+        Ok(NoneType)
+    }
+}
+
+/// Flatten a `run(arguments=…)` element into argv strings: an [`Args`] yields its
+/// accumulated items, a list recurses, a [`File`] yields its path, anything else
+/// stringifies.
+fn flatten_arg(v: Value) -> Vec<String> {
+    if let Some(a) = v.downcast_ref::<Args>() {
+        return a.items.borrow().clone();
+    }
+    if let Some(list) = ListRef::from_value(v) {
+        return list.iter().flat_map(flatten_arg).collect();
+    }
+    vec![file_path(v)]
+}
+
+// ---- File (ctx.outputs.*, ctx.files.*) -------------------------------------------
+
+/// A `File` value: a workspace-relative path with Bazel's File fields. razel paths
+/// are already workspace-relative, so `short_path` == `path`.
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+struct File {
+    #[trace(unsafe_ignore)]
+    path: String,
+}
+
+impl fmt::Display for File {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.path)
+    }
+}
+
+#[starlark_value(type = "File")]
+impl<'v> StarlarkValue<'v> for File {
+    fn get_attr(&self, name: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        let p = self.path.as_str();
+        let base = p.rsplit('/').next().unwrap_or(p);
+        match name {
+            "path" | "short_path" => Some(heap.alloc(p.to_string())),
+            "basename" => Some(heap.alloc(base.to_string())),
+            "dirname" => {
+                Some(heap.alloc(p.rsplit_once('/').map(|x| x.0).unwrap_or("").to_string()))
+            }
+            "extension" => Some(
+                heap.alloc(
+                    base.rsplit_once('.')
+                        .map(|(_, e)| e)
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+            ),
+            _ => None,
+        }
+    }
+}
+
+/// Extract a path string from a value: a [`File`]'s path, a string as-is, else display.
+fn file_path(v: Value) -> String {
+    if let Some(f) = v.downcast_ref::<File>() {
+        return f.path.clone();
+    }
+    v.unpack_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| v.to_str())
 }
 
 // ---- ctx ------------------------------------------------------------------------
@@ -349,12 +483,10 @@ where
         // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
         // (qualified). ctx.executable is empty until an executable-label attr is wired.
         // (razel resolves attribute values directly; the schema is not consulted.)
+        let mk_file = |s: &str| heap.alloc_complex_no_freeze(File { path: qualify(s) });
         let outputs_fields: Vec<(String, Value<'v>)> = named
             .iter()
-            .filter_map(|(k, v)| {
-                v.unpack_str()
-                    .map(|s| (k.as_str().to_string(), heap.alloc(qualify(s))))
-            })
+            .filter_map(|(k, v)| v.unpack_str().map(|s| (k.as_str().to_string(), mk_file(s))))
             .collect();
         let files_fields: Vec<(String, Value<'v>)> = named
             .iter()
@@ -362,7 +494,7 @@ where
                 ListRef::from_value(*v).map(|list| {
                     let items: Vec<Value<'v>> = list
                         .iter()
-                        .filter_map(|it| it.unpack_str().map(|s| heap.alloc(qualify(s))))
+                        .filter_map(|it| it.unpack_str().map(mk_file))
                         .collect();
                     (k.as_str().to_string(), heap.alloc(items))
                 })
