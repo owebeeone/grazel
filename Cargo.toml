@@ -3,7 +3,7 @@
 # Crates are added per roll-build phase, TDD-first (AGENTS.md Rule 0) — none yet.
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 edition = "2024"

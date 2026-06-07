@@ -1,0 +1,3 @@
+# `cargo xtask <task>` → run the xtask automation crate (cargo-xtask idiom).
+[alias]
+xtask = "run --quiet --package xtask --"
