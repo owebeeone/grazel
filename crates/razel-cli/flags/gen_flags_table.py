@@ -10,21 +10,18 @@ the output), or directly:  python3 gen_flags_table.py bazel-flags-9.1.1.json --s
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
-# razel policy: flags for these languages/rulesets are ones razel will never
-# implement — recognize them but stay silent (no "unsupported" diagnostic).
-# Reapplied every Bazel version, matched on either the source path OR the flag name
-# (many lang flags are registered centrally in BazelRulesModule, not under a lang dir).
-SILENT_LANGS = ("java", "python", "android", "objc", "apple", "swift", "j2objc", "dotnet")
-SILENT_LANG_RE = re.compile(r"(?i)(^|/)(" + "|".join(SILENT_LANGS) + ")")
-
-
+# razel policy: stay silent ONLY for flags that manage Bazel-the-program itself —
+# the JVM/background-server infrastructure (heap, idle timeout, install/output dirs,
+# command port). razel is a native engine with no JVM, so these have no analogue.
+# Everything else — including language *rule* flags (java_toolchain, android_sdk,
+# python_version, copts) — is diagnosed, not hidden: razel may grow that support,
+# and the user should know a build flag was ignored. Reapplied every Bazel version.
 def is_silent(flag: dict) -> bool:
-    return bool(SILENT_LANG_RE.search(flag.get("source", ""))) or flag["name"].startswith(
-        SILENT_LANGS
+    return flag.get("category") == "BAZEL_CLIENT_OPTIONS" or flag.get("source", "").endswith(
+        "BlazeServerStartupOptions.java"
     )
 
 HERE = Path(__file__).resolve().parent
