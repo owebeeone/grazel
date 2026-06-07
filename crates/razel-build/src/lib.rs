@@ -17,7 +17,7 @@ use razel_analysis::wire_to_ir;
 use razel_core::{Digest, FileId, TargetId};
 use razel_exec::{Cache, build_action};
 use razel_ir::TargetKind;
-use razel_loading::{analyze_bazel, analyze_starlark};
+use razel_loading::{analyze_bazel, analyze_starlark, analyze_workspace};
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
 pub use razel_loading::AnalyzedTarget;
 
@@ -30,6 +30,13 @@ pub fn build_bazel(
     cache: &Cache,
 ) -> Result<BuildReport, String> {
     execute(&analyze_bazel(build_src)?, target, exec_root, cache)
+}
+
+/// Build `top_label` (`//pkg:name`) from a **multi-package Bazel workspace** rooted
+/// at `root`, loading dependency packages on demand. exec_root = the workspace root
+/// (paths are package-qualified, matching Bazel's workspace-relative includes).
+pub fn build_workspace(root: &Path, top_label: &str, cache: &Cache) -> Result<BuildReport, String> {
+    execute(&analyze_workspace(root, top_label)?, top_label, root, cache)
 }
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -356,6 +363,76 @@ cc_binary(
             .unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello world");
+    }
+
+    #[test]
+    fn builds_and_runs_real_bazel_cpp_tutorial_stage3() {
+        if !Path::new("/usr/bin/c++").exists() || !Path::new("/usr/bin/ar").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // lib package
+        w(
+            "lib/BUILD",
+            r#"load("@rules_cc//cc:cc_library.bzl", "cc_library")
+cc_library(name = "hello-time", srcs = ["hello-time.cc"], hdrs = ["hello-time.h"], visibility = ["//main:__pkg__"])
+"#,
+        );
+        w(
+            "lib/hello-time.h",
+            "#ifndef LIB_HELLO_TIME_H_\n#define LIB_HELLO_TIME_H_\nvoid print_localtime();\n#endif\n",
+        );
+        w(
+            "lib/hello-time.cc",
+            "#include \"lib/hello-time.h\"\n#include <ctime>\n#include <iostream>\nvoid print_localtime() { std::time_t t = std::time(nullptr); std::cout << std::asctime(std::localtime(&t)); }\n",
+        );
+        // main package — depends on //lib:hello-time AND :hello-greet
+        w(
+            "main/BUILD",
+            r#"load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+cc_library(name = "hello-greet", srcs = ["hello-greet.cc"], hdrs = ["hello-greet.h"])
+cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet", "//lib:hello-time"])
+"#,
+        );
+        w(
+            "main/hello-greet.h",
+            "#ifndef MAIN_HELLO_GREET_H_\n#define MAIN_HELLO_GREET_H_\n#include <string>\nstd::string get_greet(const std::string& who);\n#endif\n",
+        );
+        w(
+            "main/hello-greet.cc",
+            "#include \"main/hello-greet.h\"\nstd::string get_greet(const std::string& who) { return \"Hello \" + who; }\n",
+        );
+        w(
+            "main/hello-world.cc",
+            "#include \"lib/hello-time.h\"\n#include \"main/hello-greet.h\"\n#include <iostream>\nint main(int argc, char** argv) {\n  std::string who = argc > 1 ? argv[1] : \"world\";\n  std::cout << get_greet(who) << std::endl;\n  print_localtime();\n  return 0;\n}\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // Cross-package: //lib:hello-time is loaded on demand while analyzing main.
+        let report = build_workspace(root.path(), "//main:hello-world", &cache).unwrap();
+        assert_eq!(report.executed, 6, "3 compiles + 2 archives + 1 link");
+        assert!(report.produced.contains(&"main/hello-world".to_string()));
+        assert!(report.produced.contains(&"lib/libhello-time.a".to_string()));
+
+        let out = std::process::Command::new(root.path().join("main/hello-world"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).starts_with("Hello world"),
+            "stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 
     #[test]

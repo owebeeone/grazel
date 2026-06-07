@@ -21,8 +21,9 @@ use starlark::values::none::NoneType;
 use starlark::values::structs::AllocStruct;
 use starlark::values::{Heap, NoSerialize, StarlarkValue, Trace, Value, starlark_value};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// One action registered by a rule impl (`ctx.actions.run`/`write`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -69,10 +70,53 @@ pub fn registered_configs() -> Vec<String> {
 }
 
 thread_local! {
-    /// Analyzed targets by name → providers, so a dependent's `deps` reads them
-    /// (cross-target provider flow). Requires deps declared before dependents; a forward
-    /// reference errors clearly (full dependency ordering is the next two-phase step).
+    /// Analyzed targets by **canonical label** → providers, so a dependent's `deps`
+    /// reads them (cross-target/-package provider flow). In single-package mode the
+    /// key is the bare name; in workspace mode it's `//pkg:name`.
     static RESULTS: RefCell<BTreeMap<String, AnalyzedTarget>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+thread_local! {
+    /// Workspace root (set in multi-package mode) — used to read a dep package's
+    /// BUILD on demand. `None` ⇒ single-package mode (no package qualification).
+    static WORKSPACE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// The package currently being evaluated (`None` ⇒ single-package mode).
+    static CURRENT_PKG: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Packages whose BUILD has been loaded (cycle/repeat guard).
+    static LOADED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Canonicalize a target name/label against the current package. Single-package
+/// mode keeps bare names; workspace mode produces `//pkg:name`.
+fn canon_label(s: &str) -> String {
+    CURRENT_PKG.with_borrow(|p| match p {
+        None => s.strip_prefix(':').unwrap_or(s).to_string(),
+        Some(pkg) => {
+            if let Some(rest) = s.strip_prefix("//") {
+                format!("//{rest}")
+            } else if let Some(name) = s.strip_prefix(':') {
+                format!("//{pkg}:{name}")
+            } else {
+                format!("//{pkg}:{s}")
+            }
+        }
+    })
+}
+
+/// Package-qualify a source/output path (`x.cc` → `pkg/x.cc` in workspace mode).
+fn qualify(path: &str) -> String {
+    CURRENT_PKG.with_borrow(|p| match p {
+        Some(pkg) => format!("{pkg}/{path}"),
+        None => path.to_string(),
+    })
+}
+
+/// The package of a canonical label `//pkg:name`.
+fn pkg_of(label: &str) -> Option<String> {
+    label
+        .strip_prefix("//")?
+        .split_once(':')
+        .map(|(p, _)| p.to_string())
 }
 
 fn with_current<F: FnOnce(&mut AnalyzedTarget)>(f: F) {
@@ -345,20 +389,33 @@ fn record_target(t: AnalyzedTarget) {
 }
 
 /// Resolve a dep label to (its linkable outputs, its exported hdrs, bare name).
-/// Same-package only for now (`:x`, `x`); cross-package `//pkg:x` errors clearly.
+/// Resolve a dep label to (its linkable outputs, exported hdrs, canonical label).
+/// In workspace mode a cross-package dep whose package isn't loaded yet is loaded
+/// on demand; in single-package mode a forward/cross reference errors clearly.
 fn resolve_dep(label: &str) -> anyhow::Result<(Vec<String>, Vec<String>, String)> {
-    let name = label.rsplit(':').next().unwrap_or(label).to_string();
-    RESULTS
-        .with_borrow(|r| {
-            r.get(&name)
-                .map(|t| (t.default_info.clone(), t.hdrs.clone(), name.clone()))
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "dep `{label}` not analyzed yet — declare it before its users \
-                 (cross-package deps are a later increment)"
-            )
-        })
+    let canon = canon_label(label);
+    let hit = RESULTS.with_borrow(|r| {
+        r.get(&canon)
+            .map(|t| (t.default_info.clone(), t.hdrs.clone()))
+    });
+    if let Some((libs, hdrs)) = hit {
+        return Ok((libs, hdrs, canon));
+    }
+    // Workspace mode: pull in the dep's package, then retry.
+    if WORKSPACE.with_borrow(|w| w.is_some())
+        && let Some(pkg) = pkg_of(&canon)
+    {
+        load_package(&pkg).map_err(|e| anyhow::anyhow!(e))?;
+        if let Some((libs, hdrs)) = RESULTS.with_borrow(|r| {
+            r.get(&canon)
+                .map(|t| (t.default_info.clone(), t.hdrs.clone()))
+        }) {
+            return Ok((libs, hdrs, canon));
+        }
+    }
+    Err(anyhow::anyhow!(
+        "dep `{label}` not analyzed — declare it before its users (cyclic or missing package)"
+    ))
 }
 
 #[starlark::starlark_module]
@@ -374,6 +431,9 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         let hdrs = hdrs.map(|l| l.items).unwrap_or_default();
         let deps = deps.map(|l| l.items).unwrap_or_default();
 
+        // Package-qualify own srcs/hdrs (workspace mode); resolve deps to canon labels.
+        let srcs: Vec<String> = srcs.iter().map(|s| qualify(s)).collect();
+        let hdrs: Vec<String> = hdrs.iter().map(|h| qualify(h)).collect();
         let (mut dep_names, mut dep_hdrs) = (Vec::new(), Vec::new());
         for d in &deps {
             let (_, h, n) = resolve_dep(d)?;
@@ -389,15 +449,10 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             let o = format!("{s}.o");
             let mut inputs = vec![s.clone()];
             inputs.extend(avail_hdrs.iter().cloned());
-            actions.push(AnalyzedAction {
-                mnemonic: "CppCompile".into(),
-                argv: vec![CXX.into(), "-c".into(), s.clone(), "-o".into(), o.clone()],
-                inputs,
-                outputs: vec![o.clone()],
-            });
+            actions.push(compile_action(s, &o, inputs));
             objs.push(o);
         }
-        let lib = format!("lib{name}.a");
+        let lib = qualify(&format!("lib{name}.a"));
         let mut ar_argv = vec![AR.into(), "rcs".into(), lib.clone()];
         ar_argv.extend(objs.clone());
         actions.push(AnalyzedAction {
@@ -410,7 +465,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         let mut export_hdrs = hdrs;
         export_hdrs.extend(dep_hdrs);
         record_target(AnalyzedTarget {
-            name,
+            name: canon_label(&name),
             deps: dep_names,
             actions,
             default_info: vec![lib],
@@ -428,6 +483,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         let srcs = srcs.map(|l| l.items).unwrap_or_default();
         let deps = deps.map(|l| l.items).unwrap_or_default();
 
+        let srcs: Vec<String> = srcs.iter().map(|s| qualify(s)).collect();
         let (mut dep_names, mut dep_libs, mut dep_hdrs) = (Vec::new(), Vec::new(), Vec::new());
         for d in &deps {
             let (libs, h, n) = resolve_dep(d)?;
@@ -441,33 +497,48 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             let o = format!("{s}.o");
             let mut inputs = vec![s.clone()];
             inputs.extend(dep_hdrs.iter().cloned());
-            actions.push(AnalyzedAction {
-                mnemonic: "CppCompile".into(),
-                argv: vec![CXX.into(), "-c".into(), s.clone(), "-o".into(), o.clone()],
-                inputs,
-                outputs: vec![o.clone()],
-            });
+            actions.push(compile_action(s, &o, inputs));
             objs.push(o);
         }
+        let out = qualify(&name);
         let mut link_inputs = objs.clone();
         link_inputs.extend(dep_libs.clone());
-        let mut link_argv = vec![CXX.into(), "-o".into(), name.clone()];
+        let mut link_argv = vec![CXX.into(), "-o".into(), out.clone()];
         link_argv.extend(objs);
         link_argv.extend(dep_libs);
         actions.push(AnalyzedAction {
             mnemonic: "CppLink".into(),
             argv: link_argv,
             inputs: link_inputs,
-            outputs: vec![name.clone()],
+            outputs: vec![out.clone()],
         });
         record_target(AnalyzedTarget {
-            name: name.clone(),
+            name: canon_label(&name),
             deps: dep_names,
             actions,
-            default_info: vec![name],
+            default_info: vec![out],
             hdrs: Vec::new(),
         });
         Ok(NoneType)
+    }
+}
+
+/// A C++ compile action. `-iquote .` makes workspace-root-relative quote-includes
+/// (`#include "pkg/x.h"`) resolve from the sandbox root (= exec root).
+fn compile_action(src: &str, obj: &str, inputs: Vec<String>) -> AnalyzedAction {
+    AnalyzedAction {
+        mnemonic: "CppCompile".into(),
+        argv: vec![
+            CXX.into(),
+            "-iquote".into(),
+            ".".into(),
+            "-c".into(),
+            src.into(),
+            "-o".into(),
+            obj.into(),
+        ],
+        inputs,
+        outputs: vec![obj.into()],
     }
 }
 
@@ -491,17 +562,10 @@ fn rules_cc_module() -> Result<FrozenModule, String> {
     })
 }
 
-/// Evaluate a **real Bazel `BUILD`** that `load()`s cc rules from `@rules_cc`,
-/// resolving those loads to razel's native rules (no rules_cc execution, no repo
-/// fetch). Returns the analyzed targets. Single-package for now.
-pub fn analyze_bazel(build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
-    STATE.with_borrow_mut(|s| {
-        s.targets.clear();
-        s.current = None;
-    });
-    CONFIGS.with_borrow_mut(|c| c.clear());
-    RESULTS.with_borrow_mut(|r| r.clear());
-
+/// Evaluate one BUILD source with the `@rules_cc` loader + the rule globals.
+/// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
+/// cross-package load appends, never clears).
+fn eval_build_src(name: &str, src: &str) -> Result<(), String> {
     let builtins = rules_cc_module()?;
     let mut modules: HashMap<&str, &FrozenModule> = HashMap::new();
     for path in [
@@ -513,19 +577,77 @@ pub fn analyze_bazel(build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
         modules.insert(path, &builtins);
     }
     let loader = ReturnFileLoader { modules: &modules };
-
-    let ast = AstModule::parse("BUILD", build_src.to_owned(), &Dialect::Extended)
-        .map_err(|e| format!("{e}"))?;
+    let ast =
+        AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
     let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
         .with(rule_globals)
         .build();
-    let res: Result<(), String> = Module::with_temp_heap(|module| {
+    Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
         eval.eval_module(ast, &globals)
             .map_err(|e| format!("{e}"))?;
         Ok(())
+    })
+}
+
+fn reset_analysis() {
+    STATE.with_borrow_mut(|s| {
+        s.targets.clear();
+        s.current = None;
     });
+    CONFIGS.with_borrow_mut(|c| c.clear());
+    RESULTS.with_borrow_mut(|r| r.clear());
+    LOADED.with_borrow_mut(|l| l.clear());
+}
+
+/// Evaluate a **real Bazel `BUILD`** that `load()`s cc rules from `@rules_cc`,
+/// resolving those loads to razel's native rules (no rules_cc execution, no repo
+/// fetch). Single-package (bare-name targets).
+pub fn analyze_bazel(build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
+    reset_analysis();
+    CURRENT_PKG.with_borrow_mut(|p| *p = None);
+    WORKSPACE.with_borrow_mut(|w| *w = None);
+    eval_build_src("BUILD", build_src)?;
+    Ok(STATE.with_borrow_mut(|s| std::mem::take(&mut s.targets)))
+}
+
+/// Load a package's BUILD (once) under workspace mode, evaluating it with that
+/// package as context. Cross-package deps trigger further loads via `resolve_dep`.
+fn load_package(pkg: &str) -> Result<(), String> {
+    if LOADED.with_borrow(|l| l.contains(pkg)) {
+        return Ok(());
+    }
+    LOADED.with_borrow_mut(|l| {
+        l.insert(pkg.to_string());
+    });
+    let root = WORKSPACE
+        .with_borrow(|w| w.clone())
+        .ok_or("load_package called outside workspace mode")?;
+    let build_path = ["BUILD", "BUILD.bazel"]
+        .iter()
+        .map(|f| root.join(pkg).join(f))
+        .find(|p| p.exists())
+        .ok_or_else(|| format!("no BUILD in package `{pkg}` ({})", root.join(pkg).display()))?;
+    let src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
+
+    let prev = CURRENT_PKG.with_borrow_mut(|p| p.replace(pkg.to_string()));
+    let res = eval_build_src(&format!("{pkg}/BUILD"), &src);
+    CURRENT_PKG.with_borrow_mut(|p| *p = prev);
+    res
+}
+
+/// Analyze a **multi-package** workspace rooted at `root`, starting from
+/// `top_label` (`//pkg:name`) and loading dependency packages on demand. Targets
+/// are keyed by canonical `//pkg:name` labels with package-qualified paths.
+pub fn analyze_workspace(root: &Path, top_label: &str) -> Result<Vec<AnalyzedTarget>, String> {
+    reset_analysis();
+    WORKSPACE.with_borrow_mut(|w| *w = Some(root.to_path_buf()));
+    let top_pkg = pkg_of(&canon_label(top_label))
+        .ok_or_else(|| format!("top label must be //pkg:name, got `{top_label}`"))?;
+    let res = load_package(&top_pkg);
+    WORKSPACE.with_borrow_mut(|w| *w = None);
+    CURRENT_PKG.with_borrow_mut(|p| *p = None);
     res?;
     Ok(STATE.with_borrow_mut(|s| std::mem::take(&mut s.targets)))
 }
