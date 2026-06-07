@@ -150,6 +150,11 @@ fn with_current<F: FnOnce(&mut AnalyzedTarget)>(f: F) {
     });
 }
 
+/// Single-quote a string for safe embedding in a `/bin/sh -c` script.
+fn shquote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 // ---- ctx.actions ----------------------------------------------------------------
 
 #[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
@@ -202,12 +207,19 @@ fn actions_methods(b: &mut MethodsBuilder) {
     fn write<'v>(
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = named)] output: String,
+        #[starlark(require = named)] content: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
+        // Real write: a /bin/sh action printf-ing the content into the output file.
+        let script = format!(
+            "printf '%s' {} > {}",
+            shquote(&content.unwrap_or_default()),
+            shquote(&output)
+        );
         with_current(|c| {
             c.actions.push(AnalyzedAction {
-                mnemonic: "write".into(),
-                argv: vec!["<write>".into()],
+                mnemonic: "FileWrite".into(),
+                argv: vec!["/bin/sh".into(), "-c".into(), script],
                 inputs: Vec::new(),
                 outputs: vec![output],
             })
@@ -224,6 +236,12 @@ struct Ctx<'v> {
     attr: Value<'v>,
     actions: Value<'v>,
     label: Value<'v>,
+    /// `ctx.outputs.<name>` — predeclared output filenames (package-qualified).
+    outputs: Value<'v>,
+    /// `ctx.files.<name>` — the source files of label/label_list attrs (qualified).
+    files: Value<'v>,
+    /// `ctx.executable.<name>` — the runnable output of an executable-label attr.
+    executable: Value<'v>,
 }
 
 impl fmt::Display for Ctx<'_> {
@@ -239,6 +257,9 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
             "attr" => Some(self.attr),
             "actions" => Some(self.actions),
             "label" => Some(self.label),
+            "outputs" => Some(self.outputs),
+            "files" => Some(self.files),
+            "executable" => Some(self.executable),
             _ => None,
         }
     }
@@ -324,10 +345,36 @@ where
             })
         });
 
+        // ctx.outputs.<attr> — string-valued attrs are predeclared output filenames
+        // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
+        // (qualified). ctx.executable is empty until an executable-label attr is wired.
+        // (razel resolves attribute values directly; the schema is not consulted.)
+        let outputs_fields: Vec<(String, Value<'v>)> = named
+            .iter()
+            .filter_map(|(k, v)| {
+                v.unpack_str()
+                    .map(|s| (k.as_str().to_string(), heap.alloc(qualify(s))))
+            })
+            .collect();
+        let files_fields: Vec<(String, Value<'v>)> = named
+            .iter()
+            .filter_map(|(k, v)| {
+                ListRef::from_value(*v).map(|list| {
+                    let items: Vec<Value<'v>> = list
+                        .iter()
+                        .filter_map(|it| it.unpack_str().map(|s| heap.alloc(qualify(s))))
+                        .collect();
+                    (k.as_str().to_string(), heap.alloc(items))
+                })
+            })
+            .collect();
         let ctx = heap.alloc_complex_no_freeze(Ctx {
             attr: heap.alloc(AllocStruct(fields)),
             actions: heap.alloc_complex_no_freeze(Actions),
             label: heap.alloc(canon_label(&name)),
+            outputs: heap.alloc(AllocStruct(outputs_fields)),
+            files: heap.alloc(AllocStruct(files_fields)),
+            executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
         });
         eval.eval_function(self.implementation.to_value(), &[ctx], &[])?;
 
@@ -968,6 +1015,63 @@ fn native_members(b: &mut GlobalsBuilder) {
     }
 }
 
+/// The Bazel `attr.*` namespace: declares a rule's attribute schema. razel's `rule()`
+/// resolves attribute *values* directly from the call kwargs (it doesn't enforce the
+/// schema), so each `attr.<kind>(...)` is a placeholder descriptor — present so rule
+/// definitions evaluate.
+#[starlark::starlark_module]
+fn attr_members(b: &mut GlobalsBuilder) {
+    fn string<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn int<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn bool<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn label<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn label_list<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn label_keyed_string_dict<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn string_list<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn string_dict<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn string_list_dict<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn output<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn output_list<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+}
+
 fn build_globals() -> Globals {
     GlobalsBuilder::extended_by(&[
         LibraryExtension::StructType,
@@ -979,7 +1083,10 @@ fn build_globals() -> Globals {
         LibraryExtension::Partial,
     ])
     .with(rule_globals)
-    .with(|b| b.namespace("native", native_members))
+    .with(|b| {
+        b.namespace("native", native_members);
+        b.namespace("attr", attr_members);
+    })
     .build()
 }
 

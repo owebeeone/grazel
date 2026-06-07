@@ -751,6 +751,38 @@ cc_binary(name = \"prog\", srcs = [\"main.cc\"] + if_rocm_is_configured([\"gpu.c
     }
 
     #[test]
+    fn rule_writes_a_file_via_ctx_outputs_and_actions_write() {
+        // Mirrors bazelbuild-examples rules/actions_write: attr.string/output schema,
+        // ctx.outputs.<name>, and ctx.actions.write(content=) producing a real file.
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "pkg/defs.bzl",
+            "def _impl(ctx):\n    ctx.actions.write(output = ctx.outputs.out, content = ctx.attr.content)\n\
+gen = rule(implementation = _impl, attrs = {\"content\": attr.string(), \"out\": attr.output()})\n",
+        );
+        w(
+            "pkg/BUILD",
+            "load(\"//pkg:defs.bzl\", \"gen\")\ngen(name = \"hi\", content = \"hello there\", out = \"hi.txt\")\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let report = build_workspace(root.path(), "//pkg:hi", &cache).unwrap();
+        assert!(report.produced.contains(&"pkg/hi.txt".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("pkg/hi.txt")).unwrap(),
+            "hello there"
+        );
+    }
+
+    #[test]
     fn builds_via_a_rule_defined_in_a_loaded_bzl() {
         // The freeze-fix payoff: a custom `rule()` defined in a .bzl and load()ed.
         // Before RuleObj was freezable, freezing the loaded .bzl module errored here.
