@@ -9,6 +9,9 @@
 //! selection / `define_config` sugar yet (the rule emits argv directly via `ctx.actions.run`).
 //! That + the link-with-deps cross-target flow are the next increments (D7).
 
+pub mod incremental;
+pub use incremental::IncrementalBuilder;
+
 use razel_actions::Action;
 use razel_analysis::wire_to_ir;
 use razel_core::{Digest, FileId, TargetId};

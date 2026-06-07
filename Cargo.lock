@@ -1190,6 +1190,7 @@ dependencies = [
  "razel-actions",
  "razel-analysis",
  "razel-core",
+ "razel-engine",
  "razel-exec",
  "razel-ir",
  "razel-loading",
