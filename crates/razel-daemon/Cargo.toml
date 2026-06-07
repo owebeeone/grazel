@@ -10,6 +10,9 @@ publish = false
 notify = "8.2.0"
 razel-core = { version = "0.1.0", path = "../razel-core" }
 razel-engine = { version = "0.1.0", path = "../razel-engine" }
+razel-wire = { version = "0.1.0", path = "../razel-wire" }
+razel-build = { version = "0.1.0", path = "../razel-build" }
+razel-exec = { version = "0.1.0", path = "../razel-exec" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

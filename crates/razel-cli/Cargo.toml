@@ -18,6 +18,7 @@ razel-wire = { path = "../razel-wire" }
 razel-build = { path = "../razel-build" }
 razel-exec = { path = "../razel-exec" }
 razel-core = { path = "../razel-core" }
+razel-daemon = { path = "../razel-daemon" }
 
 [dev-dependencies]
 tempfile = "3"

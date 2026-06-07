@@ -11,6 +11,8 @@
 //! coalescing/atomic-rename reconciliation (the watcher *torture* test) are the OS/process
 //! integration layer on top — they transport these operations, they don't change them.
 
+pub mod rpc;
+
 use razel_core::Digest;
 use razel_engine::Engine;
 use std::path::{Path, PathBuf};

@@ -1200,6 +1200,7 @@ version = "0.1.0"
 dependencies = [
  "razel-build",
  "razel-core",
+ "razel-daemon",
  "razel-exec",
  "razel-wire",
  "tempfile",
@@ -1226,8 +1227,11 @@ name = "razel-daemon"
 version = "0.1.0"
 dependencies = [
  "notify",
+ "razel-build",
  "razel-core",
  "razel-engine",
+ "razel-exec",
+ "razel-wire",
  "tempfile",
 ]
 

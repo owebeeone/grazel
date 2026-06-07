@@ -1,0 +1,87 @@
+//! Over-the-socket integration: spawn a real UDS daemon in a background thread,
+//! then drive it from a client connection.
+
+use razel_daemon::rpc::{self, Server};
+use razel_wire::{BuildResult, BuildStatus, VersionInfo};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+const BUILD: &str = r#"
+def _impl(ctx):
+    out = ctx.attr.name + ".o"
+    ctx.actions.run(executable="/usr/bin/cc", outputs=[out], inputs=[ctx.attr.src],
+                    arguments=["-c", ctx.attr.src, "-o", out])
+    return [DefaultInfo(files=[out])]
+cc_obj = rule(implementation=_impl, attrs={"src":1})
+cc_obj(name="widget", src="widget.c")
+"#;
+
+/// Short socket path (macOS sun_path is ~104 bytes; tempdir paths are too long).
+fn sock(tag: &str) -> PathBuf {
+    PathBuf::from(format!(
+        "/tmp/razel-rpc-{}-{}.sock",
+        tag,
+        std::process::id()
+    ))
+}
+
+fn spawn(server: Server, socket: PathBuf) {
+    std::thread::spawn(move || {
+        let _ = server.serve(&socket);
+    });
+}
+
+fn wait_for(socket: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon socket never appeared");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn version_over_the_socket() {
+    let socket = sock("ver");
+    let cache = tempfile::tempdir().unwrap();
+    spawn(
+        Server::new(PathBuf::from("."), cache.path().to_path_buf()),
+        socket.clone(),
+    );
+    wait_for(&socket);
+
+    let resp = rpc::call(&socket, &rpc::req_version()).unwrap();
+    let v = VersionInfo::from_cbor(&rpc::payload(&resp).unwrap());
+    assert_eq!(v.protocol, rpc::PROTOCOL);
+    assert!(!v.version.is_empty());
+    let _ = std::fs::remove_file(&socket);
+}
+
+#[test]
+fn build_over_the_socket_produces_a_real_object() {
+    if !Path::new("/usr/bin/cc").exists() {
+        return; // skip where no cc
+    }
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
+    std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+    let cache = tempfile::tempdir().unwrap();
+
+    let socket = sock("build");
+    spawn(
+        Server::new(ws.path().to_path_buf(), cache.path().to_path_buf()),
+        socket.clone(),
+    );
+    wait_for(&socket);
+
+    let resp = rpc::call(&socket, &rpc::req_build("//x:widget")).unwrap();
+    let r = BuildResult::from_cbor(&rpc::payload(&resp).unwrap());
+    assert_eq!(r.status, BuildStatus::Built, "msg: {:?}", r.message);
+    assert_eq!(r.outputs.len(), 1);
+    assert_eq!(r.outputs[0].path, "widget.o");
+    assert!(!r.outputs[0].digest.is_empty());
+    assert!(
+        ws.path().join("widget.o").exists(),
+        "daemon did not build the object"
+    );
+    let _ = std::fs::remove_file(&socket);
+}

@@ -126,3 +126,53 @@ fn missing_build_file_errors_cleanly() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no BUILD"));
 }
+
+#[test]
+fn build_through_a_spawned_daemon() {
+    use std::time::{Duration, Instant};
+    if !std::path::Path::new("/usr/bin/cc").exists() {
+        return; // skip where no cc
+    }
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
+    std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+    // Short socket path (macOS sun_path limit) — not inside the long tempdir.
+    let socket = format!("/tmp/razel-cli-daemon-{}.sock", std::process::id());
+
+    // Start the daemon as a real child process.
+    let mut daemon = razel()
+        .args(["daemon", "--socket", &socket, "-C"])
+        .arg(ws.path())
+        .spawn()
+        .unwrap();
+
+    // Wait for it to bind.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::path::Path::new(&socket).exists() {
+        assert!(Instant::now() < deadline, "daemon never bound the socket");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Build through the daemon.
+    let out = razel()
+        .args(["build", "//x:widget", "--daemon", "--socket", &socket, "-C"])
+        .arg(ws.path())
+        .output()
+        .unwrap();
+
+    daemon.kill().ok();
+    daemon.wait().ok();
+    let _ = std::fs::remove_file(&socket);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("widget.o"),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(ws.path().join("widget.o").exists());
+}

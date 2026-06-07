@@ -1,21 +1,21 @@
 //! `razel` — the command-line interface to the razel build engine.
 //!
-//! A thin, in-process consumer of the build driver (`razel_build::build_target`)
-//! that reports results as the `razel-wire` contract types (`BuildResult`,
-//! `VersionInfo`). The daemon will serve those *same* types over UDS/CBOR; the
-//! CLI proves the wire contract is the API surface, end to end, today —
-//! `--cbor` emits the exact bytes the daemon would.
+//! A consumer of the build driver (`razel_build::build_target`) that reports
+//! results as the `razel-wire` contract types (`BuildResult`, `VersionInfo`).
+//! Runs the build **in-process** by default, or routes to a running daemon with
+//! `--daemon` — the daemon serves the *same* wire types over UDS/CBOR, so the
+//! two paths are byte-identical. `--cbor` emits the exact wire bytes.
 //!
-//!   razel build <target> [-C <dir>] [--cache <dir>] [--cbor]
-//!   razel version [--cbor]
+//!   razel build <target> [-C <dir>] [--cache <dir>] [--daemon] [--socket <s>] [--cbor]
+//!   razel version [--daemon] [--socket <s>] [--cbor]
+//!   razel daemon [-C <dir>] [--cache <dir>] [--socket <s>]
 //!
-//! Scope: single-package `BUILD`, in-process (no daemon yet); exec_root = the
-//! workspace dir, so outputs land beside sources. The daemon UDS server + a
-//! client mode is the next increment — it transports these result types, it
-//! does not change them.
+//! Scope: single-package `BUILD`, exec_root = the workspace dir. The daemon does
+//! **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
 use razel_build::build_target;
 use razel_core::Digest;
+use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
 use razel_wire::{BuildResult, BuildStatus, OutputArtifact, VersionInfo, encode};
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("build") => cmd_build(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
+        Some("daemon") => cmd_daemon(&args[1..]),
         Some("-h") | Some("--help") | None => {
             print_usage();
             ExitCode::SUCCESS
@@ -48,24 +49,93 @@ fn print_usage() {
         "razel — build engine CLI
 
 USAGE:
-  razel build <target> [-C <dir>] [--cache <dir>] [--cbor]
-  razel version [--cbor]
+  razel build <target> [-C <dir>] [--cache <dir>] [--daemon] [--socket <s>] [--cbor]
+  razel version [--daemon] [--socket <s>] [--cbor]
+  razel daemon [-C <dir>] [--cache <dir>] [--socket <s>]
 
-build:
-  <target>          target to build (name, :name, or //pkg:name; single-package BUILD)
+  <target>          name, :name, or //pkg:name (single-package BUILD)
   -C, --workspace   workspace dir with BUILD + sources (default: .)
   --cache <dir>     content-addressed cache dir (default: <workspace>/.razel-cache)
+  --daemon          route the request to a running `razel daemon` over UDS
+  --socket <s>      daemon socket path (default: <workspace>/.razel-daemon.sock)
   --cbor            print the result as taut-wire CBOR (hex) instead of text
 "
     );
 }
 
-fn cmd_version(args: &[String]) -> ExitCode {
-    let info = VersionInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        protocol: PROTOCOL,
+/// Parsed flags shared across subcommands.
+struct Opts {
+    workspace: PathBuf,
+    cache: Option<PathBuf>,
+    socket: Option<PathBuf>,
+    daemon: bool,
+    cbor: bool,
+    positionals: Vec<String>,
+}
+
+fn parse_opts(args: &[String]) -> Result<Opts, ExitCode> {
+    let mut o = Opts {
+        workspace: PathBuf::from("."),
+        cache: None,
+        socket: None,
+        daemon: false,
+        cbor: false,
+        positionals: Vec::new(),
     };
-    if args.iter().any(|a| a == "--cbor") {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-C" | "--workspace" => o.workspace = PathBuf::from(value(args, &mut i, "-C")?),
+            "--cache" => o.cache = Some(PathBuf::from(value(args, &mut i, "--cache")?)),
+            "--socket" => o.socket = Some(PathBuf::from(value(args, &mut i, "--socket")?)),
+            "--daemon" => o.daemon = true,
+            "--cbor" => o.cbor = true,
+            s if s.starts_with('-') => {
+                eprintln!("razel: unknown flag {s:?}");
+                return Err(ExitCode::from(EX_USAGE));
+            }
+            s => o.positionals.push(s.to_string()),
+        }
+        i += 1;
+    }
+    Ok(o)
+}
+
+fn value(args: &[String], i: &mut usize, flag: &str) -> Result<String, ExitCode> {
+    match args.get(*i + 1) {
+        Some(v) => {
+            *i += 1;
+            Ok(v.clone())
+        }
+        None => {
+            eprintln!("razel: {flag} requires a value");
+            Err(ExitCode::from(EX_USAGE))
+        }
+    }
+}
+
+fn default_socket(workspace: &Path) -> PathBuf {
+    workspace.join(".razel-daemon.sock")
+}
+
+fn cmd_version(args: &[String]) -> ExitCode {
+    let o = match parse_opts(args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    let info = if o.daemon {
+        let socket = o.socket.unwrap_or_else(|| default_socket(&o.workspace));
+        match daemon_call(&socket, &rpc::req_version()) {
+            Ok(p) => VersionInfo::from_cbor(&p),
+            Err(c) => return c,
+        }
+    } else {
+        VersionInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol: PROTOCOL,
+        }
+    };
+    if o.cbor {
         println!("{}", hex(&encode(&info.to_cbor())));
     } else {
         println!("razel {} (wire protocol {})", info.version, info.protocol);
@@ -74,116 +144,33 @@ fn cmd_version(args: &[String]) -> ExitCode {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    let mut target: Option<String> = None;
-    let mut workspace = PathBuf::from(".");
-    let mut cache_dir: Option<PathBuf> = None;
-    let mut cbor = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        match a {
-            "-C" | "--workspace" => match args.get(i + 1) {
-                Some(v) => {
-                    workspace = PathBuf::from(v);
-                    i += 1;
-                }
-                None => return missing_value(a),
-            },
-            "--cache" => match args.get(i + 1) {
-                Some(v) => {
-                    cache_dir = Some(PathBuf::from(v));
-                    i += 1;
-                }
-                None => return missing_value(a),
-            },
-            "--cbor" => cbor = true,
-            s if s.starts_with('-') => {
-                eprintln!("razel build: unknown flag {s:?}");
-                return ExitCode::from(EX_USAGE);
-            }
-            s => {
-                if target.is_some() {
-                    eprintln!("razel build: more than one target given");
-                    return ExitCode::from(EX_USAGE);
-                }
-                target = Some(s.to_string());
-            }
-        }
-        i += 1;
-    }
-
-    let Some(target_arg) = target else {
-        eprintln!("razel build: missing <target>");
+    let o = match parse_opts(args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    if o.positionals.len() != 1 {
+        eprintln!("razel build: expected exactly one <target>");
         return ExitCode::from(EX_USAGE);
-    };
-    // Accept name | :name | //pkg:name — build the bare name (single-package BUILD).
-    let name = target_arg
-        .rsplit(':')
-        .next()
-        .unwrap_or(&target_arg)
-        .to_string();
+    }
+    let target_arg = o.positionals[0].clone();
 
-    let Some(build_path) = ["BUILD", "BUILD.bazel"]
-        .iter()
-        .map(|f| workspace.join(f))
-        .find(|p| p.exists())
-    else {
-        eprintln!(
-            "razel build: no BUILD or BUILD.bazel in {}",
-            workspace.display()
-        );
-        return ExitCode::FAILURE;
-    };
-    let build_src = match std::fs::read_to_string(&build_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("razel build: cannot read {}: {e}", build_path.display());
-            return ExitCode::FAILURE;
+    let result = if o.daemon {
+        let socket = o
+            .socket
+            .clone()
+            .unwrap_or_else(|| default_socket(&o.workspace));
+        match daemon_call(&socket, &rpc::req_build(&target_arg)) {
+            Ok(p) => BuildResult::from_cbor(&p),
+            Err(c) => return c,
+        }
+    } else {
+        match local_build(&o, &target_arg) {
+            Ok(r) => r,
+            Err(c) => return c,
         }
     };
 
-    let cache_path = cache_dir.unwrap_or_else(|| workspace.join(".razel-cache"));
-    let cache = match Cache::new(&cache_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "razel build: cannot open cache {}: {e}",
-                cache_path.display()
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // The driver returns produced output paths or a build error; map either into
-    // the wire contract's BuildResult so the CLI and a future daemon agree.
-    let result = match build_target(&build_src, &name, &workspace, &cache) {
-        Ok(produced) => BuildResult {
-            target: target_arg.clone(),
-            status: BuildStatus::Built,
-            // Cold one-shot build: `recomputes` is the warm daemon's incremental
-            // metric, 0 here. (Cached-vs-built per action awaits the driver
-            // surfacing cache-hit info — a small follow-up.)
-            recomputes: 0,
-            outputs: produced
-                .iter()
-                .map(|p| OutputArtifact {
-                    path: p.clone(),
-                    digest: digest_of(&workspace.join(p)),
-                })
-                .collect(),
-            message: None,
-        },
-        Err(e) => BuildResult {
-            target: target_arg.clone(),
-            status: BuildStatus::Failed,
-            recomputes: 0,
-            outputs: vec![],
-            message: Some(e),
-        },
-    };
-
-    if cbor {
+    if o.cbor {
         println!("{}", hex(&encode(&result.to_cbor())));
     } else {
         print_build_result(&result);
@@ -194,9 +181,104 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 }
 
-fn missing_value(flag: &str) -> ExitCode {
-    eprintln!("razel build: {flag} requires a value");
-    ExitCode::from(EX_USAGE)
+fn cmd_daemon(args: &[String]) -> ExitCode {
+    let o = match parse_opts(args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    let socket = o.socket.unwrap_or_else(|| default_socket(&o.workspace));
+    let cache = o.cache.unwrap_or_else(|| o.workspace.join(".razel-cache"));
+    eprintln!(
+        "razel daemon: serving {} on {}",
+        o.workspace.display(),
+        socket.display()
+    );
+    match Server::new(o.workspace, cache).serve(&socket) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("razel daemon: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run a build in-process; maps the driver's outcome onto the wire contract.
+fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
+    // Accept name | :name | //pkg:name — build the bare name (single-package BUILD).
+    let name = target_arg
+        .rsplit(':')
+        .next()
+        .unwrap_or(target_arg)
+        .to_string();
+
+    let Some(build_path) = ["BUILD", "BUILD.bazel"]
+        .iter()
+        .map(|f| o.workspace.join(f))
+        .find(|p| p.exists())
+    else {
+        eprintln!(
+            "razel build: no BUILD or BUILD.bazel in {}",
+            o.workspace.display()
+        );
+        return Err(ExitCode::FAILURE);
+    };
+    let build_src = std::fs::read_to_string(&build_path).map_err(|e| {
+        eprintln!("razel build: cannot read {}: {e}", build_path.display());
+        ExitCode::FAILURE
+    })?;
+
+    let cache_path = o
+        .cache
+        .clone()
+        .unwrap_or_else(|| o.workspace.join(".razel-cache"));
+    let cache = Cache::new(&cache_path).map_err(|e| {
+        eprintln!(
+            "razel build: cannot open cache {}: {e}",
+            cache_path.display()
+        );
+        ExitCode::FAILURE
+    })?;
+
+    Ok(
+        match build_target(&build_src, &name, &o.workspace, &cache) {
+            Ok(produced) => BuildResult {
+                target: target_arg.to_string(),
+                status: BuildStatus::Built,
+                recomputes: 0, // cold one-shot build; recomputes is the warm daemon's metric
+                outputs: produced
+                    .iter()
+                    .map(|p| OutputArtifact {
+                        path: p.clone(),
+                        digest: digest_of(&o.workspace.join(p)),
+                    })
+                    .collect(),
+                message: None,
+            },
+            Err(e) => BuildResult {
+                target: target_arg.to_string(),
+                status: BuildStatus::Failed,
+                recomputes: 0,
+                outputs: vec![],
+                message: Some(e),
+            },
+        },
+    )
+}
+
+/// One request/response to the daemon; unwraps the payload or prints the error.
+fn daemon_call(socket: &Path, req: &razel_wire::Cbor) -> Result<razel_wire::Cbor, ExitCode> {
+    let resp = rpc::call(socket, req).map_err(|e| {
+        eprintln!("razel: cannot reach daemon at {} ({e})", socket.display());
+        eprintln!(
+            "  start one with: razel daemon --socket {}",
+            socket.display()
+        );
+        ExitCode::FAILURE
+    })?;
+    rpc::payload(&resp).map_err(|e| {
+        eprintln!("razel: daemon error: {e}");
+        ExitCode::FAILURE
+    })
 }
 
 fn digest_of(path: &Path) -> Vec<u8> {
