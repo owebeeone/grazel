@@ -7,6 +7,12 @@
 //! (plain Starlark `def`s that call rules) work for free via evaluation.
 
 pub mod rules;
+// Per-language native rulesets — each maps a `@rules_*//` load to native rules,
+// registered in `rules::ruleset_modules`. (Independent modules so language support
+// lands without touching the shared cc/analysis core.)
+mod py_rules;
+mod rust_rules;
+mod sh_rules;
 pub use rules::{
     AnalyzedAction, AnalyzedTarget, GlobalFlags, analyze_bazel, analyze_bazel_with,
     analyze_starlark, analyze_workspace, analyze_workspace_with, registered_configs,

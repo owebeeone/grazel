@@ -106,7 +106,7 @@ pub struct GlobalFlags {
 
 /// Canonicalize a target name/label against the current package. Single-package
 /// mode keeps bare names; workspace mode produces `//pkg:name`.
-fn canon_label(s: &str) -> String {
+pub(crate) fn canon_label(s: &str) -> String {
     CURRENT_PKG.with_borrow(|p| match p {
         None => s.strip_prefix(':').unwrap_or(s).to_string(),
         Some(pkg) => {
@@ -122,7 +122,7 @@ fn canon_label(s: &str) -> String {
 }
 
 /// Package-qualify a source/output path (`x.cc` → `pkg/x.cc` in workspace mode).
-fn qualify(path: &str) -> String {
+pub(crate) fn qualify(path: &str) -> String {
     CURRENT_PKG.with_borrow(|p| match p {
         Some(pkg) => format!("{pkg}/{path}"),
         None => path.to_string(),
@@ -454,7 +454,7 @@ fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
 const CXX: &str = "/usr/bin/c++";
 const AR: &str = "/usr/bin/ar";
 
-fn record_target(t: AnalyzedTarget) {
+pub(crate) fn record_target(t: AnalyzedTarget) {
     RESULTS.with_borrow_mut(|r| {
         r.insert(t.name.clone(), t.clone());
     });
@@ -463,17 +463,17 @@ fn record_target(t: AnalyzedTarget) {
 
 /// What a dep contributes to its users: linkable outputs, exported hdrs, exported
 /// compile flags (defines/includes), and its canonical label.
-struct DepInfo {
-    libs: Vec<String>,
-    hdrs: Vec<String>,
-    cflags: Vec<String>,
-    canon: String,
+pub(crate) struct DepInfo {
+    pub(crate) libs: Vec<String>,
+    pub(crate) hdrs: Vec<String>,
+    pub(crate) cflags: Vec<String>,
+    pub(crate) canon: String,
 }
 
 /// Resolve a dep label to its [`DepInfo`]. In workspace mode a cross-package dep
 /// whose package isn't loaded yet is loaded on demand; otherwise a forward/cross
 /// reference errors clearly.
-fn resolve_dep(label: &str) -> anyhow::Result<DepInfo> {
+pub(crate) fn resolve_dep(label: &str) -> anyhow::Result<DepInfo> {
     let canon = canon_label(label);
     let get = || {
         RESULTS.with_borrow(|r| {
@@ -627,7 +627,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
     }
 }
 
-fn unpack(list: Option<UnpackList<String>>) -> Vec<String> {
+pub(crate) fn unpack(list: Option<UnpackList<String>>) -> Vec<String> {
     list.map(|l| l.items).unwrap_or_default()
 }
 
@@ -705,21 +705,29 @@ fn resolve_bzl(root: &Path, label: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// File loader for BUILD/`.bzl` evaluation: resolves `@rules_cc//cc:*.bzl` to the
-/// synthetic native module, and any other `//pkg:f.bzl`/`:f.bzl` to a project file
-/// it reads + evaluates (recursively, with this same loader) — so a BUILD can
+/// A natively-provided ruleset: `load()`s whose path starts with `prefix`
+/// (e.g. `@rules_cc//`, `@rules_rust//`) resolve to `module`, a synthetic module
+/// re-exporting razel's native rules under the names real BUILD files import.
+pub(crate) struct Ruleset {
+    pub(crate) prefix: &'static str,
+    pub(crate) module: FrozenModule,
+}
+
+/// File loader for BUILD/`.bzl` evaluation: resolves a `@repo//...` load to its
+/// native [`Ruleset`] module, and any other `//pkg:f.bzl`/`:f.bzl` to a project
+/// file it reads + evaluates (recursively, with this same loader) — so a BUILD can
 /// `load()` a repo's own macros. (`rule()` objects can't be frozen yet, so a `.bzl`
-/// that *defines* a rule will fail to freeze; macros over the native cc rules work.)
+/// that *defines* a rule will fail to freeze; macros over the native rules work.)
 struct BzlLoader<'a> {
-    rules_cc: &'a FrozenModule,
+    rulesets: &'a [Ruleset],
     globals: &'a Globals,
     cache: RefCell<HashMap<String, FrozenModule>>,
 }
 
 impl FileLoader for BzlLoader<'_> {
     fn load(&self, path: &str) -> starlark::Result<FrozenModule> {
-        if path.starts_with("@rules_cc//") {
-            return Ok(self.rules_cc.clone());
+        if let Some(rs) = self.rulesets.iter().find(|r| path.starts_with(r.prefix)) {
+            return Ok(rs.module.clone());
         }
         if let Some(m) = self.cache.borrow().get(path) {
             return Ok(m.clone());
@@ -750,14 +758,38 @@ impl FileLoader for BzlLoader<'_> {
     }
 }
 
-/// Evaluate one BUILD source with the cc-rule loader + the rule globals.
+/// Every natively-provided ruleset, by `load()` prefix. New languages register a
+/// row here (the rule logic itself lives in the per-language module). Each maps a
+/// `@repo//` to a synthetic module re-exporting razel's native rules.
+fn ruleset_modules() -> Result<Vec<Ruleset>, String> {
+    Ok(vec![
+        Ruleset {
+            prefix: "@rules_cc//",
+            module: rules_cc_module()?,
+        },
+        Ruleset {
+            prefix: "@rules_rust//",
+            module: crate::rust_rules::module()?,
+        },
+        Ruleset {
+            prefix: "@rules_python//",
+            module: crate::py_rules::module()?,
+        },
+        Ruleset {
+            prefix: "@rules_shell//",
+            module: crate::sh_rules::module()?,
+        },
+    ])
+}
+
+/// Evaluate one BUILD source with the ruleset loaders + the rule globals.
 /// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
 /// cross-package load appends, never clears).
 fn eval_build_src(name: &str, src: &str) -> Result<(), String> {
-    let rules_cc = rules_cc_module()?;
+    let rulesets = ruleset_modules()?;
     let globals = build_globals();
     let loader = BzlLoader {
-        rules_cc: &rules_cc,
+        rulesets: &rulesets,
         globals: &globals,
         cache: RefCell::new(HashMap::new()),
     };
