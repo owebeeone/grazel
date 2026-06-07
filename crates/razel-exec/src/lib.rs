@@ -11,7 +11,7 @@
 //! don't change, this contract.
 
 pub mod sandbox;
-pub use sandbox::{Materialize, Sandbox};
+pub use sandbox::{Isolation, Materialize, Sandbox, seatbelt_available};
 
 use razel_actions::Action;
 use razel_core::Digest;

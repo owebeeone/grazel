@@ -13,6 +13,11 @@
 //!
 //! Cost: symlinks/hardlinks copy no data, and a [`Sandbox`] can be **reused**
 //! across rebuilds so only changed links are fixed up ([`Sandbox::sync_inputs`]).
+//!
+//! Platforms: unix-only today (symlink/hardlink + Seatbelt). The **Windows** port
+//! is untouched — it would materialize via `CreateHardLink` (no privilege on NTFS
+//! same-volume; symlinks need Developer Mode) and confine via a Job Object +
+//! restricted token / AppContainer (the Seatbelt analogue). Tracked, not built.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -38,14 +43,42 @@ pub enum Materialize {
     Hardlink,
 }
 
+/// OS-level confinement applied when an action runs, on top of the input tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Isolation {
+    /// No OS sandbox — the input tree alone isolates the workspace (cwd).
+    #[default]
+    None,
+    /// macOS Seatbelt (`sandbox-exec`): a write-confinement + optional network
+    /// block, requiring **no root**. Reads stay open (the input tree handles
+    /// read-isolation). Inactive on non-macOS targets. `network = false` blocks
+    /// the network (keeping UDS).
+    Seatbelt { network: bool },
+}
+
 /// A per-action sandbox directory. `transient` ones self-delete on drop;
 /// `persistent` ones are reused across builds (only the link *delta* is fixed up).
 pub struct Sandbox {
     dir: PathBuf,
     owned: bool,
     how: Materialize,
+    isolation: Isolation,
     /// Inputs currently linked in (relative path → its source), for delta fixup.
     linked: BTreeMap<String, PathBuf>,
+}
+
+/// Whether macOS Seatbelt (`/usr/bin/sandbox-exec`) is usable on this machine.
+/// Probes once with a trivial allow-all profile; false on non-macOS or if the
+/// (deprecated-but-present) tool is missing — callers degrade to [`Isolation::None`].
+pub fn seatbelt_available() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 impl Sandbox {
@@ -69,6 +102,7 @@ impl Sandbox {
             dir,
             owned,
             how,
+            isolation: Isolation::None,
             linked: BTreeMap::new(),
         })
     }
@@ -79,6 +113,35 @@ impl Sandbox {
     pub fn strategy(mut self, how: Materialize) -> Self {
         self.how = how;
         self
+    }
+    /// Apply OS-level confinement (e.g. Seatbelt) when running.
+    pub fn with_isolation(mut self, isolation: Isolation) -> Self {
+        self.isolation = isolation;
+        self
+    }
+
+    /// macOS Seatbelt profile (SBPL): allow-default, then **deny all writes**
+    /// except the sandbox dir + `$TMPDIR` (+ the std streams), and optionally
+    /// block the network. Paths are canonicalized so the kernel's realpath
+    /// (`/var` → `/private/var`) matches.
+    fn seatbelt_profile(&self, network: bool) -> io::Result<String> {
+        let dir = self.dir.canonicalize()?;
+        let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        let tmp = Path::new(&tmp)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+        let net = if network {
+            ""
+        } else {
+            "(deny network*)(allow network* (remote unix-socket))"
+        };
+        Ok(format!(
+            "(version 1)(allow default){net}(deny file-write*)(allow file-write* \
+             (subpath \"{dir}\") (subpath \"{tmp}\") \
+             (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\"))",
+            dir = dir.display(),
+            tmp = tmp.display(),
+        ))
     }
 
     fn link_one(&self, rel: &str, source: &Path) -> io::Result<()> {
@@ -138,17 +201,29 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Run `argv` with cwd = the sandbox and a default-deny env (only `env`).
+    /// Run `argv` with cwd = the sandbox and a default-deny env (only `env`),
+    /// optionally wrapped in the OS sandbox ([`Isolation`]).
     pub fn run(&self, argv: &[String], env: &BTreeMap<String, String>) -> io::Result<i32> {
         let (prog, rest) = argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-        let status = Command::new(prog)
-            .args(rest)
-            .current_dir(&self.dir)
-            .env_clear()
-            .envs(env)
-            .status()?;
+
+        // Seatbelt: run `sandbox-exec -p <profile> -- argv` (macOS only; elsewhere
+        // the request is a no-op and the action runs in just the input tree).
+        let mut cmd = match self.isolation {
+            Isolation::Seatbelt { network } if cfg!(target_os = "macos") => {
+                let profile = self.seatbelt_profile(network)?;
+                let mut c = Command::new("/usr/bin/sandbox-exec");
+                c.arg("-p").arg(profile).arg("--").arg(prog).args(rest);
+                c
+            }
+            _ => {
+                let mut c = Command::new(prog);
+                c.args(rest);
+                c
+            }
+        };
+        let status = cmd.current_dir(&self.dir).env_clear().envs(env).status()?;
         Ok(status.code().unwrap_or(-1))
     }
 
@@ -236,5 +311,44 @@ mod tests {
             let _sb = Sandbox::persistent(&dir, Materialize::Symlink).unwrap();
         }
         assert!(dir.exists(), "persistent sandbox is not deleted on drop");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_confines_writes_to_the_sandbox() {
+        if !seatbelt_available() {
+            return; // sandbox-exec unavailable (e.g. stripped CI image)
+        }
+        let env = BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let exec = tempfile::tempdir().unwrap();
+        let sb = Sandbox::persistent(exec.path().join(".sb"), Materialize::Symlink)
+            .unwrap()
+            .with_isolation(Isolation::Seatbelt { network: false });
+
+        // A write *inside* the sandbox (cwd) is allowed.
+        let inside = sb
+            .run(
+                &["/bin/sh".into(), "-c".into(), "echo ok > inside.txt".into()],
+                &env,
+            )
+            .unwrap();
+        assert_eq!(inside, 0, "in-sandbox write should be allowed");
+        assert!(sb.dir().join("inside.txt").exists());
+
+        // A write *outside* the sandbox (/tmp is not the sandbox nor $TMPDIR on
+        // macOS, which is /var/folders/...) is denied by the profile.
+        let escape = format!("/tmp/razel-seatbelt-escape-{}.txt", std::process::id());
+        let _ = std::fs::remove_file(&escape);
+        let outside = sb
+            .run(
+                &["/bin/sh".into(), "-c".into(), format!("echo x > {escape}")],
+                &env,
+            )
+            .unwrap();
+        assert_ne!(outside, 0, "write outside the sandbox must be denied");
+        assert!(
+            !std::path::Path::new(&escape).exists(),
+            "the escaping write must not have happened"
+        );
     }
 }

@@ -28,7 +28,7 @@ use crate::analyze_build;
 use razel_actions::Action;
 use razel_core::Digest;
 use razel_engine::Engine;
-use razel_exec::{Cache, Materialize, Sandbox, build_action_in};
+use razel_exec::{Cache, Isolation, Materialize, Sandbox, build_action_in};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -46,6 +46,8 @@ pub struct IncrementalBuilder {
     leaf_inputs: HashSet<String>,
     /// How each action's sandbox materializes its inputs (symlink vs hardlink).
     materialize: Materialize,
+    /// OS-level confinement for each action (e.g. macOS Seatbelt).
+    isolation: Isolation,
 }
 
 fn file_key(path: &str) -> String {
@@ -84,12 +86,19 @@ impl IncrementalBuilder {
             errors: Rc::new(RefCell::new(Vec::new())),
             leaf_inputs: HashSet::new(),
             materialize: Materialize::default(),
+            isolation: Isolation::default(),
         }
     }
 
     /// Choose how sandboxes materialize inputs (symlink, the default, or hardlink).
     pub fn with_materialize(mut self, how: Materialize) -> Self {
         self.materialize = how;
+        self
+    }
+
+    /// Apply OS-level confinement to every action (e.g. macOS Seatbelt).
+    pub fn with_isolation(mut self, isolation: Isolation) -> Self {
+        self.isolation = isolation;
         self
     }
 
@@ -134,7 +143,9 @@ impl IncrementalBuilder {
                     .join(".razel-sandbox")
                     .join(akey.replace([':', '#'], "_"));
                 let sandbox = Rc::new(RefCell::new(
-                    Sandbox::persistent(sb_dir, self.materialize).map_err(|e| e.to_string())?,
+                    Sandbox::persistent(sb_dir, self.materialize)
+                        .map_err(|e| e.to_string())?
+                        .with_isolation(self.isolation),
                 ));
 
                 // The action's compute: restore-or-run, value = digest of its outputs.
@@ -345,6 +356,30 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
         };
         // Warm graph after an edit == fresh graph built straight to the final state.
         assert_eq!(run(&[("x.txt", "x1")]), "x1|y0");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn builds_under_seatbelt_isolation() {
+        use razel_exec::seatbelt_available;
+        if !seatbelt_available() {
+            return;
+        }
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("x.txt"), "hello").unwrap();
+        std::fs::write(exec.path().join("y.txt"), "world").unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // Each action runs write-confined + network-blocked; outputs land in the
+        // sandbox (allowed) and razel captures them back to exec_root itself.
+        let mut b = IncrementalBuilder::new(exec.path(), cache)
+            .with_isolation(Isolation::Seatbelt { network: false });
+        b.configure(BUILD).unwrap();
+        assert_eq!(b.build("lib").unwrap(), 3);
+        assert_eq!(
+            std::fs::read_to_string(exec.path().join("x.txt.out")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
