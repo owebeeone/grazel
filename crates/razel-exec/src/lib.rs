@@ -91,8 +91,8 @@ pub fn run_action(action: &Action, exec_root: &Path) -> io::Result<i32> {
 /// containing only the declared inputs, and store on success.
 pub fn build_action(action: &Action, cache: &Cache, exec_root: &Path) -> io::Result<RunResult> {
     let key = action.content_key();
-    let sandbox = Sandbox::transient(&exec_root.join(".razel-sandbox"), &key.to_hex())?;
-    build_action_in(action, cache, exec_root, sandbox)
+    let mut sandbox = Sandbox::transient(&exec_root.join(".razel-sandbox"), &key.to_hex())?;
+    build_action_in(action, cache, exec_root, &mut sandbox)
 }
 
 /// Like [`build_action`] but the caller supplies the [`Sandbox`] — letting a warm
@@ -102,7 +102,7 @@ pub fn build_action_in(
     action: &Action,
     cache: &Cache,
     exec_root: &Path,
-    mut sandbox: Sandbox,
+    sandbox: &mut Sandbox,
 ) -> io::Result<RunResult> {
     let key = action.content_key();
     let out_paths = || action.outputs.iter().map(|o| exec_root.join(o)).collect();

@@ -166,3 +166,49 @@ impl Drop for Sandbox {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_inputs_fixes_up_only_the_delta() {
+        let exec = tempfile::tempdir().unwrap();
+        for f in ["a", "b", "c"] {
+            std::fs::write(exec.path().join(f), f).unwrap();
+        }
+        let sbdir = tempfile::tempdir().unwrap();
+        let mut sb = Sandbox::persistent(sbdir.path().join("s"), Materialize::Symlink).unwrap();
+
+        // First materialize {a, b}: two links created.
+        let n1 = sb
+            .sync_inputs(exec.path(), &["a".into(), "b".into()])
+            .unwrap();
+        assert_eq!(n1, 2);
+        assert!(sb.dir().join("a").exists() && sb.dir().join("b").exists());
+
+        // Reconcile to {a, c}: drop b, add c, KEEP a → exactly 2 changes.
+        let n2 = sb
+            .sync_inputs(exec.path(), &["a".into(), "c".into()])
+            .unwrap();
+        assert_eq!(n2, 2, "remove b + add c");
+        assert!(sb.dir().join("a").exists() && sb.dir().join("c").exists());
+        assert!(!sb.dir().join("b").exists(), "b removed");
+
+        // Same set again: zero churn — the reuse win.
+        let n3 = sb
+            .sync_inputs(exec.path(), &["a".into(), "c".into()])
+            .unwrap();
+        assert_eq!(n3, 0, "input set unchanged → no link work");
+    }
+
+    #[test]
+    fn persistent_sandbox_dir_survives_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("keep");
+        {
+            let _sb = Sandbox::persistent(&dir, Materialize::Symlink).unwrap();
+        }
+        assert!(dir.exists(), "persistent sandbox is not deleted on drop");
+    }
+}

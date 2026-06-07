@@ -28,7 +28,7 @@ use crate::analyze_build;
 use razel_actions::Action;
 use razel_core::Digest;
 use razel_engine::Engine;
-use razel_exec::{Cache, build_action};
+use razel_exec::{Cache, Materialize, Sandbox, build_action_in};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -44,6 +44,8 @@ pub struct IncrementalBuilder {
     errors: Rc<RefCell<Vec<String>>>,
     /// Leaf (source) input node keys that exist on disk and can be `sync_file`d.
     leaf_inputs: HashSet<String>,
+    /// How each action's sandbox materializes its inputs (symlink vs hardlink).
+    materialize: Materialize,
 }
 
 fn file_key(path: &str) -> String {
@@ -81,7 +83,14 @@ impl IncrementalBuilder {
             cache: Rc::new(cache),
             errors: Rc::new(RefCell::new(Vec::new())),
             leaf_inputs: HashSet::new(),
+            materialize: Materialize::default(),
         }
+    }
+
+    /// Choose how sandboxes materialize inputs (symlink, the default, or hardlink).
+    pub fn with_materialize(mut self, how: Materialize) -> Self {
+        self.materialize = how;
+        self
     }
 
     /// Wire a BUILD's analyzed targets into the engine graph (once per BUILD).
@@ -117,6 +126,17 @@ impl IncrementalBuilder {
                     }
                 }
 
+                // Each action gets a PERSISTENT sandbox, reused across rebuilds —
+                // only the changed input links are fixed up (Bazel's stash trick),
+                // and a content-only change is zero link churn.
+                let sb_dir = self
+                    .exec_root
+                    .join(".razel-sandbox")
+                    .join(akey.replace([':', '#'], "_"));
+                let sandbox = Rc::new(RefCell::new(
+                    Sandbox::persistent(sb_dir, self.materialize).map_err(|e| e.to_string())?,
+                ));
+
                 // The action's compute: restore-or-run, value = digest of its outputs.
                 let argv = act.argv.clone();
                 let inputs = act.inputs.clone();
@@ -126,7 +146,9 @@ impl IncrementalBuilder {
                 let errors = self.errors.clone();
                 let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
                 self.engine.add_derived(&akey, &dep_refs, move |_| {
-                    run_action(&argv, &inputs, &outputs, &cache, &exec_root, &errors)
+                    run_action(
+                        &argv, &inputs, &outputs, &cache, &exec_root, &errors, &sandbox,
+                    )
                 });
                 act_keys.push(akey);
             }
@@ -161,8 +183,10 @@ impl IncrementalBuilder {
     }
 }
 
-/// Run one action (cache restore-or-run) and return the digest of its outputs.
-/// Side-effecting; failures are pushed to `errors` and a sentinel digest returned.
+/// Run one action (cache restore-or-run) in its persistent `sandbox` and return
+/// the digest of its outputs. Side-effecting; failures are pushed to `errors`
+/// and a sentinel digest returned.
+#[allow(clippy::too_many_arguments)]
 fn run_action(
     argv: &[String],
     inputs: &[String],
@@ -170,6 +194,7 @@ fn run_action(
     cache: &Cache,
     exec_root: &std::path::Path,
     errors: &RefCell<Vec<String>>,
+    sandbox: &Rc<RefCell<Sandbox>>,
 ) -> Digest {
     let mut input_digests = BTreeMap::new();
     for inp in inputs {
@@ -185,7 +210,8 @@ fn run_action(
         platform: "host".into(),
         outputs: outputs.to_vec(),
     };
-    match build_action(&action, cache, exec_root) {
+    let mut sb = sandbox.borrow_mut();
+    match build_action_in(&action, cache, exec_root, &mut sb) {
         Ok(r) if r.exit_code == 0 => {
             // Value = digest over the produced outputs, so early-cutoff tracks them.
             let parts: Vec<Digest> = outputs
