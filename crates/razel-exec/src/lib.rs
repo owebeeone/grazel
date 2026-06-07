@@ -10,6 +10,9 @@
 //! input materialization are the OS-specific layer on top (tracked); they enforce, but
 //! don't change, this contract.
 
+pub mod sandbox;
+pub use sandbox::{Materialize, Sandbox};
+
 use razel_actions::Action;
 use razel_core::Digest;
 use std::path::{Path, PathBuf};
@@ -84,8 +87,23 @@ pub fn run_action(action: &Action, exec_root: &Path) -> io::Result<i32> {
     Ok(status.code().unwrap_or(-1))
 }
 
-/// Build one action: cache hit → restore (0 exec); miss → run, and store on success.
+/// Build one action: cache hit → restore (0 exec); miss → run in a fresh sandbox
+/// containing only the declared inputs, and store on success.
 pub fn build_action(action: &Action, cache: &Cache, exec_root: &Path) -> io::Result<RunResult> {
+    let key = action.content_key();
+    let sandbox = Sandbox::transient(&exec_root.join(".razel-sandbox"), &key.to_hex())?;
+    build_action_in(action, cache, exec_root, sandbox)
+}
+
+/// Like [`build_action`] but the caller supplies the [`Sandbox`] — letting a warm
+/// builder hand in a **persistent, reused** sandbox so only the changed inputs are
+/// re-linked across rebuilds. On a cache hit the sandbox is untouched.
+pub fn build_action_in(
+    action: &Action,
+    cache: &Cache,
+    exec_root: &Path,
+    mut sandbox: Sandbox,
+) -> io::Result<RunResult> {
     let key = action.content_key();
     let out_paths = || action.outputs.iter().map(|o| exec_root.join(o)).collect();
 
@@ -96,8 +114,14 @@ pub fn build_action(action: &Action, cache: &Cache, exec_root: &Path) -> io::Res
             outputs: out_paths(),
         });
     }
-    let code = run_action(action, exec_root)?;
+
+    // Miss: materialize only declared inputs, run isolated, capture outputs.
+    let inputs: Vec<String> = action.inputs.keys().cloned().collect();
+    sandbox.sync_inputs(exec_root, &inputs)?;
+    sandbox.prepare_outputs(&action.outputs)?;
+    let code = sandbox.run(&action.argv, &action.env)?;
     if code == 0 {
+        sandbox.capture_outputs(exec_root, &action.outputs)?;
         cache.store(&key, &action.outputs, exec_root)?;
     }
     Ok(RunResult {
@@ -123,6 +147,7 @@ mod tests {
         let action = Action {
             argv: vec!["/bin/sh".into(), "-c".into(), "cat in.txt > out.txt".into()],
             outputs: vec!["out.txt".into()],
+            inputs: BTreeMap::from([("in.txt".into(), Digest::of(b"hello"))]),
             env: path_env(),
             ..Default::default()
         };
@@ -149,6 +174,49 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_blocks_undeclared_workspace_inputs() {
+        let exec = tempfile::tempdir().unwrap();
+        fs::write(exec.path().join("dep.txt"), "secret").unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // Reads dep.txt but does NOT declare it → absent in the sandbox → fails.
+        let undeclared = Action {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "cat dep.txt > out.txt".into(),
+            ],
+            outputs: vec!["out.txt".into()],
+            env: path_env(),
+            ..Default::default()
+        };
+        let r = build_action(&undeclared, &cache, exec.path()).unwrap();
+        assert_ne!(
+            r.exit_code, 0,
+            "undeclared dep.txt must be absent in the sandbox"
+        );
+
+        // Declaring it makes it present → succeeds, output captured back to exec_root.
+        let declared = Action {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "cat dep.txt > out.txt".into(),
+            ],
+            outputs: vec!["out.txt".into()],
+            inputs: BTreeMap::from([("dep.txt".into(), Digest::of(b"secret"))]),
+            env: path_env(),
+            ..Default::default()
+        };
+        let r2 = build_action(&declared, &cache, exec.path()).unwrap();
+        assert_eq!(r2.exit_code, 0, "declared dep.txt is present");
+        assert_eq!(
+            fs::read_to_string(exec.path().join("out.txt")).unwrap(),
+            "secret"
+        );
+    }
+
+    #[test]
     fn really_compiles_c_with_cc() {
         // A genuine compile action — razel running a real toolchain.
         if !Path::new("/usr/bin/cc").exists() {
@@ -166,6 +234,7 @@ mod tests {
                 "a.o".into(),
             ],
             outputs: vec!["a.o".into()],
+            inputs: BTreeMap::from([("a.c".into(), Digest::of(b"int main(void){return 0;}"))]),
             env: path_env(),
             ..Default::default()
         };
