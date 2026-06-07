@@ -16,13 +16,16 @@ cc_obj = rule(implementation=_impl, attrs={"src":1})
 cc_obj(name="widget", src="widget.c")
 "#;
 
-/// Short socket path (macOS sun_path is ~104 bytes; tempdir paths are too long).
+/// A rendezvous path for the daemon transport, portable across OSes. On unix it's
+/// a short `/tmp` path (macOS `sun_path` is ~104 bytes, so the long system tempdir
+/// won't fit a UDS); on Windows it's a temp-dir file holding the loopback-TCP port.
 fn sock(tag: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "/tmp/razel-rpc-{}-{}.sock",
-        tag,
-        std::process::id()
-    ))
+    let name = format!("razel-rpc-{}-{}.sock", tag, std::process::id());
+    #[cfg(unix)]
+    let p = PathBuf::from(format!("/tmp/{name}"));
+    #[cfg(windows)]
+    let p = std::env::temp_dir().join(name);
+    p
 }
 
 fn spawn(server: Server, socket: PathBuf) {
