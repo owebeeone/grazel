@@ -128,6 +128,80 @@ fn second_build_is_cached_with_zero_recomputes() {
     assert_eq!(second.recomputes, 0, "warm rebuild recomputes nothing");
 }
 
+const BUILD_WITH_TEST: &str = r#"
+def _impl(ctx):
+    out = ctx.attr.name + ".o"
+    ctx.actions.run(executable = "cc", outputs = [out], inputs = [ctx.attr.src], arguments = [])
+    return [DefaultInfo(files = [out])]
+thing = rule(implementation = _impl, attrs = {"src": 1})
+thing(name = "widget", src = "widget.c")
+thing(name = "widget_test", src = "widget.c")
+"#;
+
+#[test]
+fn affected_query_local_returns_impacted_targets() {
+    // Analysis-only — no toolchain needed.
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD_WITH_TEST).unwrap();
+
+    let out = razel()
+        .args(["affected", "widget.c", "--cbor", "-C"])
+        .arg(ws.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let impact = razel_wire::ImpactSet::from_cbor(&razel_wire::decode(&unhex(
+        &String::from_utf8_lossy(&out.stdout),
+    )));
+    let labels =
+        |v: &[razel_wire::TargetRef]| v.iter().map(|t| t.label.clone()).collect::<Vec<_>>();
+    assert_eq!(labels(&impact.targets), vec!["//:widget"]);
+    assert_eq!(labels(&impact.tests), vec!["//:widget_test"]);
+}
+
+#[test]
+fn affected_query_through_a_spawned_daemon() {
+    use std::time::{Duration, Instant};
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD_WITH_TEST).unwrap();
+    let socket = format!("/tmp/razel-cli-affected-{}.sock", std::process::id());
+
+    let mut daemon = razel()
+        .args(["daemon", "--socket", &socket, "-C"])
+        .arg(ws.path())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::path::Path::new(&socket).exists() {
+        assert!(Instant::now() < deadline, "daemon never bound the socket");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let out = razel()
+        .args([
+            "affected", "widget.c", "--daemon", "--socket", &socket, "-C",
+        ])
+        .arg(ws.path())
+        .output()
+        .unwrap();
+    daemon.kill().ok();
+    daemon.wait().ok();
+    let _ = std::fs::remove_file(&socket);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("//:widget"), "stdout: {s}");
+    assert!(s.contains("//:widget_test"), "stdout: {s}");
+}
+
 #[test]
 fn unknown_target_reports_failed_and_exits_nonzero() {
     let ws = tempfile::tempdir().unwrap();

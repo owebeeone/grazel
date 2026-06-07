@@ -8,8 +8,10 @@ publish = false
 
 [dependencies]
 razel-actions = { version = "0.1.0", path = "../razel-actions" }
+razel-analysis = { version = "0.1.0", path = "../razel-analysis" }
 razel-core = { version = "0.1.0", path = "../razel-core" }
 razel-exec = { version = "0.1.0", path = "../razel-exec" }
+razel-ir = { version = "0.1.0", path = "../razel-ir" }
 razel-loading = { version = "0.1.0", path = "../razel-loading" }
 
 [dev-dependencies]

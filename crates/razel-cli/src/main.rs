@@ -17,7 +17,7 @@ use razel_build::build_target_report;
 use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
-use razel_wire::{BuildResult, BuildStatus, OutputArtifact, VersionInfo, encode};
+use razel_wire::{BuildResult, BuildStatus, ImpactSet, OutputArtifact, VersionInfo, encode};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -30,6 +30,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("build") => cmd_build(&args[1..]),
+        Some("affected") => cmd_affected(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
         Some("daemon") => cmd_daemon(&args[1..]),
         Some("-h") | Some("--help") | None => {
@@ -50,6 +51,7 @@ fn print_usage() {
 
 USAGE:
   razel build <target> [-C <dir>] [--cache <dir>] [--daemon] [--socket <s>] [--cbor]
+  razel affected <file>... [-C <dir>] [--daemon] [--socket <s>] [--cbor]
   razel version [--daemon] [--socket <s>] [--cbor]
   razel daemon [-C <dir>] [--cache <dir>] [--socket <s>]
 
@@ -179,6 +181,66 @@ fn cmd_build(args: &[String]) -> ExitCode {
         BuildStatus::Failed => ExitCode::FAILURE,
         _ => ExitCode::SUCCESS,
     }
+}
+
+fn cmd_affected(args: &[String]) -> ExitCode {
+    let o = match parse_opts(args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    if o.positionals.is_empty() {
+        eprintln!("razel affected: expected one or more <file>");
+        return ExitCode::from(EX_USAGE);
+    }
+    let files = o.positionals.clone();
+
+    let impact = if o.daemon {
+        let socket = o
+            .socket
+            .clone()
+            .unwrap_or_else(|| default_socket(&o.workspace));
+        match daemon_call(&socket, &rpc::req_affected(&files)) {
+            Ok(p) => ImpactSet::from_cbor(&p),
+            Err(c) => return c,
+        }
+    } else {
+        match rpc::impact(&o.workspace, &files) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("razel affected: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    if o.cbor {
+        println!("{}", hex(&encode(&impact.to_cbor())));
+    } else {
+        print_impact(&impact);
+    }
+    ExitCode::SUCCESS
+}
+
+fn print_impact(i: &ImpactSet) {
+    println!(
+        "razel: {} source{} → {} target{}, {} test{}",
+        i.sources.len(),
+        plural(i.sources.len()),
+        i.targets.len(),
+        plural(i.targets.len()),
+        i.tests.len(),
+        plural(i.tests.len()),
+    );
+    for t in &i.targets {
+        println!("  target  {}", t.label);
+    }
+    for t in &i.tests {
+        println!("  test    {}", t.label);
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 fn cmd_daemon(args: &[String]) -> ExitCode {

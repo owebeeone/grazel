@@ -15,10 +15,13 @@
 //!   request  `{1: method:text, 2: args:cbor}`
 //!   response `{1: ok:bool, 2: payload:cbor|null, 3: error:text|null}`
 
-use razel_build::build_target_report;
+use razel_build::{affected, build_target_report};
 use razel_core::Digest;
 use razel_exec::Cache;
-use razel_wire::{BuildResult, BuildStatus, Cbor, OutputArtifact, VersionInfo, decode, encode};
+use razel_wire::{
+    BuildResult, BuildStatus, Cbor, ImpactSet, OutputArtifact, TargetRef, VersionInfo, decode,
+    encode,
+};
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -94,6 +97,10 @@ impl Server {
                 Ok(r) => ok(&r.to_cbor()),
                 Err(e) => err(&e),
             },
+            "affected" => match self.do_affected(args) {
+                Ok(i) => ok(&i.to_cbor()),
+                Err(e) => err(&e),
+            },
             other => err(&format!("unknown method {other:?}")),
         }
     }
@@ -149,6 +156,53 @@ impl Server {
             },
         )
     }
+
+    fn do_affected(&self, args: &Cbor) -> Result<ImpactSet, String> {
+        let Cbor::Array(items) = args else {
+            return Err("affected: expected a files array".into());
+        };
+        let files: Vec<String> = items
+            .iter()
+            .filter_map(|c| match c {
+                Cbor::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        impact(&self.workspace, &files)
+    }
+}
+
+/// The rdep impact of editing `files` in `workspace`, as the wire `ImpactSet`.
+/// Shared by the daemon's `affected` method and the CLI's in-process path.
+pub fn impact(workspace: &Path, files: &[String]) -> Result<ImpactSet, String> {
+    let build_path = ["BUILD", "BUILD.bazel"]
+        .iter()
+        .map(|f| workspace.join(f))
+        .find(|p| p.exists())
+        .ok_or_else(|| format!("no BUILD in {}", workspace.display()))?;
+    let build_src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
+
+    // Root package ("") — file ids are "/<path>", matching the query paths.
+    let a = affected(&build_src, "", files)?;
+    Ok(ImpactSet {
+        sources: a.sources,
+        targets: a.targets.iter().map(target_ref).collect(),
+        tests: a.tests.iter().map(target_ref).collect(),
+    })
+}
+
+/// Map the engine's coarse target kind onto the wire enum.
+fn target_ref(a: &razel_build::AffectedTarget) -> TargetRef {
+    use razel_wire::TargetKind as W;
+    let kind = match a.kind {
+        razel_ir::TargetKind::Library => W::Library,
+        razel_ir::TargetKind::Binary => W::Binary,
+        razel_ir::TargetKind::Test => W::Test,
+    };
+    TargetRef {
+        label: a.label.clone(),
+        kind,
+    }
 }
 
 fn version_info() -> VersionInfo {
@@ -195,6 +249,17 @@ pub fn req_build(target: &str) -> Cbor {
     ])
 }
 
+/// `affected <files...>` request envelope.
+pub fn req_affected(files: &[String]) -> Cbor {
+    Cbor::Map(vec![
+        (1, Cbor::Text("affected".into())),
+        (
+            2,
+            Cbor::Array(files.iter().map(|f| Cbor::Text(f.clone())).collect()),
+        ),
+    ])
+}
+
 /// Send one request envelope to the daemon at `socket`; return its response.
 pub fn call(socket: &Path, req: &Cbor) -> io::Result<Cbor> {
     let mut stream = UnixStream::connect(socket)?;
@@ -237,6 +302,30 @@ mod tests {
             (2, Cbor::Null),
         ]));
         assert!(payload(&resp).is_err());
+    }
+
+    #[test]
+    fn dispatch_affected_walks_the_rdep_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("BUILD"),
+            r#"
+def _impl(ctx):
+    out = ctx.attr.name + ".o"
+    ctx.actions.run(executable = "cc", outputs = [out], inputs = [ctx.attr.src], arguments = [])
+    return [DefaultInfo(files = [out])]
+thing = rule(implementation = _impl, attrs = {"src": 1})
+thing(name = "widget", src = "widget.c")
+thing(name = "widget_test", src = "widget.c")
+"#,
+        )
+        .unwrap();
+        let srv = Server::new(dir.path().to_path_buf(), std::env::temp_dir());
+        let resp = srv.dispatch(&req_affected(&["widget.c".into()]));
+        let impact = ImpactSet::from_cbor(&payload(&resp).unwrap());
+        let labels = |v: &[TargetRef]| v.iter().map(|t| t.label.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(&impact.targets), vec!["//:widget"]);
+        assert_eq!(labels(&impact.tests), vec!["//:widget_test"]);
     }
 
     #[test]

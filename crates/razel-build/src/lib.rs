@@ -10,11 +10,57 @@
 //! That + the link-with-deps cross-target flow are the next increments (D7).
 
 use razel_actions::Action;
-use razel_core::Digest;
+use razel_analysis::wire_to_ir;
+use razel_core::{Digest, FileId, TargetId};
 use razel_exec::{Cache, build_action};
+use razel_ir::TargetKind;
 use razel_loading::{AnalyzedTarget, analyze_starlark};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
+
+/// A target surfaced by the impact query: its canonical label + coarse kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffectedTarget {
+    pub label: String,
+    pub kind: TargetKind,
+}
+
+/// The reverse (rdep) impact of changing `sources`: the affected deliverables and
+/// tests. This is the AI-agent / test-selection query — "edit these files → rebuild
+/// these, re-run those" — answered by the IR's stored reverse edges (O(affected)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Affected {
+    pub sources: Vec<String>,
+    pub targets: Vec<AffectedTarget>,
+    pub tests: Vec<AffectedTarget>,
+}
+
+/// Compute the impact of editing `files` (paths relative to `package`): analyze the
+/// BUILD, wire it into the IR, and walk reverse edges from each file to its dependent
+/// targets. No execution — a pure graph query.
+pub fn affected(build_src: &str, package: &str, files: &[String]) -> Result<Affected, String> {
+    let analyzed = analyze_starlark("BUILD", build_src)?;
+    let g = wire_to_ir(package, &analyzed);
+
+    let mut tests = BTreeSet::new();
+    let mut deliverables = BTreeSet::new();
+    for f in files {
+        let fid = FileId::new(format!("{package}/{f}"));
+        let (t, d) = g.impacted_targets(&fid);
+        tests.extend(t);
+        deliverables.extend(d);
+    }
+
+    let to_ref = |tid: &TargetId| AffectedTarget {
+        label: tid.0.clone(),
+        kind: g.target(tid).map(|n| n.kind).unwrap_or(TargetKind::Library),
+    };
+    Ok(Affected {
+        sources: files.to_vec(),
+        targets: deliverables.iter().map(to_ref).collect(),
+        tests: tests.iter().map(to_ref).collect(),
+    })
+}
 
 /// Post-order DFS over `deps` → targets ordered deps-first (a target's deps execute before it).
 fn collect_order(
@@ -178,6 +224,29 @@ cc_obj(name = "widget", src = "widget.c")
             r2.executed, 0,
             "warm rebuild is fully cached — nothing recomputed"
         );
+    }
+
+    #[test]
+    fn affected_query_splits_tests_and_deliverables() {
+        // A lib and a test both consume widget.c; analysis-only (no toolchain needed).
+        let src = r#"
+def _impl(ctx):
+    out = ctx.attr.name + ".o"
+    ctx.actions.run(executable = "cc", outputs = [out], inputs = [ctx.attr.src], arguments = [])
+    return [DefaultInfo(files = [out])]
+thing = rule(implementation = _impl, attrs = {"src": 1})
+thing(name = "widget", src = "widget.c")
+thing(name = "widget_test", src = "widget.c")
+"#;
+        let labels = |v: &[AffectedTarget]| v.iter().map(|t| t.label.clone()).collect::<Vec<_>>();
+
+        let a = affected(src, "pkg", &["widget.c".to_string()]).unwrap();
+        assert_eq!(labels(&a.targets), vec!["//pkg:widget"]); // deliverable
+        assert_eq!(labels(&a.tests), vec!["//pkg:widget_test"]); // test (by suffix)
+
+        // An unrelated file impacts nothing — the rdep walk is output-sensitive.
+        let none = affected(src, "pkg", &["other.c".to_string()]).unwrap();
+        assert!(none.targets.is_empty() && none.tests.is_empty());
     }
 
     // The D7 path: a `define_config` transform generates the compile command; the rule

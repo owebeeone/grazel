@@ -106,10 +106,23 @@ pub fn analyze(package: &str, targets: &[TargetDecl]) -> Analysis {
     }
 }
 
+/// Infer a coarse target kind from the target name's suffix (the dialect convention:
+/// `*_test` → Test, `*_binary` → Binary, else Library). Analysis doesn't carry kind for
+/// user rules, so this is the available signal for the impact query's test/deliverable split.
+fn infer_kind(name: &str) -> TargetKind {
+    if name.ends_with("_test") {
+        TargetKind::Test
+    } else if name.ends_with("_binary") {
+        TargetKind::Binary
+    } else {
+        TargetKind::Library
+    }
+}
+
 /// Wire Starlark-rule analysis results ([`razel_loading::AnalyzedTarget`]) into the IR,
 /// so user-defined rules join the same action graph + rdep/impact query as built-ins.
-/// (Target kind isn't carried by analysis yet → defaults to Library; kind inference is a
-/// follow-up.)
+/// Target kind is inferred from the name suffix ([`infer_kind`]) so the impact query can
+/// partition tests vs deliverables.
 pub fn wire_to_ir(package: &str, targets: &[razel_loading::AnalyzedTarget]) -> Graph {
     let mut g = Graph::new();
     for t in targets {
@@ -117,7 +130,7 @@ pub fn wire_to_ir(package: &str, targets: &[razel_loading::AnalyzedTarget]) -> G
         let tid = TargetId::new(&label);
         g.add_target(TargetNode {
             id: tid.clone(),
-            kind: TargetKind::Library,
+            kind: infer_kind(&t.name),
         });
         for (i, act) in t.actions.iter().enumerate() {
             let aid = ActionId::new(format!("{label}#{i}"));
