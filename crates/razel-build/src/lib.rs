@@ -612,6 +612,39 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
     }
 
     #[test]
+    fn builds_via_a_rule_defined_in_a_loaded_bzl() {
+        // The freeze-fix payoff: a custom `rule()` defined in a .bzl and load()ed.
+        // Before RuleObj was freezable, freezing the loaded .bzl module errored here.
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "tools/rules.bzl",
+            "def _impl(ctx):\n    out = ctx.attr.name\n    ctx.actions.run(executable = \"/bin/sh\", arguments = [\"-c\", \"echo built > \" + out], outputs = [out], inputs = [])\n    return [DefaultInfo(files = [out])]\nmyrule = rule(implementation = _impl, attrs = {})\n",
+        );
+        w(
+            "app/BUILD",
+            "load(\"//tools:rules.bzl\", \"myrule\")\nmyrule(name = \"thing\")\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let report = build_workspace(root.path(), "//app:thing", &cache).unwrap();
+        assert!(report.produced.contains(&"thing".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("thing"))
+                .unwrap()
+                .trim(),
+            "built"
+        );
+    }
+
+    #[test]
     fn affected_query_splits_tests_and_deliverables() {
         // A lib and a test both consume widget.c; analysis-only (no toolchain needed).
         let src = r#"

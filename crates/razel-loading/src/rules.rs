@@ -10,16 +10,21 @@
 
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
+use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::{
     FrozenModule, Globals, GlobalsBuilder, LibraryExtension, Methods, MethodsBuilder, Module,
 };
 use starlark::eval::{Arguments, Evaluator, FileLoader};
+use starlark::starlark_complex_value;
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
 use starlark::values::structs::AllocStruct;
-use starlark::values::{Heap, NoSerialize, StarlarkValue, Trace, Value, starlark_value};
+use starlark::values::{
+    Freeze, Heap, NoSerialize, StarlarkValue, Trace, Value, ValueLifetimeless, ValueLike,
+    starlark_value,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -241,19 +246,28 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
 
 // ---- rule() + DefaultInfo + select ----------------------------------------------
 
-#[derive(Debug, Trace, NoSerialize, ProvidesStaticType, Allocative)]
-struct RuleObj<'v> {
-    implementation: Value<'v>,
+/// A `rule()` value. Generic over `V` so it has both an unfrozen form (`RuleObj<'v>`,
+/// holding a live `Value`) and a frozen form (`FrozenRuleObj`, holding a `FrozenValue`)
+/// — which is what lets a rule **survive `module.freeze()`** and therefore be defined
+/// in a `.bzl` and `load()`ed, not just inline. The impl function freezes with it.
+#[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
+#[repr(C)]
+struct RuleObjGen<V: ValueLifetimeless> {
+    implementation: V,
 }
+starlark_complex_value!(RuleObj);
 
-impl fmt::Display for RuleObj<'_> {
+impl<V: ValueLifetimeless> fmt::Display for RuleObjGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<rule>")
     }
 }
 
 #[starlark_value(type = "rule")]
-impl<'v> StarlarkValue<'v> for RuleObj<'v> {
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for RuleObjGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
     /// `my_rule(name=…, …)` — build a `ctx` and run the impl (same-scope analysis).
     fn invoke(
         &self,
@@ -280,7 +294,9 @@ impl<'v> StarlarkValue<'v> for RuleObj<'v> {
                     if let Some(list) = ListRef::from_value(*v) {
                         for item in list.iter() {
                             let label = item.unpack_str().unwrap_or_default();
-                            let dep = label.strip_prefix(':').unwrap_or(label).to_string();
+                            // Key by canonical label — bare in single-package mode,
+                            // //pkg:name in a workspace (matches the native rules).
+                            let dep = canon_label(label);
                             let files = RESULTS
                                 .with_borrow(|r| r.get(&dep).map(|t| t.default_info.clone()));
                             let Some(files) = files else {
@@ -302,7 +318,7 @@ impl<'v> StarlarkValue<'v> for RuleObj<'v> {
 
         STATE.with_borrow_mut(|s| {
             s.current = Some(AnalyzedTarget {
-                name: name.clone(),
+                name: canon_label(&name),
                 deps: dep_labels,
                 ..Default::default()
             })
@@ -311,9 +327,9 @@ impl<'v> StarlarkValue<'v> for RuleObj<'v> {
         let ctx = heap.alloc_complex_no_freeze(Ctx {
             attr: heap.alloc(AllocStruct(fields)),
             actions: heap.alloc_complex_no_freeze(Actions),
-            label: heap.alloc(format!("//:{name}")),
+            label: heap.alloc(canon_label(&name)),
         });
-        eval.eval_function(self.implementation, &[ctx], &[])?;
+        eval.eval_function(self.implementation.to_value(), &[ctx], &[])?;
 
         STATE.with_borrow_mut(|s| {
             if let Some(c) = s.current.take() {
@@ -337,9 +353,9 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
         let _ = attrs;
-        Ok(eval
-            .heap()
-            .alloc_complex_no_freeze(RuleObj { implementation }))
+        // alloc (freezable) — the rule survives module.freeze(), so it can be
+        // defined in a .bzl and load()ed, not just used inline.
+        Ok(eval.heap().alloc(RuleObjGen { implementation }))
     }
 
     /// `DefaultInfo(files=[…])` — the standard output provider (other kwargs absorbed).
