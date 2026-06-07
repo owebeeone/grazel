@@ -147,4 +147,58 @@ cc_obj(name = "gadget", src = "gadget.c")
         // define_config registered the toolchain config engine-side (for selection).
         assert_eq!(razel_loading::registered_configs(), vec!["gnu".to_string()]);
     }
+
+    // A real cc_library: compile N sources, then archive into a static lib (multi-action,
+    // single target — no cross-target deps yet).
+    const BUILD_LIBRARY: &str = r#"
+def _gnu_compile(req):
+    return struct(executable = req.tool, args = ["-c", req.src, "-o", req.out],
+                  inputs = [req.src], outputs = [req.out])
+
+def _gnu_archive(req):
+    return struct(executable = req.ar, args = ["rcs", req.out] + req.objs,
+                  inputs = req.objs, outputs = [req.out])
+
+gnu = define_config(name = "gnu", compile = _gnu_compile, archive = _gnu_archive)
+
+def _cc_library_impl(ctx):
+    objs = []
+    for src in ctx.attr.srcs:
+        o = src + ".o"
+        c = gnu.compile(struct(tool = "/usr/bin/cc", src = src, out = o))
+        ctx.actions.run(executable = c.executable, arguments = c.args, inputs = c.inputs, outputs = c.outputs)
+        objs.append(o)
+    lib = "lib" + ctx.attr.name + ".a"
+    a = gnu.archive(struct(ar = "/usr/bin/ar", objs = objs, out = lib))
+    ctx.actions.run(executable = a.executable, arguments = a.args, inputs = a.inputs, outputs = a.outputs)
+    return [DefaultInfo(files = [lib])]
+
+cc_library = rule(implementation = _cc_library_impl, attrs = {"srcs": 1})
+cc_library(name = "math", srcs = ["add.c", "sub.c"])
+"#;
+
+    #[test]
+    fn compiles_a_static_library_from_multiple_sources() {
+        if !Path::new("/usr/bin/cc").exists() || !Path::new("/usr/bin/ar").exists() {
+            return;
+        }
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(
+            exec.path().join("add.c"),
+            "int add(int a,int b){return a+b;}",
+        )
+        .unwrap();
+        std::fs::write(
+            exec.path().join("sub.c"),
+            "int sub(int a,int b){return a-b;}",
+        )
+        .unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let produced = build_target(BUILD_LIBRARY, "math", exec.path(), &cache).unwrap();
+        assert_eq!(produced, vec!["add.c.o", "sub.c.o", "libmath.a"]);
+        let lib = exec.path().join("libmath.a");
+        assert!(lib.exists(), "razel did not produce libmath.a");
+        assert!(std::fs::metadata(&lib).unwrap().len() > 0);
+    }
 }
