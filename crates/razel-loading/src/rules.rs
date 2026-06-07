@@ -14,11 +14,12 @@ use starlark::collections::SmallMap;
 use starlark::environment::{GlobalsBuilder, LibraryExtension, Methods, MethodsBuilder, Module};
 use starlark::eval::{Arguments, Evaluator};
 use starlark::syntax::{AstModule, Dialect};
-use starlark::values::list::UnpackList;
+use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
 use starlark::values::structs::AllocStruct;
 use starlark::values::{Heap, NoSerialize, StarlarkValue, Trace, Value, starlark_value};
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// One action registered by a rule impl (`ctx.actions.run`/`write`).
@@ -35,6 +36,8 @@ pub struct AnalyzedAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnalyzedTarget {
     pub name: String,
+    /// Resolved dependency target names (from the `deps` attr).
+    pub deps: Vec<String>,
     pub actions: Vec<AnalyzedAction>,
     /// `DefaultInfo(files=…)`.
     pub default_info: Vec<String>,
@@ -58,6 +61,13 @@ thread_local! {
 /// Names of configs declared via `define_config` in the last `analyze_starlark` run.
 pub fn registered_configs() -> Vec<String> {
     CONFIGS.with_borrow(|c| c.clone())
+}
+
+thread_local! {
+    /// Analyzed targets by name → providers, so a dependent's `deps` reads them
+    /// (cross-target provider flow). Requires deps declared before dependents; a forward
+    /// reference errors clearly (full dependency ordering is the next two-phase step).
+    static RESULTS: RefCell<BTreeMap<String, AnalyzedTarget>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 fn with_current<F: FnOnce(&mut AnalyzedTarget)>(f: F) {
@@ -185,24 +195,52 @@ impl<'v> StarlarkValue<'v> for RuleObj<'v> {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
         let named = args.names_map()?;
+        let heap = eval.heap();
         let mut name = String::new();
+        let mut dep_labels: Vec<String> = Vec::new();
         let mut fields: Vec<(String, Value<'v>)> = Vec::new();
         for (k, v) in &named {
             let key = k.as_str().to_string();
-            if key == "name" {
-                name = v.unpack_str().unwrap_or_default().to_string();
+            match key.as_str() {
+                "name" => {
+                    name = v.unpack_str().unwrap_or_default().to_string();
+                    fields.push((key, *v));
+                }
+                // Two-phase provider flow: resolve each dep label to its analyzed
+                // DefaultInfo (from the results registry) as a `struct(files = [...])`.
+                "deps" => {
+                    let mut providers: Vec<Value<'v>> = Vec::new();
+                    if let Some(list) = ListRef::from_value(*v) {
+                        for item in list.iter() {
+                            let label = item.unpack_str().unwrap_or_default();
+                            let dep = label.strip_prefix(':').unwrap_or(label).to_string();
+                            let files = RESULTS
+                                .with_borrow(|r| r.get(&dep).map(|t| t.default_info.clone()));
+                            let Some(files) = files else {
+                                return Err(anyhow::anyhow!(
+                                    "dep `{dep}` not analyzed yet — declare it before its users \
+                                     (forward references not yet supported)"
+                                )
+                                .into());
+                            };
+                            dep_labels.push(dep);
+                            providers.push(heap.alloc(AllocStruct([("files".to_string(), files)])));
+                        }
+                    }
+                    fields.push((key, heap.alloc(providers)));
+                }
+                _ => fields.push((key, *v)),
             }
-            fields.push((key, *v));
         }
 
         STATE.with_borrow_mut(|s| {
             s.current = Some(AnalyzedTarget {
                 name: name.clone(),
+                deps: dep_labels,
                 ..Default::default()
             })
         });
 
-        let heap = eval.heap();
         let ctx = heap.alloc_complex_no_freeze(Ctx {
             attr: heap.alloc(AllocStruct(fields)),
             actions: heap.alloc_complex_no_freeze(Actions),
@@ -212,6 +250,9 @@ impl<'v> StarlarkValue<'v> for RuleObj<'v> {
 
         STATE.with_borrow_mut(|s| {
             if let Some(c) = s.current.take() {
+                RESULTS.with_borrow_mut(|r| {
+                    r.insert(c.name.clone(), c.clone());
+                });
                 s.targets.push(c);
             }
         });
@@ -288,6 +329,7 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
         s.current = None;
     });
     CONFIGS.with_borrow_mut(|c| c.clear());
+    RESULTS.with_borrow_mut(|r| r.clear());
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
     let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
@@ -350,5 +392,52 @@ thing(name = "x")
         let targets = analyze_starlark("BUILD", src).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].actions[0].mnemonic, "cc");
+    }
+
+    #[test]
+    fn dependent_reads_dep_providers_two_phase() {
+        // lib declared first; bin's deps=[":lib"] reads lib's analyzed DefaultInfo.
+        let src = r#"
+def _lib(ctx):
+    out = "lib" + ctx.attr.name + ".a"
+    ctx.actions.run(executable = "ar", outputs = [out], inputs = [], arguments = ["rcs", out])
+    return [DefaultInfo(files = [out])]
+
+def _bin(ctx):
+    libs = []
+    for d in ctx.attr.deps:
+        libs = libs + d.files
+    out = ctx.attr.name
+    ctx.actions.run(executable = "cc", outputs = [out], inputs = libs, arguments = ["-o", out] + libs)
+    return [DefaultInfo(files = [out])]
+
+lib_rule = rule(implementation = _lib, attrs = {})
+bin_rule = rule(implementation = _bin, attrs = {})
+
+lib_rule(name = "math")
+bin_rule(name = "app", deps = [":math"])
+"#;
+        let targets = analyze_starlark("BUILD", src).unwrap();
+        let app = targets.iter().find(|t| t.name == "app").unwrap();
+        assert_eq!(app.deps, vec!["math"]);
+        // app linked the dep's analyzed output — the provider flowed across targets.
+        assert_eq!(app.actions[0].inputs, vec!["libmath.a"]);
+        assert!(app.actions[0].argv.contains(&"libmath.a".to_string()));
+    }
+
+    #[test]
+    fn forward_dep_reference_errors_clearly() {
+        // bin declared before its dep → forward ref → clear error, not silently wrong.
+        let src = r#"
+def _lib(ctx):
+    return [DefaultInfo(files = ["x"])]
+def _bin(ctx):
+    return [DefaultInfo(files = ctx.attr.deps[0].files)]
+lib_rule = rule(implementation = _lib, attrs = {})
+bin_rule = rule(implementation = _bin, attrs = {})
+bin_rule(name = "app", deps = [":math"])
+lib_rule(name = "math")
+"#;
+        assert!(analyze_starlark("BUILD", src).is_err());
     }
 }
