@@ -436,6 +436,42 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
     }
 
     #[test]
+    fn builds_a_bazel_target_with_glob_srcs() {
+        if !Path::new("/usr/bin/c++").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // srcs via glob — the rule never names the files; razel scans the package dir.
+        w(
+            "app/BUILD",
+            "load(\"@rules_cc//cc:cc_binary.bzl\", \"cc_binary\")\ncc_binary(name = \"prog\", srcs = glob([\"*.cc\"]))\n",
+        );
+        w(
+            "app/main.cc",
+            "#include <iostream>\nconst char* who();\nint main() { std::cout << \"Hello \" << who() << std::endl; return 0; }\n",
+        );
+        w("app/who.cc", "const char* who() { return \"world\"; }\n");
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let report = build_workspace(root.path(), "//app:prog", &cache).unwrap();
+        assert_eq!(
+            report.executed, 3,
+            "glob found 2 srcs → 2 compiles + 1 link"
+        );
+        assert!(report.produced.contains(&"app/prog".to_string()));
+
+        let out = std::process::Command::new(root.path().join("app/prog"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello world");
+    }
+
+    #[test]
     fn affected_query_splits_tests_and_deliverables() {
         // A lib and a test both consume widget.c; analysis-only (no toolchain needed).
         let src = r#"
