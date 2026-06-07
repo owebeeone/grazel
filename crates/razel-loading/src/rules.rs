@@ -12,9 +12,9 @@ use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
 use starlark::environment::{
-    FrozenModule, GlobalsBuilder, LibraryExtension, Methods, MethodsBuilder, Module,
+    FrozenModule, Globals, GlobalsBuilder, LibraryExtension, Methods, MethodsBuilder, Module,
 };
-use starlark::eval::{Arguments, Evaluator, ReturnFileLoader};
+use starlark::eval::{Arguments, Evaluator, FileLoader};
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
@@ -617,26 +617,90 @@ fn rules_cc_module() -> Result<FrozenModule, String> {
     })
 }
 
-/// Evaluate one BUILD source with the `@rules_cc` loader + the rule globals.
+/// The globals available to BUILD and `.bzl` evaluation: `rule()`, `DefaultInfo`,
+/// `select`, `define_config`, `glob`, + struct. (cc rules arrive via `load()`.)
+fn build_globals() -> Globals {
+    GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
+        .with(rule_globals)
+        .build()
+}
+
+/// Resolve a `.bzl` load label to a file under `root`. `//pkg:f.bzl` → `root/pkg/f.bzl`;
+/// `:f.bzl` → `root/<current pkg>/f.bzl`. External repos other than `@rules_cc` error.
+fn resolve_bzl(root: &Path, label: &str) -> Result<PathBuf, String> {
+    if let Some(rest) = label.strip_prefix("//") {
+        let (pkg, file) = rest
+            .split_once(':')
+            .ok_or_else(|| format!("bad .bzl label `{label}`"))?;
+        Ok(root.join(pkg).join(file))
+    } else if let Some(file) = label.strip_prefix(':') {
+        let pkg = CURRENT_PKG.with_borrow(|p| p.clone()).unwrap_or_default();
+        Ok(root.join(pkg).join(file))
+    } else {
+        Err(format!(
+            "unsupported load path `{label}` (only //pkg:f.bzl, :f.bzl, @rules_cc)"
+        ))
+    }
+}
+
+/// File loader for BUILD/`.bzl` evaluation: resolves `@rules_cc//cc:*.bzl` to the
+/// synthetic native module, and any other `//pkg:f.bzl`/`:f.bzl` to a project file
+/// it reads + evaluates (recursively, with this same loader) — so a BUILD can
+/// `load()` a repo's own macros. (`rule()` objects can't be frozen yet, so a `.bzl`
+/// that *defines* a rule will fail to freeze; macros over the native cc rules work.)
+struct BzlLoader<'a> {
+    rules_cc: &'a FrozenModule,
+    globals: &'a Globals,
+    cache: RefCell<HashMap<String, FrozenModule>>,
+}
+
+impl FileLoader for BzlLoader<'_> {
+    fn load(&self, path: &str) -> starlark::Result<FrozenModule> {
+        if path.starts_with("@rules_cc//") {
+            return Ok(self.rules_cc.clone());
+        }
+        if let Some(m) = self.cache.borrow().get(path) {
+            return Ok(m.clone());
+        }
+        let err = |m: String| starlark::Error::new_other(anyhow::anyhow!(m));
+        let root = WORKSPACE
+            .with_borrow(|w| w.clone())
+            .ok_or_else(|| err(format!("load(\"{path}\") needs workspace mode")))?;
+        let fs = resolve_bzl(&root, path).map_err(err)?;
+        let src = std::fs::read_to_string(&fs)
+            .map_err(|e| err(format!("cannot read {}: {e}", fs.display())))?;
+
+        let frozen = Module::with_temp_heap(|module| -> starlark::Result<FrozenModule> {
+            let ast = AstModule::parse(path, src, &Dialect::Extended)?;
+            {
+                let mut eval = Evaluator::new(&module);
+                eval.set_loader(self); // recursive: a .bzl may load other .bzl
+                eval.eval_module(ast, self.globals)?;
+            }
+            module
+                .freeze()
+                .map_err(|e| starlark::Error::new_other(anyhow::anyhow!("{e:?}")))
+        })?;
+        self.cache
+            .borrow_mut()
+            .insert(path.to_string(), frozen.clone());
+        Ok(frozen)
+    }
+}
+
+/// Evaluate one BUILD source with the cc-rule loader + the rule globals.
 /// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
 /// cross-package load appends, never clears).
 fn eval_build_src(name: &str, src: &str) -> Result<(), String> {
-    let builtins = rules_cc_module()?;
-    let mut modules: HashMap<&str, &FrozenModule> = HashMap::new();
-    for path in [
-        "@rules_cc//cc:cc_binary.bzl",
-        "@rules_cc//cc:cc_library.bzl",
-        "@rules_cc//cc:cc_test.bzl",
-        "@rules_cc//cc:defs.bzl",
-    ] {
-        modules.insert(path, &builtins);
-    }
-    let loader = ReturnFileLoader { modules: &modules };
+    let rules_cc = rules_cc_module()?;
+    let globals = build_globals();
+    let loader = BzlLoader {
+        rules_cc: &rules_cc,
+        globals: &globals,
+        cache: RefCell::new(HashMap::new()),
+    };
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
-    let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
-        .with(rule_globals)
-        .build();
     Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);

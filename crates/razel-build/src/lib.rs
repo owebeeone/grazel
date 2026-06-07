@@ -472,6 +472,46 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
     }
 
     #[test]
+    fn builds_via_a_custom_bzl_macro() {
+        if !Path::new("/usr/bin/c++").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // A repo-defined macro in its own .bzl — razel evaluates it (not just resolves
+        // @rules_cc), so the BUILD can call cc_app() which wraps cc_binary.
+        w(
+            "tools/defs.bzl",
+            "load(\"@rules_cc//cc:cc_binary.bzl\", \"cc_binary\")\ndef cc_app(name, srcs):\n    cc_binary(name = name, srcs = srcs)\n",
+        );
+        w(
+            "app/BUILD",
+            "load(\"//tools:defs.bzl\", \"cc_app\")\ncc_app(name = \"prog\", srcs = [\"main.cc\"])\n",
+        );
+        w(
+            "app/main.cc",
+            "#include <iostream>\nint main() { std::cout << \"Hello world\" << std::endl; return 0; }\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let report = build_workspace(root.path(), "//app:prog", &cache).unwrap();
+        assert_eq!(
+            report.executed, 2,
+            "macro expanded to a cc_binary: compile + link"
+        );
+        assert!(report.produced.contains(&"app/prog".to_string()));
+
+        let out = std::process::Command::new(root.path().join("app/prog"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello world");
+    }
+
+    #[test]
     fn affected_query_splits_tests_and_deliverables() {
         // A lib and a test both consume widget.c; analysis-only (no toolchain needed).
         let src = r#"
