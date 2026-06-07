@@ -17,9 +17,9 @@ use razel_analysis::wire_to_ir;
 use razel_core::{Digest, FileId, TargetId};
 use razel_exec::{Cache, build_action};
 use razel_ir::TargetKind;
-use razel_loading::{analyze_bazel, analyze_starlark, analyze_workspace};
+use razel_loading::{analyze_bazel_with, analyze_starlark, analyze_workspace_with};
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
-pub use razel_loading::AnalyzedTarget;
+pub use razel_loading::{AnalyzedTarget, GlobalFlags};
 
 /// Build `target` from a **real Bazel `BUILD`** (loads cc rules from `@rules_cc`,
 /// resolved to razel's native rules). Analysis + execution; single-package.
@@ -29,14 +29,46 @@ pub fn build_bazel(
     exec_root: &Path,
     cache: &Cache,
 ) -> Result<BuildReport, String> {
-    execute(&analyze_bazel(build_src)?, target, exec_root, cache)
+    build_bazel_with(build_src, target, exec_root, cache, GlobalFlags::default())
+}
+
+/// [`build_bazel`] with build-wide [`GlobalFlags`] (the CLI's `-c`/`--copt`/`--linkopt`/…)
+/// applied to every cc action.
+pub fn build_bazel_with(
+    build_src: &str,
+    target: &str,
+    exec_root: &Path,
+    cache: &Cache,
+    flags: GlobalFlags,
+) -> Result<BuildReport, String> {
+    execute(
+        &analyze_bazel_with(build_src, flags)?,
+        target,
+        exec_root,
+        cache,
+    )
 }
 
 /// Build `top_label` (`//pkg:name`) from a **multi-package Bazel workspace** rooted
 /// at `root`, loading dependency packages on demand. exec_root = the workspace root
 /// (paths are package-qualified, matching Bazel's workspace-relative includes).
 pub fn build_workspace(root: &Path, top_label: &str, cache: &Cache) -> Result<BuildReport, String> {
-    execute(&analyze_workspace(root, top_label)?, top_label, root, cache)
+    build_workspace_with(root, top_label, cache, GlobalFlags::default())
+}
+
+/// [`build_workspace`] with build-wide [`GlobalFlags`] applied to every cc action.
+pub fn build_workspace_with(
+    root: &Path,
+    top_label: &str,
+    cache: &Cache,
+    flags: GlobalFlags,
+) -> Result<BuildReport, String> {
+    execute(
+        &analyze_workspace_with(root, top_label, flags)?,
+        top_label,
+        root,
+        cache,
+    )
 }
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -505,6 +537,38 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "15");
+    }
+
+    #[test]
+    fn global_copts_reach_every_compile() {
+        if !Path::new("/usr/bin/c++").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("BUILD"),
+            "load(\"@rules_cc//cc:cc_binary.bzl\", \"cc_binary\")\ncc_binary(name = \"prog\", srcs = [\"main.cc\"])\n",
+        )
+        .unwrap();
+        // No -DANSWER in the BUILD — it must arrive via the global flag (CLI -c/--copt).
+        std::fs::write(
+            root.path().join("main.cc"),
+            "#include <iostream>\nint main() { std::cout << ANSWER << std::endl; return 0; }\n",
+        )
+        .unwrap();
+        let build_src = std::fs::read_to_string(root.path().join("BUILD")).unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let flags = GlobalFlags {
+            copts: vec!["-DANSWER=42".into()],
+            linkopts: vec![],
+        };
+        build_bazel_with(&build_src, "prog", root.path(), &cache, flags).unwrap();
+
+        let out = std::process::Command::new(root.path().join("prog"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
     }
 
     #[test]

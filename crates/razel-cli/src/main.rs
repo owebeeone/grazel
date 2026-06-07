@@ -19,7 +19,7 @@
 //! Scope: single-package `BUILD`, exec_root = the workspace dir. The daemon does
 //! **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
-use razel_build::build_target_report;
+use razel_build::{GlobalFlags, build_bazel_with};
 use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
@@ -82,13 +82,44 @@ USAGE (Bazel-syntax flags; all Bazel options are recognized):
 }
 
 /// Parsed flags shared across subcommands.
+#[derive(Default)]
 struct Opts {
     workspace: PathBuf,
     cache: Option<PathBuf>,
     socket: Option<PathBuf>,
     daemon: bool,
     cbor: bool,
+    /// `-c` / `--compilation_mode` (fastbuild|dbg|opt).
+    compilation_mode: Option<String>,
+    /// Global cc flags: `--copt`/`--cxxopt`/`--conlyopt`, `--define` (as `-D`).
+    copts: Vec<String>,
+    cxxopts: Vec<String>,
+    conlyopts: Vec<String>,
+    defines: Vec<String>,
+    /// `--linkopt`.
+    linkopts: Vec<String>,
     positionals: Vec<String>,
+}
+
+impl Opts {
+    /// Collapse the parsed cc flags into engine [`GlobalFlags`]: compilation mode
+    /// expands to compile flags, then copts/cxxopts/conlyopts and `-D`efines ride
+    /// every compile; linkopts ride every link.
+    fn global_flags(&self) -> GlobalFlags {
+        let mut copts = match self.compilation_mode.as_deref() {
+            Some("opt") => vec!["-O2".into(), "-DNDEBUG".into()],
+            Some("dbg") => vec!["-O0".into(), "-g".into()],
+            _ => vec![], // fastbuild (Bazel's default) adds nothing
+        };
+        copts.extend(self.copts.iter().cloned());
+        copts.extend(self.cxxopts.iter().cloned());
+        copts.extend(self.conlyopts.iter().cloned());
+        copts.extend(self.defines.iter().map(|d| format!("-D{d}")));
+        GlobalFlags {
+            copts,
+            linkopts: self.linkopts.clone(),
+        }
+    }
 }
 
 /// A flag razel acts on: parses the (optional) value and updates [`Opts`]. Boolean
@@ -153,6 +184,13 @@ static HANDLERS: &[(&str, Handler)] = &[
     ("socket", |o, v| o.socket = v.map(PathBuf::from)),
     ("daemon", |o, v| o.daemon = v.as_deref() != Some("false")),
     ("cbor", |o, v| o.cbor = v.as_deref() != Some("false")),
+    // Bazel cc build flags → razel's existing cc engine (global, every action).
+    ("compilation_mode", |o, v| o.compilation_mode = v),
+    ("copt", |o, v| o.copts.extend(v)),
+    ("cxxopt", |o, v| o.cxxopts.extend(v)),
+    ("conlyopt", |o, v| o.conlyopts.extend(v)),
+    ("linkopt", |o, v| o.linkopts.extend(v)),
+    ("define", |o, v| o.defines.extend(v)),
 ];
 
 /// Look up a long flag name across razel's flags then Bazel's.
@@ -206,11 +244,7 @@ fn dispatch(o: &mut Opts, spec: &FlagSpec, value: Option<String>) {
 fn parse_opts(args: &[String]) -> Result<Opts, ExitCode> {
     let mut o = Opts {
         workspace: PathBuf::from("."),
-        cache: None,
-        socket: None,
-        daemon: false,
-        cbor: false,
-        positionals: Vec::new(),
+        ..Default::default()
     };
     let mut i = 0;
     let mut targets_only = false;
@@ -518,7 +552,7 @@ fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
     })?;
 
     Ok(
-        match build_target_report(&build_src, &name, &o.workspace, &cache) {
+        match build_bazel_with(&build_src, &name, &o.workspace, &cache, o.global_flags()) {
             Ok(report) => BuildResult {
                 target: target_arg.to_string(),
                 // executed == 0 → fully served from cache.
@@ -667,5 +701,36 @@ mod tests {
         // --platforms is real Bazel; razel recognizes + diagnoses it, still parses.
         let o = p(&["--platforms=//p:x", "//t"]);
         assert_eq!(o.positionals, vec!["//t"]);
+    }
+}
+
+#[cfg(test)]
+mod flag_mapping_tests {
+    use super::*;
+
+    fn p(a: &[&str]) -> Opts {
+        parse_opts(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn compilation_mode_and_copts_map_to_global_flags() {
+        // -c opt expands; --copt/--cxxopt/--define accumulate into compile flags.
+        let g = p(&[
+            "-c",
+            "opt",
+            "--copt=-Wall",
+            "--cxxopt=-std=c++20",
+            "--define=FOO=1",
+        ])
+        .global_flags();
+        assert!(g.copts.contains(&"-O2".to_string()));
+        assert!(g.copts.contains(&"-DNDEBUG".to_string()));
+        assert!(g.copts.contains(&"-Wall".to_string()));
+        assert!(g.copts.contains(&"-std=c++20".to_string()));
+        assert!(g.copts.contains(&"-DFOO=1".to_string()));
+        // --linkopt rides the link, not the compile.
+        assert_eq!(p(&["--linkopt=-s"]).global_flags().linkopts, vec!["-s"]);
+        // fastbuild (default) adds no optimization flags.
+        assert!(p(&["-c", "fastbuild"]).global_flags().copts.is_empty());
     }
 }

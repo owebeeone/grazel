@@ -8,8 +8,8 @@
 
 pub mod rules;
 pub use rules::{
-    AnalyzedAction, AnalyzedTarget, analyze_bazel, analyze_starlark, analyze_workspace,
-    registered_configs,
+    AnalyzedAction, AnalyzedTarget, GlobalFlags, analyze_bazel, analyze_bazel_with,
+    analyze_starlark, analyze_workspace, analyze_workspace_with, registered_configs,
 };
 
 use razel_ir::TargetKind;

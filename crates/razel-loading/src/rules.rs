@@ -89,6 +89,21 @@ thread_local! {
     static LOADED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
+thread_local! {
+    /// CLI-level flags applied to every cc action this analysis produces (Bazel's
+    /// `--copt`/`--linkopt`/… and `-c` expanded to compile flags). Set per analyze.
+    static GLOBAL: RefCell<GlobalFlags> = RefCell::new(GlobalFlags::default());
+}
+
+/// Build-wide flags from the command line that ride every cc action: `copts` prepend
+/// to every compile (so `-c opt` / `--copt`/`--cxxopt`/`--conlyopt`/`--define` take
+/// effect), `linkopts` append to every link (`--linkopt`). Per-target attrs still apply.
+#[derive(Debug, Clone, Default)]
+pub struct GlobalFlags {
+    pub copts: Vec<String>,
+    pub linkopts: Vec<String>,
+}
+
 /// Canonicalize a target name/label against the current package. Single-package
 /// mode keeps bare names; workspace mode produces `//pkg:name`.
 fn canon_label(s: &str) -> String {
@@ -518,8 +533,9 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         let mut export_cflags = define_flags(defines);
         export_cflags.extend(include_flags(includes));
         export_cflags.extend(dep_cflags);
-        // This lib's own compiles also see its local copts.
-        let mut compile_flags = copts;
+        // This lib's own compiles see global flags first, then local copts, then exports.
+        let mut compile_flags = GLOBAL.with_borrow(|g| g.copts.clone());
+        compile_flags.extend(copts);
         compile_flags.extend(export_cflags.iter().cloned());
 
         let mut avail_hdrs = hdrs.clone();
@@ -573,8 +589,9 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             dep_cflags.extend(dep.cflags);
             dep_names.push(dep.canon);
         }
-        // Binary compiles see local copts + the deps' exported flags.
-        let mut compile_flags = unpack(copts);
+        // Binary compiles see global flags + local copts + the deps' exported flags.
+        let mut compile_flags = GLOBAL.with_borrow(|g| g.copts.clone());
+        compile_flags.extend(unpack(copts));
         compile_flags.extend(dep_cflags);
 
         let (mut actions, mut objs) = (Vec::new(), Vec::new());
@@ -591,6 +608,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         let mut link_argv = vec![CXX.into(), "-o".into(), out.clone()];
         link_argv.extend(objs);
         link_argv.extend(dep_libs);
+        link_argv.extend(GLOBAL.with_borrow(|g| g.linkopts.clone()));
         actions.push(AnalyzedAction {
             mnemonic: "CppLink".into(),
             argv: link_argv,
@@ -768,10 +786,22 @@ fn reset_analysis() {
 /// resolving those loads to razel's native rules (no rules_cc execution, no repo
 /// fetch). Single-package (bare-name targets).
 pub fn analyze_bazel(build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
+    analyze_bazel_with(build_src, GlobalFlags::default())
+}
+
+/// [`analyze_bazel`] with build-wide [`GlobalFlags`] (the CLI's `--copt`/`-c`/… )
+/// applied to every cc action.
+pub fn analyze_bazel_with(
+    build_src: &str,
+    flags: GlobalFlags,
+) -> Result<Vec<AnalyzedTarget>, String> {
     reset_analysis();
     CURRENT_PKG.with_borrow_mut(|p| *p = None);
     WORKSPACE.with_borrow_mut(|w| *w = None);
-    eval_build_src("BUILD", build_src)?;
+    GLOBAL.with_borrow_mut(|g| *g = flags);
+    let res = eval_build_src("BUILD", build_src);
+    GLOBAL.with_borrow_mut(|g| *g = GlobalFlags::default());
+    res?;
     Ok(STATE.with_borrow_mut(|s| std::mem::take(&mut s.targets)))
 }
 
@@ -804,13 +834,24 @@ fn load_package(pkg: &str) -> Result<(), String> {
 /// `top_label` (`//pkg:name`) and loading dependency packages on demand. Targets
 /// are keyed by canonical `//pkg:name` labels with package-qualified paths.
 pub fn analyze_workspace(root: &Path, top_label: &str) -> Result<Vec<AnalyzedTarget>, String> {
+    analyze_workspace_with(root, top_label, GlobalFlags::default())
+}
+
+/// [`analyze_workspace`] with build-wide [`GlobalFlags`] applied to every cc action.
+pub fn analyze_workspace_with(
+    root: &Path,
+    top_label: &str,
+    flags: GlobalFlags,
+) -> Result<Vec<AnalyzedTarget>, String> {
     reset_analysis();
     WORKSPACE.with_borrow_mut(|w| *w = Some(root.to_path_buf()));
+    GLOBAL.with_borrow_mut(|g| *g = flags);
     let top_pkg = pkg_of(&canon_label(top_label))
         .ok_or_else(|| format!("top label must be //pkg:name, got `{top_label}`"))?;
     let res = load_package(&top_pkg);
     WORKSPACE.with_borrow_mut(|w| *w = None);
     CURRENT_PKG.with_borrow_mut(|p| *p = None);
+    GLOBAL.with_borrow_mut(|g| *g = GlobalFlags::default());
     res?;
     Ok(STATE.with_borrow_mut(|s| std::mem::take(&mut s.targets)))
 }
