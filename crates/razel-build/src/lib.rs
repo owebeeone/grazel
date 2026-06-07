@@ -304,6 +304,60 @@ int main(int argc, char** argv) {
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello world");
     }
 
+    // cpp-tutorial stage2, verbatim: a cc_library + a cc_binary depending on it.
+    const CPP_TUTORIAL_STAGE2: &str = r#"
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "hello-greet",
+    srcs = ["hello-greet.cc"],
+    hdrs = ["hello-greet.h"],
+)
+
+cc_binary(
+    name = "hello-world",
+    srcs = ["hello-world.cc"],
+    deps = [
+        ":hello-greet",
+    ],
+)
+"#;
+
+    #[test]
+    fn builds_and_runs_real_bazel_cpp_tutorial_stage2() {
+        if !Path::new("/usr/bin/c++").exists() || !Path::new("/usr/bin/ar").exists() {
+            return;
+        }
+        let exec = tempfile::tempdir().unwrap();
+        let w = |name: &str, body: &str| std::fs::write(exec.path().join(name), body).unwrap();
+        w(
+            "hello-greet.h",
+            "#ifndef HELLO_GREET_H_\n#define HELLO_GREET_H_\n#include <string>\nstd::string get_greet(const std::string& who);\n#endif\n",
+        );
+        w(
+            "hello-greet.cc",
+            "#include \"hello-greet.h\"\nstd::string get_greet(const std::string& who) { return \"Hello \" + who; }\n",
+        );
+        w(
+            "hello-world.cc",
+            "#include \"hello-greet.h\"\n#include <iostream>\nint main(int argc, char** argv) {\n  std::string who = argc > 1 ? argv[1] : \"world\";\n  std::cout << get_greet(who) << std::endl;\n  return 0;\n}\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        let report = build_bazel(CPP_TUTORIAL_STAGE2, "hello-world", exec.path(), &cache).unwrap();
+        // deps-first: compile+archive the lib, then compile+link the binary.
+        assert_eq!(report.executed, 4, "2 compiles + archive + link");
+        assert!(report.produced.contains(&"libhello-greet.a".to_string()));
+        assert!(report.produced.contains(&"hello-world".to_string()));
+
+        let out = std::process::Command::new(exec.path().join("hello-world"))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello world");
+    }
+
     #[test]
     fn affected_query_splits_tests_and_deliverables() {
         // A lib and a test both consume widget.c; analysis-only (no toolchain needed).
