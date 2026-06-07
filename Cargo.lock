@@ -1195,6 +1195,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "razel-cli"
+version = "0.1.0"
+dependencies = [
+ "razel-build",
+ "razel-core",
+ "razel-exec",
+ "razel-wire",
+ "tempfile",
+]
+
+[[package]]
 name = "razel-conformance"
 version = "0.1.0"
 dependencies = [
