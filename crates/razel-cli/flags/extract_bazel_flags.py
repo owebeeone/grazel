@@ -69,6 +69,10 @@ def extract(bazel_src: Path) -> dict[str, dict]:
             if not name_m:
                 continue
             name = name_m.group(1)
+            # Real flag names are [a-z0-9_]; skip stray name="..." strings (labels,
+            # descriptions) that aren't actually flags.
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+                continue
             abbrev = ABBREV_RE.search(block)
             cat = CAT_RE.search(block)
             old = OLD_RE.search(block)

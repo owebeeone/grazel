@@ -1,17 +1,5 @@
 {
  "flags": {
-  "Android configuration distinguisher": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "UNDOCUMENTED",
-   "default": "MAIN",
-   "deprecated": false,
-   "has_negation": false,
-   "name": "Android configuration distinguisher",
-   "old_name": null,
-   "source": "rules/android/AndroidConfiguration.java",
-   "type": "string"
-  },
   "action_cache": {
    "abbrev": null,
    "allow_multiple": false,
@@ -94,18 +82,6 @@
    "name": "all",
    "old_name": null,
    "source": "bazel/commands/FetchOptions.java",
-   "type": "bool"
-  },
-  "all feature flag values are present (internal)": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "UNDOCUMENTED",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "all feature flag values are present (internal)",
-   "old_name": null,
-   "source": "rules/config/ConfigFeatureFlagOptions.java",
    "type": "bool"
   },
   "all_repos": {
@@ -2302,18 +2278,6 @@
    "name": "enforce_transitive_configs_for_config_feature_flag",
    "old_name": null,
    "source": "rules/config/ConfigFeatureFlagOptions.java",
-   "type": "bool"
-  },
-  "evaluating for analysis test": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "UNDOCUMENTED",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "evaluating for analysis test",
-   "old_name": null,
-   "source": "analysis/config/CoreOptions.java",
    "type": "bool"
   },
   "exec_aspects": {
@@ -6276,42 +6240,6 @@
    "source": "authandtls/AuthAndTLSOptions.java",
    "type": "bool"
   },
-  "graph:conditional_edges_limit": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "4",
-   "deprecated": false,
-   "has_negation": false,
-   "name": "graph:conditional_edges_limit",
-   "old_name": null,
-   "source": "query2/query/output/QueryOptions.java",
-   "type": "string"
-  },
-  "graph:factored": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "graph:factored",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "graph:node_limit": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "512",
-   "deprecated": false,
-   "has_negation": false,
-   "name": "graph:node_limit",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "string"
-  },
   "grpc_keepalive_time": {
    "abbrev": null,
    "allow_multiple": false,
@@ -8556,18 +8484,6 @@
    "source": "rules/apple/AppleCommandLineOptions.java",
    "type": "string"
   },
-  "is exec configuration": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "UNDOCUMENTED",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "is exec configuration",
-   "old_name": null,
-   "source": "analysis/config/CoreOptions.java",
-   "type": "bool"
-  },
   "isatty": {
    "abbrev": null,
    "allow_multiple": false,
@@ -8747,18 +8663,6 @@
    "old_name": null,
    "source": "buildtool/BuildRequestOptions.java",
    "type": "string"
-  },
-  "jplPropagateCcLinkParamsStore": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "UNDOCUMENTED",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "jplPropagateCcLinkParamsStore",
-   "old_name": null,
-   "source": "bazel/rules/BazelRulesModule.java",
-   "type": "bool"
   },
   "jvm_heap_histogram_internal_object_pattern": {
    "abbrev": null,
@@ -9131,18 +9035,6 @@
    "old_name": null,
    "source": "exec/ExecutionOptions.java",
    "type": "bool"
-  },
-  "max outbound message size": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "UNDOCUMENTED",
-   "default": "1048576",
-   "deprecated": false,
-   "has_negation": false,
-   "name": "max outbound message size",
-   "old_name": null,
-   "source": "remote/options/RemoteOptions.java",
-   "type": "string"
   },
   "max_computation_steps": {
    "abbrev": null,
@@ -9526,18 +9418,6 @@
    "name": "output",
    "old_name": null,
    "source": "bazel/bzlmod/modcommand/ModOptions.java",
-   "type": "string"
-  },
-  "output:display_full_kind": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "False",
-   "deprecated": false,
-   "has_negation": false,
-   "name": "output:display_full_kind",
-   "old_name": null,
-   "source": "query2/query/output/QueryOptions.java",
    "type": "string"
   },
   "output_base": {
@@ -9959,150 +9839,6 @@
    "old_name": null,
    "source": "rules/cpp/CppOptions.java",
    "type": "string"
-  },
-  "proto:default_values": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:default_values",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:definition_stack": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:definition_stack",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:flatten_selects": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:flatten_selects",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:include_attribute_source_aspects": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:include_attribute_source_aspects",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:include_configurations": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:include_configurations",
-   "old_name": null,
-   "source": "query2/cquery/CqueryOptions.java",
-   "type": "bool"
-  },
-  "proto:include_starlark_rule_env": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:include_starlark_rule_env",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:include_synthetic_attribute_hash": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:include_synthetic_attribute_hash",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:instantiation_stack": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:instantiation_stack",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:locations": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:locations",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:output_rule_attrs": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "all",
-   "deprecated": false,
-   "has_negation": false,
-   "name": "proto:output_rule_attrs",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "string"
-  },
-  "proto:rule_classes": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:rule_classes",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
-  },
-  "proto:rule_inputs_and_outputs": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "proto:rule_inputs_and_outputs",
-   "old_name": null,
-   "source": "query2/common/CommonQueryOptions.java",
-   "type": "bool"
   },
   "proto_compiler": {
    "abbrev": null,
@@ -11544,30 +11280,6 @@
    "source": "analysis/config/CoreOptions.java",
    "type": "bool"
   },
-  "starlark:expr": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "",
-   "deprecated": false,
-   "has_negation": false,
-   "name": "starlark:expr",
-   "old_name": null,
-   "source": "query2/cquery/CqueryOptions.java",
-   "type": "string"
-  },
-  "starlark:file": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "",
-   "deprecated": false,
-   "has_negation": false,
-   "name": "starlark:file",
-   "old_name": null,
-   "source": "query2/cquery/CqueryOptions.java",
-   "type": "string"
-  },
   "starlark_cpu_profile": {
    "abbrev": null,
    "allow_multiple": false,
@@ -12659,30 +12371,6 @@
    "old_name": null,
    "source": "rules/apple/AppleCommandLineOptions.java",
    "type": "string"
-  },
-  "xml:default_values": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "false",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "xml:default_values",
-   "old_name": null,
-   "source": "query2/query/output/QueryOptions.java",
-   "type": "bool"
-  },
-  "xml:line_numbers": {
-   "abbrev": null,
-   "allow_multiple": false,
-   "category": "QUERY",
-   "default": "true",
-   "deprecated": false,
-   "has_negation": true,
-   "name": "xml:line_numbers",
-   "old_name": null,
-   "source": "query2/query/output/QueryOptions.java",
-   "type": "bool"
   },
   "zip_undeclared_test_outputs": {
    "abbrev": null,

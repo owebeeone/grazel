@@ -35,11 +35,47 @@ fn main() -> ExitCode {
     match cmd.as_deref() {
         Some("codegen") => codegen(check),
         Some("corpus") => corpus(check),
+        Some("flags") => flags(check),
         other => {
-            eprintln!("unknown xtask {other:?}\nusage: cargo xtask <codegen|corpus> [--check]");
+            eprintln!(
+                "unknown xtask {other:?}\nusage: cargo xtask <codegen|corpus|flags> [--check]"
+            );
             ExitCode::from(64)
         }
     }
+}
+
+/// Regenerate the Bazel-flag recognition table (`razel-cli/src/bazel_flags.rs`) from
+/// the committed JSON inventory via `gen_flags_table.py --stdout`. To refresh the
+/// inventory itself against a newer Bazel, run `extract_bazel_flags.py <bazel-src>`
+/// and diff with `--diff` (the version-comparison oracle).
+fn flags(check: bool) -> ExitCode {
+    let root = workspace_root();
+    let script = root.join("crates/razel-cli/flags/gen_flags_table.py");
+    let target = root.join("crates/razel-cli/src/bazel_flags.rs");
+    let raw = std::env::temp_dir().join("razel-bazel-flags.rs");
+
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
+    let out = Command::new(&python).arg(&script).arg("--stdout").output();
+    let out = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(o) => {
+            eprintln!(
+                "gen_flags_table.py failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("could not run {python:?} on gen_flags_table.py: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::write(&raw, out) {
+        eprintln!("could not write temp flags table: {e}");
+        return ExitCode::FAILURE;
+    }
+    finalize(&raw, &target, "flags", check)
 }
 
 /// Regenerate the wire types + codec from the taut IR via `tautc`.

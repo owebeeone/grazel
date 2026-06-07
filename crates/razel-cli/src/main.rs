@@ -6,9 +6,15 @@
 //! `--daemon` — the daemon serves the *same* wire types over UDS/CBOR, so the
 //! two paths are byte-identical. `--cbor` emits the exact wire bytes.
 //!
-//!   razel build <target> [-C <dir>] [--cache <dir>] [--daemon] [--socket <s>] [--cbor]
+//!   razel build <target> [-C <dir>] [--disk_cache <dir>] [--daemon] [--socket <s>] [--cbor]
 //!   razel version [--daemon] [--socket <s>] [--cbor]
-//!   razel daemon [-C <dir>] [--cache <dir>] [--socket <s>]
+//!   razel daemon [-C <dir>] [--disk_cache <dir>] [--socket <s>]
+//!
+//! The command line is **Bazel-syntax**: every Bazel flag (the generated
+//! `bazel_flags` table) is recognized and parsed; the handful razel honors take
+//! effect (see `HANDLERS`), language flags are silently accepted, and the rest are
+//! recognized-but-diagnosed. razel's own flags (`-C`/`--daemon`/`--socket`/`--cbor`)
+//! have no Bazel equivalent and stay.
 //!
 //! Scope: single-package `BUILD`, exec_root = the workspace dir. The daemon does
 //! **cold** builds today; warm/incremental reuse + streaming surfaces are next.
@@ -22,6 +28,9 @@ use razel_wire::{
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+mod bazel_flags;
+use bazel_flags::{BAZEL_FLAGS, FlagSpec};
 
 /// Wire protocol revision reported by `version` (bumped on breaking IR changes).
 const PROTOCOL: i64 = 1;
@@ -52,19 +61,22 @@ fn print_usage() {
     eprint!(
         "razel — build engine CLI
 
-USAGE:
-  razel build <target> [-C <dir>] [--cache <dir>] [--daemon] [--socket <s>] [--cbor]
+USAGE (Bazel-syntax flags; all Bazel options are recognized):
+  razel build <target>... [--disk_cache <dir>] [-C <dir>] [--daemon] [--socket <s>] [--cbor]
   razel affected <file>... [-C <dir>] [--daemon] [--socket <s>] [--cbor]
   razel subscribe [-C <dir>] [--socket <s>] [--cbor]
   razel version [--daemon] [--socket <s>] [--cbor]
-  razel daemon [-C <dir>] [--cache <dir>] [--socket <s>]
+  razel daemon [-C <dir>] [--disk_cache <dir>] [--socket <s>]
 
   <target>          name, :name, or //pkg:name (single-package BUILD)
-  -C, --workspace   workspace dir with BUILD + sources (default: .)
-  --cache <dir>     content-addressed cache dir (default: <workspace>/.razel-cache)
-  --daemon          route the request to a running `razel daemon` over UDS
-  --socket <s>      daemon socket path (default: <workspace>/.razel-daemon.sock)
-  --cbor            print the result as taut-wire CBOR (hex) instead of text
+  --disk_cache <d>  content-addressed cache dir (default: <workspace>/.razel-cache)
+  -C, --workspace   workspace dir with BUILD + sources (default: .) [razel-only]
+  --daemon          route the request to a running `razel daemon` over UDS [razel-only]
+  --socket <s>      daemon socket path (default: <workspace>/.razel-daemon.sock) [razel-only]
+  --cbor            print the result as taut-wire CBOR (hex) instead of text [razel-only]
+
+  Other Bazel flags (e.g. -c opt, --copt, --jobs) are recognized; unsupported ones
+  print a one-line diagnostic and are ignored.
 "
     );
 }
@@ -79,6 +91,118 @@ struct Opts {
     positionals: Vec<String>,
 }
 
+/// A flag razel acts on: parses the (optional) value and updates [`Opts`]. Boolean
+/// flags receive `Some("true")`/`Some("false")` (so negation `--noX` flows through).
+type Handler = fn(&mut Opts, Option<String>);
+
+/// razel's own flags — recognized in addition to (and ahead of) Bazel's. Kept here
+/// because Bazel has no equivalent; they share [`FlagSpec`] so the parser is uniform.
+static RAZEL_FLAGS: &[FlagSpec] = &[
+    FlagSpec {
+        name: "workspace",
+        abbrev: Some('C'),
+        takes_value: true,
+        allow_multiple: false,
+        silent: false,
+    },
+    FlagSpec {
+        name: "socket",
+        abbrev: None,
+        takes_value: true,
+        allow_multiple: false,
+        silent: false,
+    },
+    FlagSpec {
+        name: "daemon",
+        abbrev: None,
+        takes_value: false,
+        allow_multiple: false,
+        silent: false,
+    },
+    FlagSpec {
+        name: "cbor",
+        abbrev: None,
+        takes_value: false,
+        allow_multiple: false,
+        silent: false,
+    },
+    // Deprecated alias of Bazel's --disk_cache.
+    FlagSpec {
+        name: "cache",
+        abbrev: None,
+        takes_value: true,
+        allow_multiple: false,
+        silent: false,
+    },
+];
+
+/// The flags razel actually honors → their effect. **This map is the definition of
+/// "supported".** Adding a row makes a recognized Bazel flag take effect; a flag with
+/// no row + not `silent` self-diagnoses as unsupported (the data-driven default).
+static HANDLERS: &[(&str, Handler)] = &[
+    ("workspace", |o, v| {
+        if let Some(v) = v {
+            o.workspace = PathBuf::from(v);
+        }
+    }),
+    ("disk_cache", |o, v| o.cache = v.map(PathBuf::from)),
+    ("cache", |o, v| {
+        eprintln!("razel: --cache is deprecated; Bazel spells it --disk_cache");
+        o.cache = v.map(PathBuf::from);
+    }),
+    ("socket", |o, v| o.socket = v.map(PathBuf::from)),
+    ("daemon", |o, v| o.daemon = v.as_deref() != Some("false")),
+    ("cbor", |o, v| o.cbor = v.as_deref() != Some("false")),
+];
+
+/// Look up a long flag name across razel's flags then Bazel's.
+fn spec_long(name: &str) -> Option<&'static FlagSpec> {
+    RAZEL_FLAGS
+        .iter()
+        .chain(BAZEL_FLAGS)
+        .find(|f| f.name == name)
+}
+
+/// Look up a short (abbreviated) flag, razel's then Bazel's. (`-C` is razel's
+/// workspace; `-c` is Bazel's compilation_mode — distinct by case.)
+fn spec_short(c: char) -> Option<&'static FlagSpec> {
+    RAZEL_FLAGS
+        .iter()
+        .chain(BAZEL_FLAGS)
+        .find(|f| f.abbrev == Some(c))
+}
+
+/// Resolve `--name`, honoring Bazel's `--noNAME` boolean negation.
+fn resolve_long(name: &str) -> Option<(&'static FlagSpec, bool)> {
+    if let Some(s) = spec_long(name) {
+        return Some((s, false));
+    }
+    if let Some(stripped) = name.strip_prefix("no")
+        && let Some(s) = spec_long(stripped)
+        && !s.takes_value
+    {
+        return Some((s, true)); // --noX
+    }
+    None
+}
+
+/// Apply a recognized flag: a handler (supported) runs; otherwise it's silently
+/// ignored (language flags razel will never need) or diagnosed (recognized, not
+/// yet implemented).
+fn dispatch(o: &mut Opts, spec: &FlagSpec, value: Option<String>) {
+    if let Some((_, h)) = HANDLERS.iter().find(|(n, _)| *n == spec.name) {
+        h(o, value);
+    } else if !spec.silent {
+        eprintln!(
+            "razel: `{}` is a recognized Bazel option, not yet supported by razel — ignoring",
+            spec.name
+        );
+    }
+}
+
+/// Parse a Bazel-syntax command line: `--flag`/`--flag=val`/`--flag val`, `--noflag`,
+/// short `-x`/`-xval`/`-x val`, `--` (rest are targets), positionals. Driven entirely
+/// by the flag tables — unknown (non-Bazel) flags error, like Bazel.
 fn parse_opts(args: &[String]) -> Result<Opts, ExitCode> {
     let mut o = Opts {
         workspace: PathBuf::from("."),
@@ -89,35 +213,67 @@ fn parse_opts(args: &[String]) -> Result<Opts, ExitCode> {
         positionals: Vec::new(),
     };
     let mut i = 0;
+    let mut targets_only = false;
     while i < args.len() {
-        match args[i].as_str() {
-            "-C" | "--workspace" => o.workspace = PathBuf::from(value(args, &mut i, "-C")?),
-            "--cache" => o.cache = Some(PathBuf::from(value(args, &mut i, "--cache")?)),
-            "--socket" => o.socket = Some(PathBuf::from(value(args, &mut i, "--socket")?)),
-            "--daemon" => o.daemon = true,
-            "--cbor" => o.cbor = true,
-            s if s.starts_with('-') => {
-                eprintln!("razel: unknown flag {s:?}");
-                return Err(ExitCode::from(EX_USAGE));
-            }
-            s => o.positionals.push(s.to_string()),
-        }
+        let arg = args[i].clone();
         i += 1;
+        if targets_only || arg == "-" || !arg.starts_with('-') {
+            o.positionals.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            targets_only = true;
+            continue;
+        }
+
+        let (spec, negated, mut value) = if let Some(body) = arg.strip_prefix("--") {
+            let (name, inline) = match body.split_once('=') {
+                Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                None => (body.to_string(), None),
+            };
+            match resolve_long(&name) {
+                Some((s, neg)) => (s, neg, inline),
+                None => {
+                    eprintln!("razel: unrecognized option `--{name}` (not a Bazel flag)");
+                    return Err(ExitCode::from(EX_USAGE));
+                }
+            }
+        } else {
+            let c = arg[1..].chars().next().unwrap();
+            let attached = arg[1 + c.len_utf8()..].to_string();
+            match spec_short(c) {
+                Some(s) => (s, false, (!attached.is_empty()).then_some(attached)),
+                None => {
+                    eprintln!("razel: unrecognized option `-{c}`");
+                    return Err(ExitCode::from(EX_USAGE));
+                }
+            }
+        };
+
+        if spec.takes_value {
+            if value.is_none() && !negated {
+                match args.get(i) {
+                    Some(v) => {
+                        value = Some(v.clone());
+                        i += 1;
+                    }
+                    None => {
+                        eprintln!("razel: `{}` requires a value", spec.name);
+                        return Err(ExitCode::from(EX_USAGE));
+                    }
+                }
+            }
+        } else {
+            value = Some(if negated {
+                "false".into()
+            } else {
+                "true".into()
+            });
+        }
+
+        dispatch(&mut o, spec, value);
     }
     Ok(o)
-}
-
-fn value(args: &[String], i: &mut usize, flag: &str) -> Result<String, ExitCode> {
-    match args.get(*i + 1) {
-        Some(v) => {
-            *i += 1;
-            Ok(v.clone())
-        }
-        None => {
-            eprintln!("razel: {flag} requires a value");
-            Err(ExitCode::from(EX_USAGE))
-        }
-    }
 }
 
 fn default_socket(workspace: &Path) -> PathBuf {
@@ -449,5 +605,67 @@ fn print_build_result(r: &BuildResult) {
         let h = hex(&o.digest);
         let short = &h[..h.len().min(12)];
         println!("  {short}  {}", o.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(a: &[&str]) -> Opts {
+        parse_opts(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+    fn err(a: &[&str]) -> bool {
+        parse_opts(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()).is_err()
+    }
+
+    #[test]
+    fn razel_extensions_and_targets() {
+        let o = p(&["-C", "/ws", "--disk_cache=/c", "--daemon", "//a:b", "//c:d"]);
+        assert_eq!(o.workspace, PathBuf::from("/ws"));
+        assert_eq!(o.cache, Some(PathBuf::from("/c")));
+        assert!(o.daemon);
+        assert_eq!(o.positionals, vec!["//a:b", "//c:d"]);
+    }
+
+    #[test]
+    fn cache_is_a_deprecated_alias() {
+        assert_eq!(p(&["--cache", "/x"]).cache, Some(PathBuf::from("/x")));
+    }
+
+    #[test]
+    fn value_flags_consume_their_value_not_the_target() {
+        // --copt -O2 //t : -O2 is copt's value, //t is the only target.
+        assert_eq!(p(&["--copt", "-O2", "//t"]).positionals, vec!["//t"]);
+        assert_eq!(p(&["--copt=-O2", "//t"]).positionals, vec!["//t"]);
+        assert_eq!(p(&["-c", "opt", "//t"]).positionals, vec!["//t"]);
+    }
+
+    #[test]
+    fn boolean_flags_and_negation_dont_eat_the_target() {
+        assert_eq!(p(&["--keep_going", "//t"]).positionals, vec!["//t"]);
+        assert_eq!(p(&["--nokeep_going", "//t"]).positionals, vec!["//t"]);
+    }
+
+    #[test]
+    fn double_dash_makes_the_rest_targets() {
+        // After --, a leading-dash token is a target, not a flag.
+        assert_eq!(
+            p(&["--", "--copt", "//t"]).positionals,
+            vec!["--copt", "//t"]
+        );
+    }
+
+    #[test]
+    fn unknown_non_bazel_flag_errors() {
+        assert!(err(&["--frobnicate"]));
+        assert!(err(&["-Z"]));
+    }
+
+    #[test]
+    fn recognized_but_unsupported_bazel_flag_parses() {
+        // --platforms is real Bazel; razel recognizes + diagnoses it, still parses.
+        let o = p(&["--platforms=//p:x", "//t"]);
+        assert_eq!(o.positionals, vec!["//t"]);
     }
 }
