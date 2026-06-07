@@ -783,6 +783,38 @@ gen = rule(implementation = _impl, attrs = {\"content\": attr.string(), \"out\":
     }
 
     #[test]
+    fn depset_flattens_direct_and_transitive_deduped() {
+        // AE primitive: depset(direct, transitive=[depset]).to_list() — folds direct +
+        // transitive members, de-duplicated, order-preserving.
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "pkg/defs.bzl",
+            "def _impl(ctx):\n    inner = depset([\"b\", \"c\"])\n    d = depset([\"a\", \"b\"], transitive = [inner])\n    ctx.actions.write(output = ctx.outputs.out, content = \",\".join(d.to_list()))\n\
+gen = rule(implementation = _impl, attrs = {\"out\": attr.output()})\n",
+        );
+        w(
+            "pkg/BUILD",
+            "load(\"//pkg:defs.bzl\", \"gen\")\ngen(name = \"x\", out = \"x.txt\")\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        build_workspace(root.path(), "//pkg:x", &cache).unwrap();
+        // direct [a,b], then transitive [b,c] → b deduped → a,b,c.
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("pkg/x.txt")).unwrap(),
+            "a,b,c"
+        );
+    }
+
+    #[test]
     fn builds_via_a_rule_defined_in_a_loaded_bzl() {
         // The freeze-fix payoff: a custom `rule()` defined in a .bzl and load()ed.
         // Before RuleObj was freezable, freezing the loaded .bzl module errored here.

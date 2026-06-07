@@ -362,6 +362,59 @@ fn file_path(v: Value) -> String {
         .unwrap_or_else(|| v.to_str())
 }
 
+// ---- depset ----------------------------------------------------------------------
+
+/// A `depset` — Bazel's deduplicated transitive set. razel stores the flattened
+/// member **paths** (depset members are Files/strings in practice), which keeps it a
+/// plain value and makes `.to_list()` / action wiring trivial. Construction folds in
+/// `direct` members and the members of each `transitive` depset, de-duplicated.
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+struct Depset {
+    #[trace(unsafe_ignore)]
+    items: Vec<String>,
+}
+
+impl fmt::Display for Depset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "depset({:?})", self.items)
+    }
+}
+
+#[starlark_value(type = "depset")]
+impl<'v> StarlarkValue<'v> for Depset {
+    fn get_methods() -> Option<&'static Methods> {
+        Some(DEPSET_METHODS.methods())
+    }
+}
+
+starlark::methods_static!(DEPSET_METHODS = depset_methods);
+
+#[starlark::starlark_module]
+fn depset_methods(b: &mut MethodsBuilder) {
+    fn to_list<'v>(
+        #[starlark(this)] this: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let items = this
+            .downcast_ref::<Depset>()
+            .map(|d| d.items.clone())
+            .unwrap_or_default();
+        Ok(eval.heap().alloc(items))
+    }
+}
+
+/// Extract member paths from a `DefaultInfo(files=…)` value: a [`Depset`]'s members,
+/// a list's elements (Files/strings), or a single value.
+fn extract_files(v: Value) -> Vec<String> {
+    if let Some(ds) = v.downcast_ref::<Depset>() {
+        return ds.items.clone();
+    }
+    if let Some(list) = ListRef::from_value(v) {
+        return list.iter().map(file_path).collect();
+    }
+    vec![file_path(v)]
+}
+
 // ---- ctx ------------------------------------------------------------------------
 
 /// The analysis `ctx`. All fields are heap `Value`s so it traces cleanly, no freezing.
@@ -637,15 +690,53 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    /// `DefaultInfo(files=[…])` — the standard output provider (other kwargs absorbed).
+    /// `DefaultInfo(files=…)` — the standard output provider. `files` may be a list
+    /// (of Files/strings) or a `depset`; other kwargs absorbed.
     fn DefaultInfo<'v>(
-        #[starlark(require = named)] files: Option<UnpackList<String>>,
+        #[starlark(require = named)] files: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         if let Some(f) = files {
-            with_current(|c| c.default_info = f.items);
+            let paths = extract_files(f);
+            with_current(|c| c.default_info = paths);
         }
         Ok(NoneType)
+    }
+
+    /// `depset(direct=[], transitive=[depsets], order=…)` — Bazel's transitive set.
+    /// razel folds member paths from `direct` + each `transitive` depset, deduped.
+    fn depset<'v>(
+        #[starlark(require = pos)] direct: Option<Value<'v>>,
+        #[starlark(require = named)] transitive: Option<Value<'v>>,
+        #[starlark(require = named)] order: Option<String>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let _ = order; // razel doesn't model traversal order
+        let mut items: Vec<String> = Vec::new();
+        let push = |s: String, items: &mut Vec<String>| {
+            if !items.contains(&s) {
+                items.push(s);
+            }
+        };
+        if let Some(d) = direct
+            && let Some(list) = ListRef::from_value(d)
+        {
+            for it in list.iter() {
+                push(file_path(it), &mut items);
+            }
+        }
+        if let Some(t) = transitive
+            && let Some(list) = ListRef::from_value(t)
+        {
+            for dep in list.iter() {
+                if let Some(ds) = dep.downcast_ref::<Depset>() {
+                    for s in &ds.items {
+                        push(s.clone(), &mut items);
+                    }
+                }
+            }
+        }
+        Ok(eval.heap().alloc_complex_no_freeze(Depset { items }))
     }
 
     /// `select({cond: value, …})` — host-config-lite: pick `//conditions:default`, else
