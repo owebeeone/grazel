@@ -11,15 +11,17 @@
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
-use starlark::environment::{GlobalsBuilder, LibraryExtension, Methods, MethodsBuilder, Module};
-use starlark::eval::{Arguments, Evaluator};
+use starlark::environment::{
+    FrozenModule, GlobalsBuilder, LibraryExtension, Methods, MethodsBuilder, Module,
+};
+use starlark::eval::{Arguments, Evaluator, ReturnFileLoader};
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
 use starlark::values::structs::AllocStruct;
 use starlark::values::{Heap, NoSerialize, StarlarkValue, Trace, Value, starlark_value};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 /// One action registered by a rule impl (`ctx.actions.run`/`write`).
@@ -41,6 +43,9 @@ pub struct AnalyzedTarget {
     pub actions: Vec<AnalyzedAction>,
     /// `DefaultInfo(files=…)`.
     pub default_info: Vec<String>,
+    /// Headers this target exports to dependents (cc_library `hdrs`, transitively).
+    /// Bazel makes these explicit, so they double as the dependents' sandbox inputs.
+    pub hdrs: Vec<String>,
 }
 
 #[derive(Default)]
@@ -319,6 +324,210 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         }
         Ok(eval.heap().alloc(AllocStruct(fields)))
     }
+}
+
+// ---- native cc rules (the "build Google's BUILD files" path) -------------------
+//
+// `load("@rules_cc//cc:cc_binary.bzl", "cc_binary")` resolves to these — razel
+// provides cc_library/cc_binary *natively* (via the host gnu/clang toolchain)
+// instead of executing rules_cc's Starlark. The declared `srcs`/`hdrs`/`deps` are
+// exactly the sandbox's declared inputs, so F12 enforcement holds with no header
+// discovery (Bazel already makes you declare them).
+
+const CXX: &str = "/usr/bin/c++";
+const AR: &str = "/usr/bin/ar";
+
+fn record_target(t: AnalyzedTarget) {
+    RESULTS.with_borrow_mut(|r| {
+        r.insert(t.name.clone(), t.clone());
+    });
+    STATE.with_borrow_mut(|s| s.targets.push(t));
+}
+
+/// Resolve a dep label to (its linkable outputs, its exported hdrs, bare name).
+/// Same-package only for now (`:x`, `x`); cross-package `//pkg:x` errors clearly.
+fn resolve_dep(label: &str) -> anyhow::Result<(Vec<String>, Vec<String>, String)> {
+    let name = label.rsplit(':').next().unwrap_or(label).to_string();
+    RESULTS
+        .with_borrow(|r| {
+            r.get(&name)
+                .map(|t| (t.default_info.clone(), t.hdrs.clone(), name.clone()))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "dep `{label}` not analyzed yet — declare it before its users \
+                 (cross-package deps are a later increment)"
+            )
+        })
+}
+
+#[starlark::starlark_module]
+fn cc_rules(b: &mut GlobalsBuilder) {
+    fn native_cc_library<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
+        #[starlark(require = named)] hdrs: Option<UnpackList<String>>,
+        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        let srcs = srcs.map(|l| l.items).unwrap_or_default();
+        let hdrs = hdrs.map(|l| l.items).unwrap_or_default();
+        let deps = deps.map(|l| l.items).unwrap_or_default();
+
+        let (mut dep_names, mut dep_hdrs) = (Vec::new(), Vec::new());
+        for d in &deps {
+            let (_, h, n) = resolve_dep(d)?;
+            dep_hdrs.extend(h);
+            dep_names.push(n);
+        }
+        // own + transitive headers are present for compiling this lib's srcs.
+        let mut avail_hdrs = hdrs.clone();
+        avail_hdrs.extend(dep_hdrs.iter().cloned());
+
+        let (mut actions, mut objs) = (Vec::new(), Vec::new());
+        for s in &srcs {
+            let o = format!("{s}.o");
+            let mut inputs = vec![s.clone()];
+            inputs.extend(avail_hdrs.iter().cloned());
+            actions.push(AnalyzedAction {
+                mnemonic: "CppCompile".into(),
+                argv: vec![CXX.into(), "-c".into(), s.clone(), "-o".into(), o.clone()],
+                inputs,
+                outputs: vec![o.clone()],
+            });
+            objs.push(o);
+        }
+        let lib = format!("lib{name}.a");
+        let mut ar_argv = vec![AR.into(), "rcs".into(), lib.clone()];
+        ar_argv.extend(objs.clone());
+        actions.push(AnalyzedAction {
+            mnemonic: "CppArchive".into(),
+            argv: ar_argv,
+            inputs: objs,
+            outputs: vec![lib.clone()],
+        });
+
+        let mut export_hdrs = hdrs;
+        export_hdrs.extend(dep_hdrs);
+        record_target(AnalyzedTarget {
+            name,
+            deps: dep_names,
+            actions,
+            default_info: vec![lib],
+            hdrs: export_hdrs,
+        });
+        Ok(NoneType)
+    }
+
+    fn native_cc_binary<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
+        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        let srcs = srcs.map(|l| l.items).unwrap_or_default();
+        let deps = deps.map(|l| l.items).unwrap_or_default();
+
+        let (mut dep_names, mut dep_libs, mut dep_hdrs) = (Vec::new(), Vec::new(), Vec::new());
+        for d in &deps {
+            let (libs, h, n) = resolve_dep(d)?;
+            dep_libs.extend(libs);
+            dep_hdrs.extend(h);
+            dep_names.push(n);
+        }
+
+        let (mut actions, mut objs) = (Vec::new(), Vec::new());
+        for s in &srcs {
+            let o = format!("{s}.o");
+            let mut inputs = vec![s.clone()];
+            inputs.extend(dep_hdrs.iter().cloned());
+            actions.push(AnalyzedAction {
+                mnemonic: "CppCompile".into(),
+                argv: vec![CXX.into(), "-c".into(), s.clone(), "-o".into(), o.clone()],
+                inputs,
+                outputs: vec![o.clone()],
+            });
+            objs.push(o);
+        }
+        let mut link_inputs = objs.clone();
+        link_inputs.extend(dep_libs.clone());
+        let mut link_argv = vec![CXX.into(), "-o".into(), name.clone()];
+        link_argv.extend(objs);
+        link_argv.extend(dep_libs);
+        actions.push(AnalyzedAction {
+            mnemonic: "CppLink".into(),
+            argv: link_argv,
+            inputs: link_inputs,
+            outputs: vec![name.clone()],
+        });
+        record_target(AnalyzedTarget {
+            name: name.clone(),
+            deps: dep_names,
+            actions,
+            default_info: vec![name],
+            hdrs: Vec::new(),
+        });
+        Ok(NoneType)
+    }
+}
+
+/// The synthetic `@rules_cc` module: re-exports the native rules under the names
+/// real BUILD files `load()` (`cc_binary`, `cc_library`).
+fn rules_cc_module() -> Result<FrozenModule, String> {
+    let globals = GlobalsBuilder::standard().with(cc_rules).build();
+    Module::with_temp_heap(|module| {
+        let ast = AstModule::parse(
+            "@rules_cc",
+            "cc_binary = native_cc_binary\ncc_library = native_cc_library\n".to_owned(),
+            &Dialect::Extended,
+        )
+        .map_err(|e| format!("{e}"))?;
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.eval_module(ast, &globals)
+                .map_err(|e| format!("{e}"))?;
+        }
+        module.freeze().map_err(|e| format!("{e:?}"))
+    })
+}
+
+/// Evaluate a **real Bazel `BUILD`** that `load()`s cc rules from `@rules_cc`,
+/// resolving those loads to razel's native rules (no rules_cc execution, no repo
+/// fetch). Returns the analyzed targets. Single-package for now.
+pub fn analyze_bazel(build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
+    STATE.with_borrow_mut(|s| {
+        s.targets.clear();
+        s.current = None;
+    });
+    CONFIGS.with_borrow_mut(|c| c.clear());
+    RESULTS.with_borrow_mut(|r| r.clear());
+
+    let builtins = rules_cc_module()?;
+    let mut modules: HashMap<&str, &FrozenModule> = HashMap::new();
+    for path in [
+        "@rules_cc//cc:cc_binary.bzl",
+        "@rules_cc//cc:cc_library.bzl",
+        "@rules_cc//cc:cc_test.bzl",
+        "@rules_cc//cc:defs.bzl",
+    ] {
+        modules.insert(path, &builtins);
+    }
+    let loader = ReturnFileLoader { modules: &modules };
+
+    let ast = AstModule::parse("BUILD", build_src.to_owned(), &Dialect::Extended)
+        .map_err(|e| format!("{e}"))?;
+    let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
+        .with(rule_globals)
+        .build();
+    let res: Result<(), String> = Module::with_temp_heap(|module| {
+        let mut eval = Evaluator::new(&module);
+        eval.set_loader(&loader);
+        eval.eval_module(ast, &globals)
+            .map_err(|e| format!("{e}"))?;
+        Ok(())
+    });
+    res?;
+    Ok(STATE.with_borrow_mut(|s| std::mem::take(&mut s.targets)))
 }
 
 /// Evaluate a `BUILD`/`.bzl` that defines and instantiates Starlark rules, running each

@@ -17,9 +17,20 @@ use razel_analysis::wire_to_ir;
 use razel_core::{Digest, FileId, TargetId};
 use razel_exec::{Cache, build_action};
 use razel_ir::TargetKind;
-use razel_loading::analyze_starlark;
+use razel_loading::{analyze_bazel, analyze_starlark};
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
 pub use razel_loading::AnalyzedTarget;
+
+/// Build `target` from a **real Bazel `BUILD`** (loads cc rules from `@rules_cc`,
+/// resolved to razel's native rules). Analysis + execution; single-package.
+pub fn build_bazel(
+    build_src: &str,
+    target: &str,
+    exec_root: &Path,
+    cache: &Cache,
+) -> Result<BuildReport, String> {
+    execute(&analyze_bazel(build_src)?, target, exec_root, cache)
+}
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
@@ -247,6 +258,50 @@ cc_obj(name = "widget", src = "widget.c")
             r2.executed, 0,
             "warm rebuild is fully cached — nothing recomputed"
         );
+    }
+
+    // The cpp-tutorial stage1 BUILD, verbatim — a real Bazel BUILD with a load().
+    const CPP_TUTORIAL_STAGE1: &str = r#"
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+cc_binary(
+    name = "hello-world",
+    srcs = ["hello-world.cc"],
+)
+"#;
+
+    #[test]
+    fn builds_and_runs_real_bazel_cpp_tutorial_stage1() {
+        if !Path::new("/usr/bin/c++").exists() {
+            return; // no C++ driver
+        }
+        let exec = tempfile::tempdir().unwrap();
+        // The actual stage1 source (std::iostream/string/ctime; no deps/headers).
+        std::fs::write(
+            exec.path().join("hello-world.cc"),
+            r#"#include <iostream>
+#include <string>
+int main(int argc, char** argv) {
+    std::string who = argc > 1 ? argv[1] : "world";
+    std::cout << "Hello " << who << std::endl;
+    return 0;
+}
+"#,
+        )
+        .unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // razel loads the real BUILD (resolving @rules_cc → native cc_binary) and builds.
+        let report = build_bazel(CPP_TUTORIAL_STAGE1, "hello-world", exec.path(), &cache).unwrap();
+        assert_eq!(report.produced, vec!["hello-world.cc.o", "hello-world"]); // compile + link outputs
+        assert_eq!(report.executed, 2, "compile + link");
+
+        // The produced binary runs and prints the greeting.
+        let bin = exec.path().join("hello-world");
+        assert!(bin.exists(), "razel did not produce the binary");
+        let out = std::process::Command::new(&bin).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello world");
     }
 
     #[test]

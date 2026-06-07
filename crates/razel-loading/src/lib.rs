@@ -7,7 +7,9 @@
 //! (plain Starlark `def`s that call rules) work for free via evaluation.
 
 pub mod rules;
-pub use rules::{AnalyzedAction, AnalyzedTarget, analyze_starlark, registered_configs};
+pub use rules::{
+    AnalyzedAction, AnalyzedTarget, analyze_bazel, analyze_starlark, registered_configs,
+};
 
 use razel_ir::TargetKind;
 use starlark::collections::SmallMap;
