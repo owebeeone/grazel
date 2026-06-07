@@ -2,7 +2,7 @@
 //! then drive it from a client connection.
 
 use razel_daemon::rpc::{self, Server};
-use razel_wire::{BuildResult, BuildStatus, VersionInfo};
+use razel_wire::{BuildResult, BuildState, BuildStatus, VersionInfo};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -83,5 +83,46 @@ fn build_over_the_socket_produces_a_real_object() {
         ws.path().join("widget.o").exists(),
         "daemon did not build the object"
     );
+    let _ = std::fs::remove_file(&socket);
+}
+
+const NOOP_BUILD: &str = r#"
+def _impl(ctx):
+    ctx.actions.run(executable = "/usr/bin/true", outputs = [], inputs = [], arguments = [])
+    return [DefaultInfo(files = [])]
+noop = rule(implementation = _impl, attrs = {})
+noop(name = "widget")
+"#;
+
+#[test]
+fn build_subscribe_streams_state_when_a_build_lands() {
+    // cc-independent: the rule's action is /usr/bin/true.
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), NOOP_BUILD).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let socket = sock("sub");
+    spawn(
+        Server::new(ws.path().to_path_buf(), cache.path().to_path_buf()),
+        socket.clone(),
+    );
+    wait_for(&socket);
+
+    // Subscribe: the first frame is the current (empty) state at revision 0.
+    let mut sub = rpc::subscribe(&socket).unwrap();
+    let s0 = BuildState::from_cbor(&rpc::payload(&rpc::next_frame(&mut sub).unwrap()).unwrap());
+    assert_eq!(s0.revision, 0);
+    assert!(s0.targets.is_empty());
+
+    // Trigger a build on a separate connection → publishes a new state.
+    let r = rpc::call(&socket, &rpc::req_build("widget")).unwrap();
+    rpc::payload(&r).unwrap();
+
+    // The subscriber receives the updated snapshot (atom: whole state, revision++).
+    let s1 = BuildState::from_cbor(&rpc::payload(&rpc::next_frame(&mut sub).unwrap()).unwrap());
+    assert_eq!(s1.revision, 1);
+    assert_eq!(s1.targets.len(), 1);
+    assert_eq!(s1.targets[0].label, "widget");
+    assert_eq!(s1.targets[0].status, BuildStatus::Built);
+
     let _ = std::fs::remove_file(&socket);
 }

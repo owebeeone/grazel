@@ -6,28 +6,30 @@
 //! build produce byte-identical results.
 //!
 //! The daemon is **warm**: an unchanged BUILD is analyzed once and reused across
-//! builds ([`Server::warm_analyze`]); action-level incrementality comes from the
-//! content cache (`recomputes == 0` on a fully-cached rebuild). Served methods:
-//! `version`, `build`, `affected`. The remaining streaming surface
-//! (`build.subscribe`, an atom over a persistent connection) is the next arc; the
-//! envelope is request/response for now.
+//! builds; action-level incrementality comes from the content cache (`recomputes
+//! == 0` on a fully-cached rebuild). Connections are handled per-thread.
+//!
+//! Methods: `version`, `build`, `affected` are unary (one request → one response);
+//! `build.subscribe` is an **atom stream** — the connection stays open and the
+//! daemon pushes the whole build-graph state (a `BuildState` frame) on connect and
+//! again whenever a build advances the revision, until the client disconnects.
 //!
 //! Envelope (CBOR maps, integer tags):
 //!   request  `{1: method:text, 2: args:cbor}`
-//!   response `{1: ok:bool, 2: payload:cbor|null, 3: error:text|null}`
+//!   response `{1: ok:bool, 2: payload:cbor|null, 3: error:text|null}`  (one per frame)
 
 use razel_build::{AnalyzedTarget, affected, analyze_build, execute};
 use razel_core::Digest;
 use razel_exec::Cache;
 use razel_wire::{
-    BuildResult, BuildStatus, Cbor, ImpactSet, OutputArtifact, TargetRef, VersionInfo, decode,
-    encode,
+    BuildResult, BuildState, BuildStatus, Cbor, ImpactSet, OutputArtifact, TargetRef, TargetStatus,
+    VersionInfo, decode, encode,
 };
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Wire protocol revision (kept in step with the CLI's `version`).
 pub const PROTOCOL: i64 = 1;
@@ -59,32 +61,75 @@ struct WarmAnalysis {
     targets: Vec<AnalyzedTarget>,
 }
 
-/// A daemon bound to one workspace + cache. Serves request/response over UDS, and
-/// keeps **warm** state: an unchanged BUILD is parsed/analyzed once, then reused
-/// across builds (action-level incrementality still comes from the content cache).
-pub struct Server {
+/// Shared daemon state, behind an `Arc` so each connection runs on its own thread
+/// (a long-lived `build.subscribe` stream must not block other clients).
+struct Inner {
     workspace: PathBuf,
     cache_dir: PathBuf,
     warm: Mutex<Option<WarmAnalysis>>,
     analyses: AtomicUsize,
+    /// The live build-graph state (the `build.subscribe` atom); `revision` advances
+    /// on every build, and `bump` wakes subscribers.
+    state: Mutex<BuildState>,
+    bump: Condvar,
+}
+
+/// A daemon bound to one workspace + cache. Warm (analysis reused across builds),
+/// and a publisher of build-graph state to `build.subscribe` streams.
+pub struct Server {
+    inner: Arc<Inner>,
 }
 
 impl Server {
     pub fn new(workspace: PathBuf, cache_dir: PathBuf) -> Self {
         Self {
-            workspace,
-            cache_dir,
-            warm: Mutex::new(None),
-            analyses: AtomicUsize::new(0),
+            inner: Arc::new(Inner {
+                workspace,
+                cache_dir,
+                warm: Mutex::new(None),
+                analyses: AtomicUsize::new(0),
+                state: Mutex::new(BuildState {
+                    revision: 0,
+                    targets: vec![],
+                }),
+                bump: Condvar::new(),
+            }),
         }
     }
 
     /// How many times analysis has actually run (cold + each BUILD change). Stays
     /// flat across rebuilds of an unchanged BUILD — the warm-reuse signal.
     pub fn analyses_run(&self) -> usize {
-        self.analyses.load(Ordering::SeqCst)
+        self.inner.analyses.load(Ordering::SeqCst)
     }
 
+    /// Route one request envelope and produce a response (the unary path; exposed
+    /// for in-process tests).
+    pub fn dispatch(&self, req: &Cbor) -> Cbor {
+        self.inner.dispatch(req)
+    }
+
+    /// Bind `socket` (removing a stale file first) and serve until the listener
+    /// errors. Each connection is handled on its own thread. Blocks.
+    pub fn serve(&self, socket: &Path) -> io::Result<()> {
+        let _ = std::fs::remove_file(socket);
+        let listener = UnixListener::bind(socket)?;
+        for conn in listener.incoming() {
+            let conn = conn?;
+            let inner = self.inner.clone();
+            std::thread::spawn(move || {
+                let mut conn = conn;
+                if let Err(e) = inner.handle_conn(&mut conn) {
+                    // Best-effort error frame; a dead connection's write just fails.
+                    let _ = write_frame(&mut conn, &encode(&err(&e.to_string())));
+                }
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Inner {
     /// Analyze `build_src`, reusing the warm cache when its content digest is
     /// unchanged. Returns the analyzed targets (cloned out so execution doesn't
     /// hold the lock).
@@ -105,29 +150,40 @@ impl Server {
         Ok(targets)
     }
 
-    /// Bind `socket` (removing a stale file first) and serve until the listener
-    /// errors. Blocks — run it in its own thread or process.
-    pub fn serve(&self, socket: &Path) -> io::Result<()> {
-        let _ = std::fs::remove_file(socket);
-        let listener = UnixListener::bind(socket)?;
-        for conn in listener.incoming() {
-            let mut conn = conn?;
-            if let Err(e) = self.handle_conn(&mut conn) {
-                // Best-effort error frame; a dead connection's write just fails.
-                let _ = write_frame(&mut conn, &encode(&err(&e.to_string())));
-            }
-        }
-        Ok(())
-    }
-
+    /// One connection: a `build.subscribe` request streams build-graph state until
+    /// the client disconnects; everything else is one request → one response.
     fn handle_conn(&self, conn: &mut UnixStream) -> io::Result<()> {
         let req = decode(&read_frame(conn)?);
-        let resp = self.dispatch(&req);
-        write_frame(conn, &encode(&resp))
+        let Cbor::Text(method) = req.get(1) else {
+            return write_frame(conn, &encode(&err("malformed request: missing method")));
+        };
+        if method == "build.subscribe" {
+            self.stream_build_state(conn)
+        } else {
+            let resp = self.dispatch(&req);
+            write_frame(conn, &encode(&resp))
+        }
     }
 
-    /// Route one request envelope to its handler and produce a response envelope.
-    pub fn dispatch(&self, req: &Cbor) -> Cbor {
+    /// `build.subscribe` (atom): send the current state, then a fresh snapshot each
+    /// time a build advances the revision, until the client disconnects.
+    fn stream_build_state(&self, conn: &mut UnixStream) -> io::Result<()> {
+        let mut last = i64::MIN;
+        loop {
+            let snapshot = {
+                let guard = self.state.lock().unwrap();
+                // Park until the revision differs from what we last sent. wait_while
+                // re-checks the predicate up front, so a build that fired between
+                // frames is never missed.
+                let guard = self.bump.wait_while(guard, |s| s.revision == last).unwrap();
+                last = guard.revision;
+                guard.clone()
+            };
+            write_frame(conn, &encode(&ok(&snapshot.to_cbor())))?; // Err == client gone → stop
+        }
+    }
+
+    fn dispatch(&self, req: &Cbor) -> Cbor {
         let Cbor::Text(method) = req.get(1) else {
             return err("malformed request: missing method");
         };
@@ -168,7 +224,7 @@ impl Server {
 
         // Build success vs. action failure both yield a BuildResult (Built/Failed);
         // Err is reserved for protocol/IO problems (no BUILD, unreadable, …).
-        Ok(match execute(&targets, &name, &self.workspace, &cache) {
+        let result = match execute(&targets, &name, &self.workspace, &cache) {
             Ok(report) => BuildResult {
                 target: target_arg,
                 status: if report.executed == 0 {
@@ -194,7 +250,39 @@ impl Server {
                 outputs: vec![],
                 message: Some(e),
             },
-        })
+        };
+        // Publish into the live state and wake `build.subscribe` streams.
+        self.record_state(&result, &name);
+        Ok(result)
+    }
+
+    /// Fold a completed build into the live `BuildState` and notify subscribers.
+    fn record_state(&self, result: &BuildResult, name: &str) {
+        use razel_wire::TargetKind as Tk;
+        let kind = if name.ends_with("_test") {
+            Tk::Test
+        } else if name.ends_with("_binary") {
+            Tk::Binary
+        } else {
+            Tk::Library
+        };
+        let ts = TargetStatus {
+            label: result.target.clone(),
+            kind,
+            status: result.status,
+            output_digest: result
+                .outputs
+                .first()
+                .map(|o| o.digest.clone())
+                .unwrap_or_default(),
+        };
+        let mut st = self.state.lock().unwrap();
+        st.targets.retain(|t| t.label != ts.label);
+        st.targets.push(ts);
+        st.targets.sort_by(|a, b| a.label.cmp(&b.label));
+        st.revision += 1;
+        drop(st);
+        self.bump.notify_all();
     }
 
     fn do_affected(&self, args: &Cbor) -> Result<ImpactSet, String> {
@@ -300,11 +388,32 @@ pub fn req_affected(files: &[String]) -> Cbor {
     ])
 }
 
+/// `build.subscribe` request envelope (atom stream of build-graph state).
+pub fn req_subscribe() -> Cbor {
+    Cbor::Map(vec![
+        (1, Cbor::Text("build.subscribe".into())),
+        (2, Cbor::Null),
+    ])
+}
+
 /// Send one request envelope to the daemon at `socket`; return its response.
 pub fn call(socket: &Path, req: &Cbor) -> io::Result<Cbor> {
     let mut stream = UnixStream::connect(socket)?;
     write_frame(&mut stream, &encode(req))?;
     Ok(decode(&read_frame(&mut stream)?))
+}
+
+/// Open a `build.subscribe` stream: returns the connection to read frames from
+/// (each frame via [`next_frame`]). The initial frame is the current state.
+pub fn subscribe(socket: &Path) -> io::Result<UnixStream> {
+    let mut stream = UnixStream::connect(socket)?;
+    write_frame(&mut stream, &encode(&req_subscribe()))?;
+    Ok(stream)
+}
+
+/// Read the next streamed frame (a response envelope) from a [`subscribe`] stream.
+pub fn next_frame(stream: &mut UnixStream) -> io::Result<Cbor> {
+    Ok(decode(&read_frame(stream)?))
 }
 
 /// Unwrap a response envelope: the `payload` on success, the `error` text on

@@ -17,7 +17,9 @@ use razel_build::build_target_report;
 use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
-use razel_wire::{BuildResult, BuildStatus, ImpactSet, OutputArtifact, VersionInfo, encode};
+use razel_wire::{
+    BuildResult, BuildState, BuildStatus, ImpactSet, OutputArtifact, VersionInfo, encode,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -31,6 +33,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("build") => cmd_build(&args[1..]),
         Some("affected") => cmd_affected(&args[1..]),
+        Some("subscribe") => cmd_subscribe(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
         Some("daemon") => cmd_daemon(&args[1..]),
         Some("-h") | Some("--help") | None => {
@@ -52,6 +55,7 @@ fn print_usage() {
 USAGE:
   razel build <target> [-C <dir>] [--cache <dir>] [--daemon] [--socket <s>] [--cbor]
   razel affected <file>... [-C <dir>] [--daemon] [--socket <s>] [--cbor]
+  razel subscribe [-C <dir>] [--socket <s>] [--cbor]
   razel version [--daemon] [--socket <s>] [--cbor]
   razel daemon [-C <dir>] [--cache <dir>] [--socket <s>]
 
@@ -241,6 +245,62 @@ fn print_impact(i: &ImpactSet) {
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+fn cmd_subscribe(args: &[String]) -> ExitCode {
+    let o = match parse_opts(args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    let socket = o.socket.unwrap_or_else(|| default_socket(&o.workspace));
+    let mut stream = match rpc::subscribe(&socket) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "razel subscribe: cannot reach daemon at {} ({e})",
+                socket.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "razel: subscribed to build-graph state on {} (Ctrl-C to stop)",
+        socket.display()
+    );
+    loop {
+        let frame = match rpc::next_frame(&mut stream) {
+            Ok(f) => f,
+            Err(_) => {
+                eprintln!("razel: subscription closed");
+                return ExitCode::SUCCESS;
+            }
+        };
+        match rpc::payload(&frame) {
+            Ok(p) if o.cbor => println!("{}", hex(&encode(&p))),
+            Ok(p) => print_build_state(&BuildState::from_cbor(&p)),
+            Err(e) => {
+                eprintln!("razel subscribe: daemon error: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+}
+
+fn print_build_state(s: &BuildState) {
+    println!(
+        "razel: build-graph @ rev {} ({} target{})",
+        s.revision,
+        s.targets.len(),
+        plural(s.targets.len())
+    );
+    for t in &s.targets {
+        let status = match t.status {
+            BuildStatus::Cached => "cached",
+            BuildStatus::Built => "built",
+            BuildStatus::Failed => "failed",
+        };
+        println!("  {status:<7} {}", t.label);
+    }
 }
 
 fn cmd_daemon(args: &[String]) -> ExitCode {
