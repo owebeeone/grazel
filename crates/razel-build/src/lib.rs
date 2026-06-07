@@ -36,6 +36,15 @@ fn collect_order(
     Ok(())
 }
 
+/// The outcome of a build: the produced output paths (in order) and how many
+/// actions actually **executed** (cache misses). `executed == 0` means the whole
+/// target was served from cache — the incremental "nothing to do" signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildReport {
+    pub produced: Vec<String>,
+    pub executed: usize,
+}
+
 /// Build a target and its transitive deps: analyze, order deps-first, and execute every
 /// action in `exec_root` (cache hit → 0 exec). Returns the produced output paths in order.
 pub fn build_target(
@@ -44,6 +53,17 @@ pub fn build_target(
     exec_root: &Path,
     cache: &Cache,
 ) -> Result<Vec<String>, String> {
+    Ok(build_target_report(build_src, target, exec_root, cache)?.produced)
+}
+
+/// Like [`build_target`] but also reports how many actions executed (cache misses) —
+/// the basis for `Cached` vs `Built` status and the `recomputes` metric.
+pub fn build_target_report(
+    build_src: &str,
+    target: &str,
+    exec_root: &Path,
+    cache: &Cache,
+) -> Result<BuildReport, String> {
     let by_name: HashMap<String, AnalyzedTarget> = analyze_starlark("BUILD", build_src)?
         .into_iter()
         .map(|t| (t.name.clone(), t))
@@ -53,6 +73,7 @@ pub fn build_target(
     collect_order(target, &by_name, &mut order, &mut HashSet::new())?;
 
     let mut produced = Vec::new();
+    let mut executed = 0;
     for tname in &order {
         for act in &by_name[tname].actions {
             // Digest the declared inputs that exist on disk → the action's content key.
@@ -74,10 +95,13 @@ pub fn build_target(
             if r.exit_code != 0 {
                 return Err(format!("action failed ({}): {:?}", r.exit_code, act.argv));
             }
+            if !r.cached {
+                executed += 1;
+            }
             produced.extend(act.outputs.clone());
         }
     }
-    Ok(produced)
+    Ok(BuildReport { produced, executed })
 }
 
 #[cfg(test)]
@@ -125,6 +149,35 @@ cc_obj(name = "widget", src = "widget.c")
         let produced2 = build_target(BUILD, "widget", exec2.path(), &cache).unwrap();
         assert_eq!(produced2, vec!["widget.o"]);
         assert!(exec2.path().join("widget.o").exists());
+    }
+
+    #[test]
+    fn report_counts_executed_then_zero_on_cache_hit() {
+        if !Path::new("/usr/bin/cc").exists() {
+            return;
+        }
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // Cold build: the one compile action executes (a cache miss).
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+        let r1 = build_target_report(BUILD, "widget", exec.path(), &cache).unwrap();
+        assert_eq!(r1.produced, vec!["widget.o"]);
+        assert_eq!(r1.executed, 1, "cold build executes the action");
+
+        // Warm rebuild in a fresh exec root: same content key → cache hit → 0 executed.
+        let exec2 = tempfile::tempdir().unwrap();
+        std::fs::write(
+            exec2.path().join("widget.c"),
+            "int answer(void){return 42;}",
+        )
+        .unwrap();
+        let r2 = build_target_report(BUILD, "widget", exec2.path(), &cache).unwrap();
+        assert_eq!(r2.produced, vec!["widget.o"]);
+        assert_eq!(
+            r2.executed, 0,
+            "warm rebuild is fully cached — nothing recomputed"
+        );
     }
 
     // The D7 path: a `define_config` transform generates the compile command; the rule

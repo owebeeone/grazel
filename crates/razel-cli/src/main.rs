@@ -13,7 +13,7 @@
 //! Scope: single-package `BUILD`, exec_root = the workspace dir. The daemon does
 //! **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
-use razel_build::build_target;
+use razel_build::build_target_report;
 use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
@@ -240,12 +240,18 @@ fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
     })?;
 
     Ok(
-        match build_target(&build_src, &name, &o.workspace, &cache) {
-            Ok(produced) => BuildResult {
+        match build_target_report(&build_src, &name, &o.workspace, &cache) {
+            Ok(report) => BuildResult {
                 target: target_arg.to_string(),
-                status: BuildStatus::Built,
-                recomputes: 0, // cold one-shot build; recomputes is the warm daemon's metric
-                outputs: produced
+                // executed == 0 → fully served from cache.
+                status: if report.executed == 0 {
+                    BuildStatus::Cached
+                } else {
+                    BuildStatus::Built
+                },
+                recomputes: report.executed as i64,
+                outputs: report
+                    .produced
                     .iter()
                     .map(|p| OutputArtifact {
                         path: p.clone(),
@@ -307,10 +313,15 @@ fn print_build_result(r: &BuildResult) {
         return;
     }
     let n = r.outputs.len();
+    let verb = match r.status {
+        BuildStatus::Cached => "cached",
+        _ => "built",
+    };
     println!(
-        "razel: built {} ({n} output{})",
+        "razel: {verb} {} ({n} output{}, {} recomputed)",
         r.target,
-        if n == 1 { "" } else { "s" }
+        if n == 1 { "" } else { "s" },
+        r.recomputes
     );
     for o in &r.outputs {
         let h = hex(&o.digest);

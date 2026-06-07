@@ -15,7 +15,7 @@
 //!   request  `{1: method:text, 2: args:cbor}`
 //!   response `{1: ok:bool, 2: payload:cbor|null, 3: error:text|null}`
 
-use razel_build::build_target;
+use razel_build::build_target_report;
 use razel_core::Digest;
 use razel_exec::Cache;
 use razel_wire::{BuildResult, BuildStatus, Cbor, OutputArtifact, VersionInfo, decode, encode};
@@ -120,12 +120,17 @@ impl Server {
         // Build success vs. action failure both yield a BuildResult (Built/Failed);
         // Err is reserved for protocol/IO problems (no BUILD, unreadable, …).
         Ok(
-            match build_target(&build_src, &name, &self.workspace, &cache) {
-                Ok(produced) => BuildResult {
+            match build_target_report(&build_src, &name, &self.workspace, &cache) {
+                Ok(report) => BuildResult {
                     target: target_arg,
-                    status: BuildStatus::Built,
-                    recomputes: 0, // cold build; warm-engine reuse is the next arc
-                    outputs: produced
+                    status: if report.executed == 0 {
+                        BuildStatus::Cached
+                    } else {
+                        BuildStatus::Built
+                    },
+                    recomputes: report.executed as i64,
+                    outputs: report
+                        .produced
                         .iter()
                         .map(|p| OutputArtifact {
                             path: p.clone(),

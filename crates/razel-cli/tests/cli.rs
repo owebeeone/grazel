@@ -99,6 +99,36 @@ fn build_result_cbor_carries_outputs() {
 }
 
 #[test]
+fn second_build_is_cached_with_zero_recomputes() {
+    if !std::path::Path::new("/usr/bin/cc").exists() {
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
+    std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+
+    let run = || {
+        let out = razel()
+            .args(["build", "widget", "--cbor", "-C"])
+            .arg(ws.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        razel_wire::BuildResult::from_cbor(&razel_wire::decode(&unhex(&String::from_utf8_lossy(
+            &out.stdout,
+        ))))
+    };
+
+    let first = run();
+    assert_eq!(first.status, razel_wire::BuildStatus::Built);
+    assert_eq!(first.recomputes, 1, "cold build recomputes the one action");
+
+    let second = run();
+    assert_eq!(second.status, razel_wire::BuildStatus::Cached);
+    assert_eq!(second.recomputes, 0, "warm rebuild recomputes nothing");
+}
+
+#[test]
 fn unknown_target_reports_failed_and_exits_nonzero() {
     let ws = tempfile::tempdir().unwrap();
     std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
