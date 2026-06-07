@@ -1,0 +1,16 @@
+[package]
+name = "razel-build"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+razel-actions = { version = "0.1.0", path = "../razel-actions" }
+razel-core = { version = "0.1.0", path = "../razel-core" }
+razel-exec = { version = "0.1.0", path = "../razel-exec" }
+razel-loading = { version = "0.1.0", path = "../razel-loading" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -25,6 +25,8 @@ use std::fmt;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnalyzedAction {
     pub mnemonic: String,
+    /// Full command: `[executable, args…]` — what the executor spawns.
+    pub argv: Vec<String>,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
 }
@@ -92,10 +94,13 @@ fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(require = named)] arguments: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
-        let _ = arguments;
+        let exe = executable.unwrap_or_else(|| "run".into());
+        let mut argv = vec![exe.clone()];
+        argv.extend(arguments.map(|l| l.items).unwrap_or_default());
         with_current(|c| {
             c.actions.push(AnalyzedAction {
-                mnemonic: executable.unwrap_or_else(|| "run".into()),
+                mnemonic: exe,
+                argv,
                 inputs: inputs.map(|l| l.items).unwrap_or_default(),
                 outputs: outputs.map(|l| l.items).unwrap_or_default(),
             })
@@ -110,6 +115,7 @@ fn actions_methods(b: &mut MethodsBuilder) {
         with_current(|c| {
             c.actions.push(AnalyzedAction {
                 mnemonic: "write".into(),
+                argv: vec!["<write>".into()],
                 inputs: Vec::new(),
                 outputs: vec![output],
             })

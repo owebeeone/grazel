@@ -123,8 +123,7 @@ mod tests {
         w.engine().add_input("f/a", d("a0"));
         w.engine().add_input("f/b", d("b0"));
         w.engine().add_derived("lib", &["f/a"], concat);
-        w.engine()
-            .add_derived("bin", &["lib", "f/b"], concat);
+        w.engine().add_derived("bin", &["lib", "f/b"], concat);
     }
 
     #[test]
