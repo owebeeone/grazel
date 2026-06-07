@@ -16,10 +16,12 @@
 //! recognized-but-diagnosed. razel's own flags (`-C`/`--daemon`/`--socket`/`--cbor`)
 //! have no Bazel equivalent and stay.
 //!
-//! Scope: single-package `BUILD`, exec_root = the workspace dir. The daemon does
-//! **cold** builds today; warm/incremental reuse + streaming surfaces are next.
+//! A `//pkg:name` target builds through the multi-package workspace loader
+//! (cross-package deps load on demand from `-C <root>`); a bare `name` builds the
+//! workspace's own `BUILD` single-package. exec_root = the workspace dir. The daemon
+//! does **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
-use razel_build::{GlobalFlags, build_bazel_with};
+use razel_build::{GlobalFlags, build_bazel_with, build_workspace_with};
 use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
@@ -68,7 +70,7 @@ USAGE (Bazel-syntax flags; all Bazel options are recognized):
   razel version [--daemon] [--socket <s>] [--cbor]
   razel daemon [-C <dir>] [--disk_cache <dir>] [--socket <s>]
 
-  <target>          name, :name, or //pkg:name (single-package BUILD)
+  <target>          //pkg:name (multi-package workspace) or name/:name (single BUILD)
   --disk_cache <d>  content-addressed cache dir (default: <workspace>/.razel-cache)
   -C, --workspace   workspace dir with BUILD + sources (default: .) [razel-only]
   --daemon          route the request to a running `razel daemon` over UDS [razel-only]
@@ -515,30 +517,11 @@ fn cmd_daemon(args: &[String]) -> ExitCode {
 }
 
 /// Run a build in-process; maps the driver's outcome onto the wire contract.
+///
+/// A `//pkg:name` label builds through the **multi-package workspace** loader
+/// (cross-package deps load on demand); a bare `name`/`:name` builds the workspace's
+/// own `BUILD` single-package. Both honor the global cc flags (`-c`/`--copt`/…).
 fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
-    // Accept name | :name | //pkg:name — build the bare name (single-package BUILD).
-    let name = target_arg
-        .rsplit(':')
-        .next()
-        .unwrap_or(target_arg)
-        .to_string();
-
-    let Some(build_path) = ["BUILD", "BUILD.bazel"]
-        .iter()
-        .map(|f| o.workspace.join(f))
-        .find(|p| p.exists())
-    else {
-        eprintln!(
-            "razel build: no BUILD or BUILD.bazel in {}",
-            o.workspace.display()
-        );
-        return Err(ExitCode::FAILURE);
-    };
-    let build_src = std::fs::read_to_string(&build_path).map_err(|e| {
-        eprintln!("razel build: cannot read {}: {e}", build_path.display());
-        ExitCode::FAILURE
-    })?;
-
     let cache_path = o
         .cache
         .clone()
@@ -551,36 +534,58 @@ fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
         ExitCode::FAILURE
     })?;
 
-    Ok(
-        match build_bazel_with(&build_src, &name, &o.workspace, &cache, o.global_flags()) {
-            Ok(report) => BuildResult {
-                target: target_arg.to_string(),
-                // executed == 0 → fully served from cache.
-                status: if report.executed == 0 {
-                    BuildStatus::Cached
-                } else {
-                    BuildStatus::Built
-                },
-                recomputes: report.executed as i64,
-                outputs: report
-                    .produced
-                    .iter()
-                    .map(|p| OutputArtifact {
-                        path: p.clone(),
-                        digest: digest_of(&o.workspace.join(p)),
-                    })
-                    .collect(),
-                message: None,
+    let report = if target_arg.starts_with("//") {
+        // Workspace label → load packages on demand from the workspace root.
+        build_workspace_with(&o.workspace, target_arg, &cache, o.global_flags())
+    } else {
+        // Bare name / :name → single-package build from the workspace's BUILD.
+        let name = target_arg.rsplit(':').next().unwrap_or(target_arg);
+        let Some(build_path) = ["BUILD", "BUILD.bazel"]
+            .iter()
+            .map(|f| o.workspace.join(f))
+            .find(|p| p.exists())
+        else {
+            eprintln!(
+                "razel build: no BUILD or BUILD.bazel in {}",
+                o.workspace.display()
+            );
+            return Err(ExitCode::FAILURE);
+        };
+        let build_src = std::fs::read_to_string(&build_path).map_err(|e| {
+            eprintln!("razel build: cannot read {}: {e}", build_path.display());
+            ExitCode::FAILURE
+        })?;
+        build_bazel_with(&build_src, name, &o.workspace, &cache, o.global_flags())
+    };
+
+    Ok(match report {
+        Ok(report) => BuildResult {
+            target: target_arg.to_string(),
+            // executed == 0 → fully served from cache.
+            status: if report.executed == 0 {
+                BuildStatus::Cached
+            } else {
+                BuildStatus::Built
             },
-            Err(e) => BuildResult {
-                target: target_arg.to_string(),
-                status: BuildStatus::Failed,
-                recomputes: 0,
-                outputs: vec![],
-                message: Some(e),
-            },
+            recomputes: report.executed as i64,
+            outputs: report
+                .produced
+                .iter()
+                .map(|p| OutputArtifact {
+                    path: p.clone(),
+                    digest: digest_of(&o.workspace.join(p)),
+                })
+                .collect(),
+            message: None,
         },
-    )
+        Err(e) => BuildResult {
+            target: target_arg.to_string(),
+            status: BuildStatus::Failed,
+            recomputes: 0,
+            outputs: vec![],
+            message: Some(e),
+        },
+    })
 }
 
 /// One request/response to the daemon; unwraps the payload or prints the error.

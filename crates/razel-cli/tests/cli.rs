@@ -60,8 +60,11 @@ fn build_compiles_a_real_object_end_to_end() {
     std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
     std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
 
+    // Bare name → single-package build of the workspace's BUILD (the rule() dialect
+    // doesn't package-qualify paths, so it's single-package; a `//pkg:name` label
+    // routes to the multi-package loader — see tests/cli_build.rs).
     let out = razel()
-        .args(["build", "//x:widget", "-C"])
+        .args(["build", "widget", "-C"])
         .arg(ws.path())
         .output()
         .unwrap();
