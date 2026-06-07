@@ -726,6 +726,31 @@ cc_binary(name = \"prog\", srcs = [\"main.cc\"] + if_rocm_is_configured([\"gpu.c
     }
 
     #[test]
+    fn stdlib_print_works_in_a_loaded_rule() {
+        // Mirrors bazelbuild-examples rules/empty: a loaded .bzl rule whose impl
+        // calls print() — exercises the standard-library globals (Print extension).
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "pkg/empty.bzl",
+            "def _impl(_):\n    print(\"this rule does nothing\")\nempty = rule(implementation = _impl)\n",
+        );
+        w(
+            "pkg/BUILD",
+            "load(\"//pkg:empty.bzl\", \"empty\")\nempty(name = \"nothing\")\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // No actions, no outputs — but it must analyze + "build" (0 executed) cleanly.
+        let report = build_workspace(root.path(), "//pkg:nothing", &cache).unwrap();
+        assert_eq!(report.executed, 0);
+    }
+
+    #[test]
     fn builds_via_a_rule_defined_in_a_loaded_bzl() {
         // The freeze-fix payoff: a custom `rule()` defined in a .bzl and load()ed.
         // Before RuleObj was freezable, freezing the loaded .bzl module errored here.

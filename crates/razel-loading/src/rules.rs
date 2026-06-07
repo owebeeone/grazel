@@ -969,10 +969,18 @@ fn native_members(b: &mut GlobalsBuilder) {
 }
 
 fn build_globals() -> Globals {
-    GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
-        .with(rule_globals)
-        .with(|b| b.namespace("native", native_members))
-        .build()
+    GlobalsBuilder::extended_by(&[
+        LibraryExtension::StructType,
+        LibraryExtension::Print,
+        LibraryExtension::Map,
+        LibraryExtension::Filter,
+        LibraryExtension::Debug,
+        LibraryExtension::Json,
+        LibraryExtension::Partial,
+    ])
+    .with(rule_globals)
+    .with(|b| b.namespace("native", native_members))
+    .build()
 }
 
 /// Resolve a `.bzl` load label to a file under `root`. `//pkg:f.bzl` → `root/pkg/f.bzl`;
@@ -1201,9 +1209,17 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
     RESULTS.with_borrow_mut(|r| r.clear());
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
-    let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
-        .with(rule_globals)
-        .build();
+    let globals = GlobalsBuilder::extended_by(&[
+        LibraryExtension::StructType,
+        LibraryExtension::Print,
+        LibraryExtension::Map,
+        LibraryExtension::Filter,
+        LibraryExtension::Debug,
+        LibraryExtension::Json,
+        LibraryExtension::Partial,
+    ])
+    .with(rule_globals)
+    .build();
     let res: Result<(), String> = Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.eval_module(ast, &globals)
