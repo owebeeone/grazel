@@ -612,6 +612,43 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
     }
 
     #[test]
+    fn build_package_declaration_builtins_are_no_ops() {
+        // package()/package_group()/licenses()/exports_files() are recognized so real
+        // BUILD files evaluate; razel treats them as no-op declarations.
+        if !Path::new("/usr/bin/c++").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "pkg/BUILD",
+            "load(\"@rules_cc//cc:cc_binary.bzl\", \"cc_binary\")\n\
+package(default_visibility = [\"//visibility:public\"], licenses = [\"notice\"])\n\
+licenses([\"notice\"])\n\
+exports_files([\"data.txt\"], visibility = [\"//visibility:public\"])\n\
+package_group(name = \"friends\", packages = [\"//...\"])\n\
+cc_binary(name = \"prog\", srcs = [\"main.cc\"])\n",
+        );
+        w(
+            "pkg/main.cc",
+            "#include <iostream>\nint main() { std::cout << \"ok\" << std::endl; return 0; }\n",
+        );
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // The no-op builtins must not derail evaluation; the cc_binary still builds.
+        let report = build_workspace(root.path(), "//pkg:prog", &cache).unwrap();
+        assert!(report.produced.contains(&"pkg/prog".to_string()));
+        let out = std::process::Command::new(root.path().join("pkg/prog"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+    }
+
+    #[test]
     fn builds_via_a_rule_defined_in_a_loaded_bzl() {
         // The freeze-fix payoff: a custom `rule()` defined in a .bzl and load()ed.
         // Before RuleObj was freezable, freezing the loaded .bzl module errored here.

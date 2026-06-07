@@ -358,6 +358,32 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc(RuleObjGen { implementation }))
     }
 
+    /// BUILD package-declaration builtins. razel doesn't enforce visibility/licenses
+    /// and tracks no separate file-export set, so these are no-op declarations —
+    /// recognized so real BUILD files evaluate. (`package`, `package_group`,
+    /// `licenses`, `exports_files`.)
+    fn package<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn package_group<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn licenses<'v>(
+        #[starlark(require = pos)] _licenses: UnpackList<String>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn exports_files<'v>(
+        #[starlark(require = pos)] _files: UnpackList<String>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
     /// `DefaultInfo(files=[…])` — the standard output provider (other kwargs absorbed).
     fn DefaultInfo<'v>(
         #[starlark(require = named)] files: Option<UnpackList<String>>,
