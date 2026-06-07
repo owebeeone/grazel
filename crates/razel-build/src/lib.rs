@@ -12,47 +12,70 @@
 use razel_actions::Action;
 use razel_core::Digest;
 use razel_exec::{Cache, build_action};
-use razel_loading::analyze_starlark;
-use std::collections::BTreeMap;
+use razel_loading::{AnalyzedTarget, analyze_starlark};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-/// Build one Starlark-defined target end-to-end: analyze, then execute each action in
-/// `exec_root` (its declared inputs must exist there), caching by content key. Returns the
-/// produced output paths.
+/// Post-order DFS over `deps` → targets ordered deps-first (a target's deps execute before it).
+fn collect_order(
+    name: &str,
+    by_name: &HashMap<String, AnalyzedTarget>,
+    order: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) -> Result<(), String> {
+    if !seen.insert(name.to_string()) {
+        return Ok(());
+    }
+    let t = by_name
+        .get(name)
+        .ok_or_else(|| format!("unknown target: {name}"))?;
+    for d in &t.deps {
+        collect_order(d, by_name, order, seen)?;
+    }
+    order.push(name.to_string());
+    Ok(())
+}
+
+/// Build a target and its transitive deps: analyze, order deps-first, and execute every
+/// action in `exec_root` (cache hit → 0 exec). Returns the produced output paths in order.
 pub fn build_target(
     build_src: &str,
     target: &str,
     exec_root: &Path,
     cache: &Cache,
 ) -> Result<Vec<String>, String> {
-    let analyzed = analyze_starlark("BUILD", build_src)?;
-    let t = analyzed
-        .iter()
-        .find(|t| t.name == target)
-        .ok_or_else(|| format!("no such target: {target}"))?;
+    let by_name: HashMap<String, AnalyzedTarget> = analyze_starlark("BUILD", build_src)?
+        .into_iter()
+        .map(|t| (t.name.clone(), t))
+        .collect();
+
+    let mut order = Vec::new();
+    collect_order(target, &by_name, &mut order, &mut HashSet::new())?;
 
     let mut produced = Vec::new();
-    for act in &t.actions {
-        // Digest the declared inputs that exist on disk → the action's content key.
-        let mut inputs = BTreeMap::new();
-        for inp in &act.inputs {
-            if let Ok(bytes) = std::fs::read(exec_root.join(inp)) {
-                inputs.insert(inp.clone(), Digest::of(&bytes));
+    for tname in &order {
+        for act in &by_name[tname].actions {
+            // Digest the declared inputs that exist on disk → the action's content key.
+            let mut inputs = BTreeMap::new();
+            for inp in &act.inputs {
+                if let Ok(bytes) = std::fs::read(exec_root.join(inp)) {
+                    inputs.insert(inp.clone(), Digest::of(&bytes));
+                }
             }
+            let action = Action {
+                argv: act.argv.clone(),
+                inputs,
+                env: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+                tools: BTreeMap::new(),
+                platform: "host".into(),
+                outputs: act.outputs.clone(),
+            };
+            let r = build_action(&action, cache, exec_root).map_err(|e| e.to_string())?;
+            if r.exit_code != 0 {
+                return Err(format!("action failed ({}): {:?}", r.exit_code, act.argv));
+            }
+            produced.extend(act.outputs.clone());
         }
-        let action = Action {
-            argv: act.argv.clone(),
-            inputs,
-            env: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
-            tools: BTreeMap::new(),
-            platform: "host".into(),
-            outputs: act.outputs.clone(),
-        };
-        let r = build_action(&action, cache, exec_root).map_err(|e| e.to_string())?;
-        if r.exit_code != 0 {
-            return Err(format!("action failed ({}): {:?}", r.exit_code, act.argv));
-        }
-        produced.extend(act.outputs.clone());
     }
     Ok(produced)
 }
@@ -200,5 +223,87 @@ cc_library(name = "math", srcs = ["add.c", "sub.c"])
         let lib = exec.path().join("libmath.a");
         assert!(lib.exists(), "razel did not produce libmath.a");
         assert!(std::fs::metadata(&lib).unwrap().len() > 0);
+    }
+
+    // The two-phase milestone: cc_binary depends on cc_library, reads its DefaultInfo
+    // (libmath.a), and LINKS it into a runnable binary — transitive build, deps first.
+    const BUILD_BINARY: &str = r#"
+def _gnu_compile(req):
+    return struct(executable = req.tool, args = ["-c", req.src, "-o", req.out],
+                  inputs = [req.src], outputs = [req.out])
+def _gnu_archive(req):
+    return struct(executable = req.ar, args = ["rcs", req.out] + req.objs,
+                  inputs = req.objs, outputs = [req.out])
+def _gnu_link(req):
+    return struct(executable = req.cc, args = ["-o", req.out] + req.objs + req.libs,
+                  inputs = req.objs + req.libs, outputs = [req.out])
+
+gnu = define_config(name = "gnu", compile = _gnu_compile, archive = _gnu_archive, link = _gnu_link)
+
+def _cc_library_impl(ctx):
+    objs = []
+    for src in ctx.attr.srcs:
+        o = src + ".o"
+        c = gnu.compile(struct(tool = "/usr/bin/cc", src = src, out = o))
+        ctx.actions.run(executable = c.executable, arguments = c.args, inputs = c.inputs, outputs = c.outputs)
+        objs.append(o)
+    lib = "lib" + ctx.attr.name + ".a"
+    a = gnu.archive(struct(ar = "/usr/bin/ar", objs = objs, out = lib))
+    ctx.actions.run(executable = a.executable, arguments = a.args, inputs = a.inputs, outputs = a.outputs)
+    return [DefaultInfo(files = [lib])]
+cc_library = rule(implementation = _cc_library_impl, attrs = {"srcs": 1})
+
+def _cc_binary_impl(ctx):
+    o = ctx.attr.name + ".o"
+    c = gnu.compile(struct(tool = "/usr/bin/cc", src = ctx.attr.src, out = o))
+    ctx.actions.run(executable = c.executable, arguments = c.args, inputs = c.inputs, outputs = c.outputs)
+    libs = []
+    for d in ctx.attr.deps:
+        libs = libs + d.files
+    out = ctx.attr.name
+    l = gnu.link(struct(cc = "/usr/bin/cc", objs = [o], libs = libs, out = out))
+    ctx.actions.run(executable = l.executable, arguments = l.args, inputs = l.inputs, outputs = l.outputs)
+    return [DefaultInfo(files = [out])]
+cc_binary = rule(implementation = _cc_binary_impl, attrs = {"src": 1})
+
+cc_library(name = "math", srcs = ["add.c"])
+cc_binary(name = "app", src = "app.c", deps = [":math"])
+"#;
+
+    #[test]
+    fn cc_binary_links_cc_library_into_a_runnable_binary() {
+        if !Path::new("/usr/bin/cc").exists() || !Path::new("/usr/bin/ar").exists() {
+            return;
+        }
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(
+            exec.path().join("add.c"),
+            "int add(int a,int b){return a+b;}",
+        )
+        .unwrap();
+        // main returns add(40,2)-42 == 0; resolving `add` requires linking libmath.a.
+        std::fs::write(
+            exec.path().join("app.c"),
+            "int add(int,int); int main(void){return add(40,2)-42;}",
+        )
+        .unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+
+        // Build the binary: razel runs math's actions (lib) first, then app's (link).
+        let produced = build_target(BUILD_BINARY, "app", exec.path(), &cache).unwrap();
+        assert!(
+            produced.contains(&"libmath.a".to_string()),
+            "dep lib not built: {produced:?}"
+        );
+        assert!(
+            produced.contains(&"app".to_string()),
+            "binary not built: {produced:?}"
+        );
+
+        // The produced binary actually runs and links correctly (exit 0).
+        let app = exec.path().join("app");
+        assert!(app.exists());
+        let status = std::process::Command::new(&app).status().unwrap();
+        assert_eq!(status.code(), Some(0), "linked binary did not run/return 0");
     }
 }
