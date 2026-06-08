@@ -61,10 +61,27 @@ pub struct Feature {
     pub provides: Vec<String>,
 }
 
-/// A toolchain's feature definitions, in declaration order (the ingested config).
+/// A tool for an action — argv[0] (e.g. `cc_wrapper.sh`, `/usr/bin/libtool`), optionally gated
+/// by `with_features` (the first matching tool wins).
+#[derive(Clone, Debug, Default)]
+pub struct Tool {
+    pub path: String,
+    pub with_features: Vec<WithFeatures>,
+}
+
+/// An `action_config`: selects the tool (argv[0]) for a specific action. Its own `flag_sets` +
+/// `implies` are reserved — for cc the flags live in features (BazelCcCommandLine.md §D).
+#[derive(Clone, Debug, Default)]
+pub struct ActionConfig {
+    pub action_name: String,
+    pub tools: Vec<Tool>,
+}
+
+/// A toolchain's feature + action_config definitions, in declaration order (the ingested config).
 #[derive(Clone, Debug, Default)]
 pub struct FeatureConfig {
     pub features: Vec<Feature>,
+    pub action_configs: Vec<ActionConfig>,
 }
 
 impl FeatureConfig {
@@ -147,6 +164,25 @@ impl FeatureConfig {
             }
         }
         out
+    }
+
+    /// The tool (argv[0]) for `action`: the first tool of the matching `action_config` whose
+    /// `with_features` gate is satisfied.
+    pub fn tool_path(&self, enabled: &[String], action: &str) -> Option<&str> {
+        let enabled_set: BTreeSet<&str> = enabled.iter().map(String::as_str).collect();
+        let ac = self.action_configs.iter().find(|a| a.action_name == action)?;
+        ac.tools
+            .iter()
+            .find(|t| with_features_ok(&t.with_features, &enabled_set))
+            .map(|t| t.path.as_str())
+    }
+
+    /// The full argv for `action`: the selected tool path (if any) followed by the expanded flags.
+    pub fn full_command_line(&self, enabled: &[String], action: &str, vars: &Vars) -> Vec<String> {
+        let mut argv: Vec<String> =
+            self.tool_path(enabled, action).map(String::from).into_iter().collect();
+        argv.extend(self.command_line(enabled, action, vars));
+        argv
     }
 }
 
@@ -263,6 +299,7 @@ mod tests {
                 // `opt` is NOT default-enabled — only fires when the build mode requests it.
                 feat("opt", false, vec![fs("c++-compile", vec![fg(&["-O2"])])]),
             ],
+            action_configs: vec![],
         }
     }
 
@@ -313,6 +350,7 @@ mod tests {
                 Feature { name: "a".into(), implies: vec!["b".into()], ..Default::default() },
                 feat("b", false, vec![fs("x", vec![fg(&["-b"])])]),
             ],
+            action_configs: vec![],
         };
         assert_eq!(cfg.command_line(&cfg.select(&["a".into()]), "x", &Vars::new()), ["-b"]);
     }
@@ -330,6 +368,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            action_configs: vec![],
         };
         assert!(cfg.command_line(&cfg.select(&[]), "x", &Vars::new()).is_empty()); // pic unmet
         assert_eq!(cfg.command_line(&cfg.select(&["pic".into()]), "x", &Vars::new()), ["-fPIC"]);
@@ -346,8 +385,43 @@ mod tests {
                     flag_groups: vec![fg(&["-g"])],
                 }]),
             ],
+            action_configs: vec![],
         };
         assert!(cfg.command_line(&cfg.select(&[]), "x", &Vars::new()).is_empty()); // dbg off
         assert_eq!(cfg.command_line(&cfg.select(&["dbg".into()]), "x", &Vars::new()), ["-g"]);
+    }
+
+    #[test]
+    fn action_config_selects_the_tool_path_as_argv0() {
+        let mut cfg = cc_config();
+        cfg.action_configs = vec![ActionConfig {
+            action_name: "c++-compile".into(),
+            tools: vec![Tool { path: "cc_wrapper.sh".into(), with_features: vec![] }],
+        }];
+        let argv = cfg.full_command_line(&cfg.select(&[]), "c++-compile", &cc_vars());
+        assert_eq!(argv[0], "cc_wrapper.sh"); // the tool is argv[0]
+        assert_eq!(argv[1], "-U_FORTIFY_SOURCE"); // then the expanded flags
+    }
+
+    #[test]
+    fn tool_path_respects_with_features() {
+        let cfg = FeatureConfig {
+            features: vec![feat("use_lld", false, vec![])],
+            action_configs: vec![ActionConfig {
+                action_name: "c++-link".into(),
+                tools: vec![
+                    Tool {
+                        path: "lld".into(),
+                        with_features: vec![WithFeatures {
+                            features: vec!["use_lld".into()],
+                            not_features: vec![],
+                        }],
+                    },
+                    Tool { path: "ld".into(), with_features: vec![] }, // fallback (no gate)
+                ],
+            }],
+        };
+        assert_eq!(cfg.tool_path(&cfg.select(&[]), "c++-link"), Some("ld"));
+        assert_eq!(cfg.tool_path(&cfg.select(&["use_lld".into()]), "c++-link"), Some("lld"));
     }
 }
