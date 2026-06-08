@@ -24,13 +24,22 @@ pub enum VarValue {
 /// The variables an action provides (`source_file`, `output_file`, `quote_include_paths`, …).
 pub type Vars = BTreeMap<String, VarValue>;
 
-/// A `flag_group`: literal/`%{var}` flags + optional `iterate_over` + presence gates.
+/// A `flag_group`: literal/`%{var}` flags and/or nested flag_groups, with `iterate_over` +
+/// `expand_if_*` gates.
 #[derive(Clone, Debug, Default)]
 pub struct FlagGroup {
     pub flags: Vec<String>,
+    /// Nested flag_groups — expanded after `flags`, in the same iteration scope.
+    pub flag_groups: Vec<FlagGroup>,
     pub iterate_over: Option<String>,
     pub expand_if_available: Vec<String>,
     pub expand_if_not_available: Vec<String>,
+    /// Expand only if the variable is present (a boolean-ish var, e.g. `pic`).
+    pub expand_if_true: Option<String>,
+    /// Expand only if the variable is absent.
+    pub expand_if_false: Option<String>,
+    /// Expand only if the (scalar) variable equals the value (`variable_with_value`).
+    pub expand_if_equal: Option<(String, String)>,
 }
 
 /// `with_feature_set`: satisfied when all `features` are enabled AND all `not_features` disabled.
@@ -197,12 +206,6 @@ fn with_features_ok(sets: &[WithFeatures], enabled: &BTreeSet<&str>) -> bool {
 }
 
 fn expand_flag_group(fg: &FlagGroup, vars: &Vars, out: &mut Vec<String>) {
-    if !fg.expand_if_available.iter().all(|v| vars.contains_key(v)) {
-        return;
-    }
-    if fg.expand_if_not_available.iter().any(|v| vars.contains_key(v)) {
-        return;
-    }
     match &fg.iterate_over {
         Some(seq) => {
             let Some(VarValue::Sequence(items)) = vars.get(seq) else { return };
@@ -210,17 +213,48 @@ fn expand_flag_group(fg: &FlagGroup, vars: &Vars, out: &mut Vec<String>) {
                 // Bind the iterate variable to this element's scalar for the iteration's scope.
                 let mut scoped = vars.clone();
                 scoped.insert(seq.clone(), VarValue::Scalar(item.clone()));
-                for flag in &fg.flags {
-                    out.push(substitute(flag, &scoped));
-                }
+                emit(fg, &scoped, out);
             }
         }
-        None => {
-            for flag in &fg.flags {
-                out.push(substitute(flag, vars));
-            }
+        None => emit(fg, vars, out),
+    }
+}
+
+/// Emit one expansion of `fg` in `vars`'s scope (after its `expand_if_*` gates): the flags,
+/// then the nested flag_groups. Gates are evaluated per-scope so they may reference the
+/// `iterate_over` variable.
+fn emit(fg: &FlagGroup, vars: &Vars, out: &mut Vec<String>) {
+    if !gates_ok(fg, vars) {
+        return;
+    }
+    for flag in &fg.flags {
+        out.push(substitute(flag, vars));
+    }
+    for nested in &fg.flag_groups {
+        expand_flag_group(nested, vars, out);
+    }
+}
+
+fn gates_ok(fg: &FlagGroup, vars: &Vars) -> bool {
+    if !fg.expand_if_available.iter().all(|v| vars.contains_key(v)) {
+        return false;
+    }
+    if fg.expand_if_not_available.iter().any(|v| vars.contains_key(v)) {
+        return false;
+    }
+    if fg.expand_if_true.as_ref().is_some_and(|v| !vars.contains_key(v)) {
+        return false;
+    }
+    if fg.expand_if_false.as_ref().is_some_and(|v| vars.contains_key(v)) {
+        return false;
+    }
+    if let Some((var, val)) = &fg.expand_if_equal {
+        match vars.get(var) {
+            Some(VarValue::Scalar(s)) if s == val => {}
+            _ => return false,
         }
     }
+    true
 }
 
 /// Substitute `%{var}` (scalar) references in a flag template. A missing/sequence var expands to
@@ -423,5 +457,49 @@ mod tests {
         };
         assert_eq!(cfg.tool_path(&cfg.select(&[]), "c++-link"), Some("ld"));
         assert_eq!(cfg.tool_path(&cfg.select(&["use_lld".into()]), "c++-link"), Some("lld"));
+    }
+
+    #[test]
+    fn nested_flag_groups_expand_in_iteration_scope() {
+        let cfg = FeatureConfig {
+            features: vec![feat("f", true, vec![FlagSet {
+                actions: vec!["x".into()],
+                flag_groups: vec![FlagGroup {
+                    iterate_over: Some("defines".into()),
+                    flag_groups: vec![FlagGroup {
+                        flags: vec!["-D".into(), "%{defines}".into()],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }])],
+            action_configs: vec![],
+        };
+        let vars = Vars::from([("defines".into(), VarValue::Sequence(vec!["A=1".into(), "B".into()]))]);
+        assert_eq!(cfg.command_line(&cfg.select(&[]), "x", &vars), ["-D", "A=1", "-D", "B"]);
+    }
+
+    #[test]
+    fn expand_if_true_and_equal_gate_flag_groups() {
+        let one = |fg: FlagGroup| FeatureConfig {
+            features: vec![feat("f", true, vec![FlagSet {
+                actions: vec!["x".into()],
+                flag_groups: vec![fg],
+                ..Default::default()
+            }])],
+            action_configs: vec![],
+        };
+        // expand_if_true: fires only when the variable is present.
+        let cfg = one(FlagGroup { flags: vec!["-fPIC".into()], expand_if_true: Some("pic".into()), ..Default::default() });
+        assert!(cfg.command_line(&cfg.select(&[]), "x", &Vars::new()).is_empty());
+        let pic = Vars::from([("pic".into(), VarValue::Scalar("1".into()))]);
+        assert_eq!(cfg.command_line(&cfg.select(&[]), "x", &pic), ["-fPIC"]);
+        // expand_if_equal: fires only when the scalar matches the value.
+        let cfg = one(FlagGroup { flags: vec!["-std=c++20".into()], expand_if_equal: Some(("std".into(), "c++20".into())), ..Default::default() });
+        let s17 = Vars::from([("std".into(), VarValue::Scalar("c++17".into()))]);
+        let s20 = Vars::from([("std".into(), VarValue::Scalar("c++20".into()))]);
+        assert!(cfg.command_line(&cfg.select(&[]), "x", &s17).is_empty());
+        assert_eq!(cfg.command_line(&cfg.select(&[]), "x", &s20), ["-std=c++20"]);
     }
 }

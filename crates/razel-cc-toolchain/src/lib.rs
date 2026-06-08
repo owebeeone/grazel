@@ -92,10 +92,23 @@ fn flag_set<'v>(v: Value<'v>, heap: Heap<'v>) -> FlagSet {
 fn flag_group<'v>(v: Value<'v>, heap: Heap<'v>) -> FlagGroup {
     FlagGroup {
         flags: str_list(v, "flags", heap),
+        flag_groups: list(v, "flag_groups", heap).iter().map(|g| flag_group(*g, heap)).collect(),
         iterate_over: opt_str(v, "iterate_over", heap),
         expand_if_available: opt_str(v, "expand_if_available", heap).into_iter().collect(),
         expand_if_not_available: opt_str(v, "expand_if_not_available", heap).into_iter().collect(),
+        expand_if_true: opt_str(v, "expand_if_true", heap),
+        expand_if_false: opt_str(v, "expand_if_false", heap),
+        expand_if_equal: opt_equal(v, heap),
     }
+}
+
+/// `expand_if_equal = variable_with_value(variable = …, value = …)` → `(variable, value)`.
+fn opt_equal<'v>(v: Value<'v>, heap: Heap<'v>) -> Option<(String, String)> {
+    let e = attr(v, "expand_if_equal", heap)?;
+    if e.is_none() {
+        return None;
+    }
+    Some((str_field(e, "variable", heap), str_field(e, "value", heap)))
 }
 fn action_config<'v>(v: Value<'v>, heap: Heap<'v>) -> ActionConfig {
     ActionConfig {
