@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 # Project automation (the Rust idiom in place of Make/npm-scripts). Run via the
-# `cargo xtask` alias (.cargo/config.toml). std-only; builds only when invoked.
+# `cargo xtask` alias (.cargo/config.toml). Builds only when invoked.
 
 [dependencies]
+razel-parity = { path = "../crates/razel-parity" } # shared golden normalization (capture-goldens)

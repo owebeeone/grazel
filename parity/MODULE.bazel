@@ -1,0 +1,6 @@
+module(name = "razel_parity_corpus", version = "0.0")
+
+# Pinned ruleset(s) for reproducible golden capture (RazelParityHarness.md §5/§9).
+# This workspace exists ONLY so `cargo xtask capture-goldens` can run `bazel aquery`/`cquery`
+# over the corpus; it is dev/authoring-only — the test suite never touches bazel.
+bazel_dep(name = "rules_cc", version = "0.1.1")

@@ -1,8 +1,8 @@
 # Cargo build output — never committed
 /target
 
-# Bazel convenience symlinks (if bazel runs at repo root for parity goldens)
-/bazel-*
+# Bazel convenience symlinks (anywhere bazel runs, incl. parity/ for goldens)
+bazel-*
 
 # macOS
 .DS_Store

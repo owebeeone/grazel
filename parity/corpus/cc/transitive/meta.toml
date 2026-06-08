@@ -1,0 +1,7 @@
+# Pins for reproducible golden capture (RazelParityHarness.md §5/§9).
+# Refresh with: cargo xtask capture-goldens
+bazel_version    = "9.1.1"
+rules_cc_version = "0.1.1"
+platform         = "darwin_arm64"   # aquery is post-analysis → goldens are platform-pinned
+norm_version     = 1                # razel-parity::normalize spec version
+query            = "aquery //corpus/cc/transitive:all --output=text"

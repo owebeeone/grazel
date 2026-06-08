@@ -20,11 +20,17 @@ pub fn normalize(raw: &str) -> String {
     for line in raw.lines() {
         let line = line.trim_end();
         let trimmed = line.trim_start();
-        // Drop bazel-internal / host-volatile lines (not comparable across runs/machines).
-        if trimmed.starts_with("ActionKey:")
-            || trimmed.starts_with("# Configuration:")
-            || trimmed.starts_with("# Execution platform:")
-        {
+        // Drop bazel-internal / non-comparable metadata (comparison scope §5: we compare
+        // mnemonic + argv + inputs + outputs + env — NOT bazel's ActionKey digest or its
+        // config/exec-platform annotations, which razel does not reproduce verbatim).
+        const DROP: &[&str] = &[
+            "ActionKey:",
+            "Configuration:",
+            "# Configuration:",
+            "Execution platform:",
+            "# Execution platform:",
+        ];
+        if DROP.iter().any(|p| trimmed.starts_with(p)) {
             continue;
         }
         let mut s = line.to_string();
@@ -104,8 +110,10 @@ mod tests {
     }
 
     #[test]
-    fn strips_actionkey_and_config_lines() {
-        let raw = "  Mnemonic: CppCompile\n  ActionKey: f003e9289ca5\n# Configuration: 680dcaf1\n# Execution platform: @@platforms//host:host\n  Outputs: [x]";
+    fn strips_noncomparable_metadata() {
+        // ActionKey digest + Configuration + Execution platform (indented and `#` forms) drop;
+        // Mnemonic/Outputs (the comparable core) stay.
+        let raw = "  Mnemonic: CppCompile\n  Configuration: darwin_arm64-fastbuild\n  Execution platform: @@platforms//host:host\n  ActionKey: f003e9289ca5\n# Configuration: 680dcaf1\n  Outputs: [x]";
         assert_eq!(normalize(raw), "  Mnemonic: CppCompile\n  Outputs: [x]\n");
     }
 

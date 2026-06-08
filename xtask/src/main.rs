@@ -37,13 +37,99 @@ fn main() -> ExitCode {
         Some("corpus") => corpus(check),
         Some("flags") => flags(check),
         Some("gates") => gates(),
+        Some("capture-goldens") => capture_goldens(),
         other => {
             eprintln!(
-                "unknown xtask {other:?}\nusage: cargo xtask <codegen|corpus|flags|gates> [--check]"
+                "unknown xtask {other:?}\n\
+                 usage: cargo xtask <codegen|corpus|flags|gates|capture-goldens> [--check]"
             );
             ExitCode::from(64)
         }
     }
+}
+
+// ── Phase 0.3: parity goldens (RazelParityHarness.md) ───────────────────────────
+// `cargo xtask capture-goldens` runs `bazel aquery` over each corpus case under
+// `parity/corpus/**` (dirs with a BUILD file), normalizes via `razel-parity`, and writes
+// `golden.txt` into the case dir. This is the ONLY bazel-touching step — dev/authoring-only;
+// the (future) hermetic runner consumes the committed goldens with no bazel/toolchain.
+// Env: BAZEL (default `bazel`), RAZEL_GOLDEN_OB (bazel --output_base; default /tmp/razel-parity-ob).
+fn capture_goldens() -> ExitCode {
+    let root = workspace_root();
+    let parity = root.join("parity");
+    let corpus = parity.join("corpus");
+    let bazel = std::env::var("BAZEL").unwrap_or_else(|_| "bazel".into());
+    let ob = std::env::var("RAZEL_GOLDEN_OB").unwrap_or_else(|_| "/tmp/razel-parity-ob".into());
+
+    let mut cases = Vec::new();
+    find_build_packages(&corpus, &corpus, &mut cases);
+    if cases.is_empty() {
+        eprintln!("capture-goldens: no corpus cases (BUILD files) under {}", corpus.display());
+        return ExitCode::from(1);
+    }
+    let mut failed = 0usize;
+    for (dir, pkg) in &cases {
+        let label = format!("//corpus/{pkg}:all");
+        eprintln!("capturing {label} …");
+        let out = Command::new(&bazel)
+            .current_dir(&parity)
+            .arg(format!("--output_base={ob}"))
+            .args(["aquery", &label, "--output=text", "--noshow_progress"])
+            .output();
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("  FAIL spawn bazel: {e}");
+                failed += 1;
+                continue;
+            }
+        };
+        if !out.status.success() {
+            eprintln!("  FAIL aquery:\n{}", String::from_utf8_lossy(&out.stderr).trim_end());
+            failed += 1;
+            continue;
+        }
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let golden = razel_parity::normalize(&filter_aquery(&raw));
+        let path = dir.join("golden.txt");
+        match std::fs::write(&path, &golden) {
+            Ok(()) => eprintln!("  wrote {} ({} bytes)", path.display(), golden.len()),
+            Err(e) => {
+                eprintln!("  FAIL write {}: {e}", path.display());
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
+}
+
+/// Recursively collect (dir, package-path) for every dir under `corpus_root` holding a BUILD file.
+fn find_build_packages(dir: &Path, corpus_root: &Path, out: &mut Vec<(PathBuf, String)>) {
+    if dir.join("BUILD").is_file() {
+        let rel = dir.strip_prefix(corpus_root).unwrap_or(dir).to_string_lossy().replace('\\', "/");
+        out.push((dir.to_path_buf(), rel));
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                find_build_packages(&p, corpus_root, out);
+            }
+        }
+    }
+}
+
+/// Drop bazel CLI chatter that may reach stdout, leaving only the action-graph lines.
+fn filter_aquery(raw: &str) -> String {
+    let drop = |t: &str| {
+        ["INFO:", "Loading", "Analyzing", "Computing", "Starting", "WARNING", "Fetching", "DEBUG", "Use "]
+            .iter()
+            .any(|p| t.starts_with(p))
+    };
+    raw.lines()
+        .filter(|l| !drop(l.trim_start()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── Phase 0.2: forcing gate (AD2 — no ambient state) ────────────────────────────

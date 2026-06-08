@@ -1,0 +1,111 @@
+action 'Writing script corpus/cc/transitive/base.cppmap'
+  Mnemonic: CppModuleMap
+  Target: //corpus/cc/transitive:base
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/base.cppmap]
+
+action 'Compiling corpus/cc/transitive/base.cc'
+  Mnemonic: CppCompile
+  Target: //corpus/cc/transitive:base
+  Inputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/base.cppmap, corpus/cc/transitive/base.cc, corpus/cc/transitive/base.h, external/<repo>/builtin_include_directory_paths, external/<repo>/cc_wrapper.sh, external/<repo>/deps_scanner_wrapper.sh, external/<repo>/module.modulemap, external/<repo>/validate_static_library.sh]
+  Outputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/base/base.d, bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/base/base.o]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/cc_wrapper.sh \
+    -U_FORTIFY_SOURCE \
+    -fstack-protector \
+    -Wall \
+    -Wthread-safety \
+    -Wself-assign \
+    -Wunused-but-set-parameter \
+    -Wno-free-nonheap-object \
+    -fcolor-diagnostics \
+    -fno-omit-frame-pointer \
+    '-std=c++17' \
+    '-frandom-seed=bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/base/base.o' \
+    '-mmacosx-version-min=<sdk>' \
+    -MD \
+    -MF \
+    bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/base/base.d \
+    -iquote \
+    . \
+    -iquote \
+    bazel-out/<cfg>/bin \
+    -c \
+    corpus/cc/transitive/base.cc \
+    -o \
+    bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/base/base.o \
+    -no-canonical-prefixes \
+    -Wno-builtin-macro-redefined \
+    '-D__DATE__="redacted"' \
+    '-D__TIMESTAMP__="redacted"' \
+    '-D__TIME__="redacted"')
+
+action 'Linking corpus/cc/transitive/libbase.a'
+  Mnemonic: CppArchive
+  Target: //corpus/cc/transitive:base
+  Inputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/base/base.o, external/<repo>/builtin_include_directory_paths, external/<repo>/cc_wrapper.sh, external/<repo>/deps_scanner_wrapper.sh, external/<repo>/validate_static_library.sh]
+  Outputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/libbase.a]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin, PWD=/proc/self/cwd, ZERO_AR_DATE=1]
+  Command Line: (exec /usr/bin/libtool \
+    -D \
+    -no_warning_for_no_symbols \
+    -static \
+    -o \
+    bazel-out/<cfg>/bin/corpus/cc/transitive/libbase.a \
+    bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/base/base.o)
+
+action 'Writing script corpus/cc/transitive/util.cppmap'
+  Mnemonic: CppModuleMap
+  Target: //corpus/cc/transitive:util
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/util.cppmap]
+
+action 'Compiling corpus/cc/transitive/util.cc'
+  Mnemonic: CppCompile
+  Target: //corpus/cc/transitive:util
+  Inputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/base.cppmap, bazel-out/<cfg>/bin/corpus/cc/transitive/util.cppmap, corpus/cc/transitive/base.h, corpus/cc/transitive/util.cc, corpus/cc/transitive/util.h, external/<repo>/builtin_include_directory_paths, external/<repo>/cc_wrapper.sh, external/<repo>/deps_scanner_wrapper.sh, external/<repo>/module.modulemap, external/<repo>/validate_static_library.sh]
+  Outputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.d, bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/cc_wrapper.sh \
+    -U_FORTIFY_SOURCE \
+    -fstack-protector \
+    -Wall \
+    -Wthread-safety \
+    -Wself-assign \
+    -Wunused-but-set-parameter \
+    -Wno-free-nonheap-object \
+    -fcolor-diagnostics \
+    -fno-omit-frame-pointer \
+    '-std=c++17' \
+    '-frandom-seed=bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o' \
+    '-mmacosx-version-min=<sdk>' \
+    -MD \
+    -MF \
+    bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.d \
+    -iquote \
+    . \
+    -iquote \
+    bazel-out/<cfg>/bin \
+    -c \
+    corpus/cc/transitive/util.cc \
+    -o \
+    bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o \
+    -no-canonical-prefixes \
+    -Wno-builtin-macro-redefined \
+    '-D__DATE__="redacted"' \
+    '-D__TIMESTAMP__="redacted"' \
+    '-D__TIME__="redacted"')
+
+action 'Linking corpus/cc/transitive/libutil.a'
+  Mnemonic: CppArchive
+  Target: //corpus/cc/transitive:util
+  Inputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o, external/<repo>/builtin_include_directory_paths, external/<repo>/cc_wrapper.sh, external/<repo>/deps_scanner_wrapper.sh, external/<repo>/validate_static_library.sh]
+  Outputs: [bazel-out/<cfg>/bin/corpus/cc/transitive/libutil.a]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin, PWD=/proc/self/cwd, ZERO_AR_DATE=1]
+  Command Line: (exec /usr/bin/libtool \
+    -D \
+    -no_warning_for_no_symbols \
+    -static \
+    -o \
+    bazel-out/<cfg>/bin/corpus/cc/transitive/libutil.a \
+    bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o)
