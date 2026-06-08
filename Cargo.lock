@@ -1199,6 +1199,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "razel-cc-toolchain"
+version = "0.1.0"
+dependencies = [
+ "razel-rulepack",
+ "starlark",
+]
+
+[[package]]
 name = "razel-cli"
 version = "0.1.0"
 dependencies = [

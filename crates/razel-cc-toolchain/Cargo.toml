@@ -1,0 +1,15 @@
+[package]
+name = "razel-cc-toolchain"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Ingests a cc toolchain config (its Starlark `feature`/`flag_set`/… definitions) into
+# razel-rulepack's `Constrain` types by EVALUATING it via Starlark — the faithful path
+# (BazelCcCommandLine.md), avoiding hand-transcription. First slice: a config expressed with
+# pure-Starlark constructor functions (as `cc_toolchain_config_lib.bzl` defines them). Loading
+# the real `unix_cc_toolchain_config.bzl` rule impl + a `cc_common` shim is the next slice.
+[dependencies]
+razel-rulepack = { version = "0.1.0", path = "../razel-rulepack" }
+starlark = "0.14.2"
