@@ -10,6 +10,7 @@ use razel_dds::{
     Scalar, TargetKey,
 };
 use razel_ir::{ActionNode, FileKind, FileNode, Graph, TargetKind, TargetNode};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Infer a coarse target kind from the target name's suffix (the dialect convention:
 /// `*_test` → Test, `*_binary` → Binary, else Library). Analysis doesn't carry kind for
@@ -91,12 +92,16 @@ pub fn wire_to_dds(
             .field(FieldId::new("hdrs"), FieldKind::Set)
             .field(FieldId::new("cflags"), FieldKind::Set),
     );
+    // The loader's pre-propagated (transitive) hdrs/cflags by target name — used to derive each
+    // target's OWN (non-transitive) set, so propagation moves OFF the loader and ONTO the DDS
+    // fold: CcInfo stores OWN; the transitive set is recovered by `Dds::fold_set` over deps.
+    let trans: BTreeMap<&str, (&Vec<String>, &Vec<String>)> = targets
+        .iter()
+        .map(|t| (t.name.as_str(), (&t.hdrs, &t.cflags)))
+        .collect();
+
     for t in targets {
-        // Single-package mode yields bare names (not canonical); root-package them as `//:name`.
-        let label = Label::parse_canonical(&t.name)
-            .or_else(|_| Label::parse_canonical(&format!("//:{}", t.name)))
-            .map_err(|e| format!("{e}"))?;
-        let key = TargetKey::new(instance, label);
+        let key = target_key(instance, &t.name)?;
 
         dds.assert(
             key.clone(),
@@ -106,17 +111,53 @@ pub fn wire_to_dds(
         .map_err(|e| format!("{e:?}"))?;
 
         if !t.hdrs.is_empty() || !t.cflags.is_empty() {
+            // own = transitive − ∪(deps' transitive); fold_set recovers the closure. (A header
+            // shared between own and a dep is attributed to the dep — the closure is unaffected.)
+            let dep_hdrs: BTreeSet<&str> = t
+                .deps
+                .iter()
+                .filter_map(|d| trans.get(d.as_str()))
+                .flat_map(|(h, _)| h.iter())
+                .map(String::as_str)
+                .collect();
+            let dep_cflags: BTreeSet<&str> = t
+                .deps
+                .iter()
+                .filter_map(|d| trans.get(d.as_str()))
+                .flat_map(|(_, c)| c.iter())
+                .map(String::as_str)
+                .collect();
+            let own_hdrs: Vec<String> =
+                t.hdrs.iter().filter(|h| !dep_hdrs.contains(h.as_str())).cloned().collect();
+            let own_cflags: Vec<String> =
+                t.cflags.iter().filter(|c| !dep_cflags.contains(c.as_str())).cloned().collect();
             dds.assert(
-                key,
+                key.clone(),
                 ProviderTypeId::new("CcInfo"),
                 Provider::new()
-                    .with(FieldId::new("hdrs"), str_set(&t.hdrs))
-                    .with(FieldId::new("cflags"), str_set(&t.cflags)),
+                    .with(FieldId::new("hdrs"), str_set(&own_hdrs))
+                    .with(FieldId::new("cflags"), str_set(&own_cflags)),
             )
             .map_err(|e| format!("{e:?}"))?;
         }
+
+        // Dep edges — the graph `fold_set` traverses to recompute the transitive closure.
+        let dep_keys = t
+            .deps
+            .iter()
+            .map(|d| target_key(instance, d))
+            .collect::<Result<Vec<_>, _>>()?;
+        dds.assert_deps(key, dep_keys);
     }
     Ok(dds)
+}
+
+/// Canonicalize a target name into a [`TargetKey`] (single-package bare names → `//:name`).
+fn target_key(instance: InstanceId, name: &str) -> Result<TargetKey, String> {
+    Label::parse_canonical(name)
+        .or_else(|_| Label::parse_canonical(&format!("//:{name}")))
+        .map(|label| TargetKey::new(instance, label))
+        .map_err(|e| format!("{e}"))
 }
 
 /// A `Set`-valued field of string scalars (the V1 set-valued provider field).
@@ -164,5 +205,26 @@ cc_library(name = "greet", srcs = ["greet.cc"], hdrs = ["greet.h"])
         assert_eq!(di.get(&FieldId::new("files")), Some(&want_set("libgreet.a")));
         let cc = dds.provider(&key, &ProviderTypeId::new("CcInfo")).unwrap();
         assert_eq!(cc.get(&FieldId::new("hdrs")), Some(&want_set("greet.h")));
+    }
+
+    #[test]
+    fn fold_recovers_transitive_hdrs_from_own() {
+        use razel_dds::DdsRead;
+        let src = r#"
+load("@rules_cc//cc:defs.bzl", "cc_library")
+cc_library(name = "base", srcs = ["base.cc"], hdrs = ["base.h"])
+cc_library(name = "util", srcs = ["util.cc"], hdrs = ["util.h"], deps = [":base"])
+"#;
+        let targets = razel_loading::analyze_bazel(src).unwrap();
+        let dds = wire_to_dds(&targets, InstanceId::SINGLE).unwrap();
+        let util = TargetKey::new(InstanceId::SINGLE, Label::parse_canonical("//:util").unwrap());
+        let cc = ProviderTypeId::new("CcInfo");
+        let hdrs = FieldId::new("hdrs");
+        // CcInfo stores OWN (util.h only); the transitive closure (base.h + util.h) is the fold.
+        let own = dds.provider(&util, &cc).unwrap().get(&hdrs).unwrap();
+        assert_eq!(*own, FieldValue::Set([Scalar::Str("util.h".into())].into_iter().collect()));
+        let want: BTreeSet<Scalar> =
+            ["base.h", "util.h"].iter().map(|s| Scalar::Str(s.to_string())).collect();
+        assert_eq!(dds.fold_set(&util, &cc, &hdrs), want);
     }
 }
