@@ -36,32 +36,67 @@ ambient state": the DDS is the **one explicit, passed, scoped mutable store** (a
 thread-local/global). "No ambient state" never meant "no mutable state" — it meant *the
 mutable state must be visible-in-signatures, plural, and passed*. The DDS is exactly that.
 And forcing (AD3) is preserved by the **producer/store split**:
-- **Producers are pure and *return* facts** — `rule_pack.lower(facts, &DDS) -> Declared`,
-  `matcher(&FactView) -> FactDelta`. They read the DDS (`&`) and return; they cannot assert.
+- **Producers are pure and *return* facts** — `lower(target, &FactView) -> Declared`,
+  `matcher(&FactView) -> FactDelta`. They get a **read-only `FactView`/`DdsRead`** (never a
+  bare mutable `&DDS`) and return; they cannot assert. (55-5 B2: producer APIs name the
+  read-only trait, never the store.)
 - **Only the assembler/evaluator *asserts*** the returned facts into the DDS, under the
   merge-class discipline (§3). So the single imperative seam (`assert`) is one controlled,
   testable choke point — exactly YIDL's "imperative DDS + pure matchers."
 
-**The DDS API (the contract):**
+**The DDS API — read/write split at compile time (55-3 B1):**
 ```
-trait Dds {                                   // a per-AnalysisInstanceId handle
-  fn assert(&self, f: Fact) -> Result<()>;    // THE imperative seam; merges per §3 merge-class; records provenance; errors on Scalar conflict
-  fn query(&self, q: FactQuery) -> FactView;  // pure read: by subject, by field-namespace, by provider type-id, by predicate
-  fn explain(&self, k: FactKey) -> Provenance;// the provenance chain (§4) — backs MCP explain
-  fn export(&self, scope: Scope) -> Bytes;    // canonical taut/CBOR (§10) for mesh ship
-  fn merge(&self, other: Bytes) -> Result<()>;// merge a peer instance's facts (§2 schema-compat + §3 merge-classes)
+// READ side — what producers (lower/matchers/validations/derivations) get. No mutation reachable.
+trait DdsRead {                               // == FactView
+  fn query(&self, q: FactQuery) -> FactSet;   // by subject, field-namespace, provider type-id, predicate
+  fn explain(&self, k: FactKey) -> ProvenanceChain;// structured chain (batch/merge/derived), not one Provenance
+  fn read_set(&self) -> ReadSetDigest;        // (55-3 B2) the snapshot + the facts actually touched
+}
+// WRITE side — held ONLY by the assembler/evaluator/engine-commit code. Never handed to a producer.
+trait DdsWrite : DdsRead {
+  fn commit(&self, batch: Declared, prov: Provenance) -> Result<()>;  // ATOMIC (55-3 B4): all-or-nothing
+  fn merge(&self, peer: ExportBundle) -> Result<()>;                  // atomic; §2 compat + §3 merge-classes
 }
 ```
-`assert`/`merge` are the only mutators; `query`/`explain`/`export` are pure reads. Producers
-get `&FactView`/`&dyn Dds` (read), never the mutating handle. **Indexing (denormalization):**
-the DDS indexes facts by subject, by field-namespace, and by provider type-id so matchers and
-queries ("all targets exposing `CcInfo`", "all cflags of target T") are index hits, not graph
-walks — this is the denormalization the matchers depend on.
+- **Forcing is type-level, not convention (B1):** producers receive `&dyn DdsRead`; only
+  commit code holds `&dyn DdsWrite`. A compile-fail test proves a rule pack cannot `commit`/
+  `merge`. (`assert(&self)` on one trait was the bug — interior mutability leaked the seam.)
+- **Atomic commit (B4):** `commit(Declared)` applies a producer's whole batch or none — a
+  Scalar conflict mid-batch leaves the DDS unchanged (no partial target analysis); `merge` is
+  likewise all-or-nothing. Provenance groups the batch as one producing-node transaction.
+- **Snapshot / read-set discipline (B2 — the deep one):** an engine node computes against a
+  **stable DDS snapshot**, never a moving live store, and its `read_set()` (snapshot digest +
+  the fact ranges touched) is part of the node's value/key. So a node re-runs iff a fact it
+  *actually read* changed — otherwise the DDS would be ambient state with a nicer name.
+- **Indexes are derived, non-authoritative (H4):** the by-subject / by-field-namespace /
+  by-provider-type-id indexes (the denormalization matchers depend on) are rebuildable from
+  canonical facts; `export` ships **canonical facts + declarations**, never indexes.
+- **Mesh transport — V2 policy chosen (55-3 H2 / 55-4 H1, no menu):** `export(scope) ->
+  ExportBundle` **always includes** the provider schemas + merge-class declarations needed to
+  validate its facts; `merge` **rejects** an unknown provider type-id / schema-id / missing
+  declaration with a typed error (quarantine is deferred until distribution needs it).
+  Fixtures: an accepted import (schema present) and a rejected import (schema absent).
+- **Read-set lifecycle (55-4 B3):** the engine creates a **per-node `FactView` (a frozen
+  snapshot)** for one computation; read-set collection **starts** at node entry and **freezes**
+  at node return; repeated reads dedupe. An **index/range query** ("all targets exposing
+  `CcInfo`") registers a **predicate read-set entry**, so adding a *new* matching fact
+  invalidates the reader. `explain()` is **debug/query-only — it does NOT participate** in
+  read-set tracking. (Test: a range-query reader invalidates when a new matching target is
+  added.)
+  **Engine memo model — chosen (55-5 H1):** the engine stores a node's **`ReadSetDigest` as
+  memo metadata** and re-validates it against the current DDS snapshot before early-cutoff
+  (NOT as explicit per-fact graph edges); a node **never computes against a moving live
+  store** — only its frozen per-node `FactView`. The 2.14 gate proves both a positive cutoff
+  (unchanged read-set → no recompute) and a range-query invalidation under this model.
+- **DDS is its own crate (55-4 B6):** `razel-dds` depends on `razel-core` + `razel-wire`
+  **only** and must not import adapter/rule-pack/engine/MCP/mesh/CLI/daemon/exec/Starlark
+  (CI boundary check). See Proposal §3 for the crate DAG.
 
-**Acceptance:** a producer cannot `assert` (compile-time — it has `&FactView`, not the
-handle); a `query` is deterministic (§10 ordering); two DDS instances `export`/`merge` a
-provider fact across the mesh under §2 schema-compat; `explain` answers "why does this fact
-exist?".
+**Acceptance:** a producer cannot `commit`/`merge` (compile-fail test); a `query` is
+deterministic (§10); a batch with one valid + one conflicting fact fails with **no partial
+write**; a node reading an *unrelated* fact does not recompute, a *queried* fact does; two
+DDS instances `export`/`merge` a provider where the receiver initially lacks the schema;
+indexes rebuilt from exported facts give identical query ordering.
 
 ---
 
@@ -74,7 +109,7 @@ equality** over that encoding. No key is a bare display string.
 RepoId         = canonical repo name (main = "@"/"" ); resolved THROUGH RepoMap, not apparent  (HR-4)
 Label          = { repo: RepoId, package: PackagePath, name: Name }     // a TARGET; canon "@repo//pkg:name"
 BzlModuleKey   = { repo: RepoId, path: PackagePath }                     // a .bzl FILE — NOT a Label (55-2 B4)
-RequestedInstanceKey  = { repo_mapping: Digest, target_platform, exec_platform, config: BTreeMap<..> }  // pre-analysis (B3)
+RequestedInstanceKey  = { declaration_set: DeclarationSetId, repo_mapping, target_platform, exec_platform, config }  // pre-analysis; see §"Analysis-instance identity" for the authoritative def (48-3 B-1)
 ToolchainResolutionId = Digest    // = hash(a ToolchainResolution node, computed FROM RequestedInstanceKey)  (B3)
 AnalysisInstanceId    = Digest    // = hash(RequestedInstanceKey ⊕ ToolchainResolutionId)
 TargetKey      = { instance: AnalysisInstanceId, label: Label }         // STORED/SERIALIZED form always carries instance
@@ -89,7 +124,8 @@ ActionKey      = Digest over { tool identity, exec platform, working dir/exec-ro
                                (logical-path, digest) input pairs, declared output shape,
                                argv, sorted env + inherit policy, param-files, exec props }  (55-2 B5)
 Subject        = Target(TargetKey) | Package(PackageKey) | Source(SourceKey) | Action(ActionKey)
-                 // PackageKey/SourceKey are INSTANCE-scoped (carry AnalysisInstanceId) — B2
+                 // PackageKey is INSTANCE-scoped (carries AnalysisInstanceId); SourceKey is NOT
+                 // (config-independent {repo,path}); Action facts must be action-INTRINSIC (55-5 H2)
 ```
 
 - **`TargetKey` always carries `AnalysisInstanceId`** in stored/serialized form (the in-code
@@ -112,6 +148,34 @@ Subject        = Target(TargetKey) | Package(PackageKey) | Source(SourceKey) | A
   keyed `(subject=Target, field=ProviderField{ty, tag=whole})`, merge-class `Scalar` (one
   provider of a type per target); attribute/config facts are per-field with their own
   merge-class. So "headers" alone is never a merge unit — the provider type namespaces it.
+  The **whole-provider tag is `tag = 0` (reserved)**; declared fields use tags `≥ 1`.
+  **Decision (55-4 B2): a provider instance is an *atomic* DDS fact.** Provider **field**
+  merge-classes (`Set`/`Scalar` within `CcInfo`) are **internal lowering/validation
+  semantics applied while *constructing* the provider** — they are **not** DDS merge units.
+  The DDS merges providers at `Scalar` granularity (one per `(target, ProviderTypeId)`); a
+  future derivation that wants to *refine* a provider does so by producing a new provider
+  value, not by field-level DDS merge. (Test: a provider with both a `Scalar` and a `Set`
+  field proves merge happens at provider granularity, not field.)
+- **`PackageKey` / `SourceKey` (55-3 B5, 55-4 B1/H4):** `PackageKey = { instance:
+  AnalysisInstanceId, repo: RepoId, package: PackagePath }` — **`RepoId` is required** so
+  `@repo_a//tools` and `@repo_b//tools` don't collide (55-4 B1). `SourceKey = { repo: RepoId,
+  path }` is **strictly config-independent** (no instance) — a config-dependent/generated
+  file is **`File::Generated(ActionKey, path)`**, never a sometimes-instance-scoped
+  `SourceKey` (55-4 H4). Canonical encoding + equality like the others.
+- **`ProvId` derivation (55-3 H3):** an **exported** provider's id = its exported symbol in
+  its defining `BzlModuleKey`; a **re-export/alias** preserves the original `ProvId`; a
+  **V2 supports top-level `provider()` declarations only (55-4 H2):** `ProvId` = the assigned
+  top-level symbol in its `BzlModuleKey`. A `provider()` call inside a macro/conditional/
+  helper is **rejected with provenance** (structural-path ids over arbitrary call sites are
+  deferred — too unstable to define now). Fixtures prove alias/re-export preserve identity and
+  unrelated edits don't shift an existing `ProvId`.
+- **`File` — an OPEN tagged artifact:** `Source(SourceKey)` | `Generated(ActionKey,
+  output-path)` | **`Tree(ActionKey)` (reserved, V2-unimplemented** — a directory artifact with
+  runtime-discovered members; capability `DynamicIO`)**. Open so adding `Tree` is a variant,
+  not a model change. Also reserved (None in V2): `Action.discovered_inputs`/`unused_inputs`
+  (a post-run input-set refinement — the `.d`/`HeaderDiscovery` pruning; the `ActionKey`
+  contract must NOT assume a fully-static input set) and **`DepEdge.transition`** (None =
+  inherit instance; later = a fn → a different/`N` instances for split — general `Transitions`).
 
 ### Analysis-instance identity + the toolchain bootstrap (55-2 B3 / `REQ-CONFIG`)
 
@@ -120,12 +184,21 @@ The instance id is built in **two stages** to avoid the bootstrap cycle the revi
 without an instance id):
 ```
 RequestedInstanceKey = {            // computable BEFORE any target analysis
+  declaration_set: DeclarationSetId, // 55-3 B3: digest over rule-packs/provider-schemas/target-kinds/matchers/toolchains/config-dims
   repo_mapping:   Digest,
   target_platform: PlatformId,
   exec_platform:   PlatformId,      // bounded exec/host; = target if none
   config:          BTreeMap<ConfigKey, ConfigValue>,   // sorted
 }
+// DeclarationSetId (the "DialectId") = digest over provider-schemas/target-kinds/matchers/
+// toolchain-decls/config-dims AND **rule-pack implementation identity** (source/crate/git
+// digest or generated-code digest — 55-5 H3). So a pure-Rust `lower()`/matcher change with an
+// UNCHANGED schema still invalidates dependent Analyze. It is part of analysis identity. 55-3 B3.
 ToolchainResolution  = a graph node: (RequestedInstanceKey) -> resolved toolchain set   // its own memoized node
+        // BOUND (55-4 B4): in V2 it reads DECLARATIONS + PACKAGE METADATA only — NOT analyzed
+        // providers (no analyzing a toolchain target under the instance it helps define).
+        // The cc proof stays declaration/package-level. Analyzed-toolchain-target resolution,
+        // if ever needed, is a SEPARATE bootstrap instance — never a self-dependency.
 ToolchainResolutionId = Digest(ToolchainResolution result)
 AnalysisInstanceId   = Digest( RequestedInstanceKey ⊕ ToolchainResolutionId )
 ```
@@ -209,7 +282,9 @@ order-independence, ambiguous `select`/toolchain (definition-time rejection).
 > (`select` today just picks the first branch). They're built only when a derivation (Phase
 > 5) or a sidecar surface actually needs them. This pulls ~300–400 LOC off the Phase-2
 > critical path that the providers/engine/loading rebuilds need — *don't over-build the
-> composition engine before it has consumers.*
+> composition engine before it has consumers.* **Cross-mesh (F24) confluence in V2 is defined
+> only for `Scalar` + `Set`;** `OverrideableScalar` across the mesh is reserved until F24
+> defines a deterministic origin-ordering rule (55-5 low-sev).
 
 ---
 
@@ -267,10 +342,10 @@ All loading reads are **engine nodes** over a content-addressed VFS (`razel-vfs`
 outputs are invalidation keys:
 
 ```
-SourceSnapshot(Label) -> FileDigest
-DirListing(PackagePath) -> Listing                 // backs glob()
-BzlLoad(Label)        -> FrozenModule              // depends on SourceSnapshot + transitive loads
-PackageLoad(Label, AnalysisInstanceId) -> Vec<DeclaredTarget>
+SourceSnapshot(SourceKey) -> FileDigest
+DirListing(PackageKey) -> Listing                  // backs glob()
+BzlLoad(BzlModuleKey) -> FrozenModule              // BzlModuleKey ≠ Label (§1); apparent repo resolved via importer RepoMap
+PackageLoad(PackageKey) -> Vec<DeclaredTarget>     // PackageKey is instance-scoped (carries AnalysisInstanceId)
 RepoMap()             -> RepoMapping               // depends on MODULE/WORKSPACE snapshots
 ```
 Editing a BUILD/`.bzl`, adding/removing a globbed file, or changing a repo mapping changes a
@@ -294,8 +369,8 @@ not the engine's transient marks.
 
 ```
 Node =
-    SourceSnapshot(Label) | DirListing(PackagePath) | RepoMap
-  | BzlLoad(Label) | PackageLoad(Label, AnalysisInstanceId)
+    SourceSnapshot(SourceKey) | DirListing(PackageKey) | RepoMap
+  | BzlLoad(BzlModuleKey) | PackageLoad(PackageKey)        // NOT target Label (§1, 55-3 B5)
   | Analyze(TargetKey)            -> ProviderSet            // run the rule pack / adapter
   | ActionPlan(TargetKey)         -> Vec<ActionKey>
   | ActionExec(ActionKey)         -> Outputs                // the only process effect
@@ -310,7 +385,7 @@ Node =
   provider ordering, §10).
 
 **Acceptance:** the cc gate runs end-to-end through `razel-engine` with **actual typed
-`Analyze(TargetKey)` and `BzlLoad(Label)` nodes on the graph** (a build whose graph has zero
+`Analyze(TargetKey)` and `BzlLoad(BzlModuleKey)` nodes on the graph** (a build whose graph has zero
 `Analyze` nodes **fails** the gate); editing a `.bzl` invalidates the `Analyze` node via its
 `BzlLoad` dep; an unaffected edit re-runs nothing downstream (early-cutoff).
 
@@ -325,37 +400,89 @@ Node =
 
 ---
 
-## 8. Rule-pack API — capability facets, not a god-constructor (H1 / `REQ-RULEPACK`)
+## 8. Rule-pack API — the declaration form (what an author writes)
+
+A rule pack is a **declaration with five parts**. The split is load-bearing: parts (a)(b)(d)(e)
+are **data the engine reasons over *without running any UDF*** (so it derives read-sets,
+validates confluence, and does field-granular incremental from the *declarations*); part (c)
+is the **one pure UDF** — the leaf that builds the command line.
 
 ```
-struct RulePack {
-  id:            PackId,
-  kernel_abi:    Version,                // 55-2 H5: schema version + feature negotiation
-  uses:          Vec<Capability>,        // declared capabilities the pack requires
-  target_kinds:  Vec<TargetKindDecl>,    // facet: name + attr schema
-  providers:     Vec<ProviderSchema>,    // facet
-  inference:     Vec<InferencePass>,     // facet (optional), pure
-  validations:   Vec<Validation>,        // facet (optional), pure
-  // reserved Capability variants (declared, unimplemented in V2): Aspects, Test, Runfiles, ExecGroups, Transitions, Repos
+struct RulePack {                                            // (e) capability declaration — data
+  id:           PackId,
+  kernel_abi:   u32,                                         // 55-2 H5 / 48-3: minimal — reject-on-mismatch
+  uses:         Set<Capability>,                             // reserved (rejected at load if unimplemented):
+                                                             //   Aspects | Test | Runfiles | ExecGroups | Transitions | Repos | DynamicIO
+                                                             //   Transitions = general (split/per-edge) config; exec/host is NOT reserved (it's in via in_instance).
+                                                             //   DynamicIO  = tree artifacts + map_directory + discovered/unused inputs (exec-phase dynamism).
+  providers:    Vec<ProviderSchema>,                         // (a) data — §2 (shapes over the closed FieldType universe)
+  target_kinds: Vec<TargetKind>,                             // (a)+(b)+(c) per kind, below
+  matchers:     Vec<Matcher>,                                // (d) data — §9 (select/config_setting/toolchain; Eq-decidable)
+  inference:    Vec<InferencePass>,                          // optional, pure (Gc3, deferred)
+  validations:  Vec<Validation>,                             // optional, pure (e.g. importpath uniqueness)
 }
-// the lowering is a PURE free function per target-kind:
-fn lower(target: &TargetFacts, dds: &FactView) -> Result<Declared, LowerError>;
-struct Declared { providers: Vec<ProviderInstance>, actions: Vec<ActionDecl>, facts: Vec<Fact> }
-```
-- **Forcing (AD3):** `lower` takes `&FactView` (read-only DDS query + kernel primitives) and
-  **returns** `Declared`. No `&mut`, no globals, no DDS-assert handle → the *only* place to
-  put logic is the return value; an imperative shortcut **does not type-check**.
-- Capabilities are **separate facets**, never flags accreting on one constructor (the S5
-  scar).
-- **Capability negotiation (55-2 H5):** a pack declares `kernel_abi` + the `Capability`s it
-  `uses`; **the registry rejects a pack at load** (clear diagnostic) if it uses a
-  reserved-but-unimplemented capability or an incompatible `kernel_abi`. The registry exposes
-  **capability discovery** so a Phase-4 agent can check whether a kernel feature exists
-  *before* editing files (turns the R12 "needs a kernel change" signal into a query).
 
-**Acceptance:** the `cc` pack is expressed entirely through these facets + a pure `lower`;
-a second/third pack (rust/py/sh) add **zero kernel lines**; a pack declaring `uses:
-[Aspects]` fails at registry load with a diagnostic.
+struct TargetKind {
+  name:  Symbol,                                             // "cc.library"
+  attrs: AttrSchema,                                         // (a) name -> AttrType (element types §1; may be `select`-able)
+  provides: Vec<Propagation>,                                // (b) THE QUERY — declarative, see below
+  actions:  ActionTemplate,                                  // (c) THE PURE UDF — builds the command line, see below
+}
+
+// ---- (b) the QUERY: a propagation is a declarative fold; the engine reads the read-set from THIS ----
+struct Propagation { provider: ProviderTypeId, field: FieldId, rhs: Rhs }
+enum Rhs =
+    Own(AttrName | Const)                                    // this target's own value
+  | Fold { edge_kind: EdgeKind, src: (ProviderTypeId,FieldId), monoid: Monoid, order?: DepsetOrder }
+  | Concat(Vec<Rhs>)                                         // e.g. fold(deps,…) ++ [own_archive]
+  | Constrain(ConstrainId, inputs: Vec<Rhs>)                 // §3 — engine-provided solver (cc features)
+// (`Fold` over `EdgeKind` = the R-β edge-discriminated propagation: deps | exports | runtime_deps | proc_macro_deps | …)
+
+// ---- (c) the ACTION TEMPLATE: the ONE pure UDF. Read-only in, Declared out. ----
+fn actions(t: &ResolvedTarget, tc: &Toolchains) -> Vec<ActionDecl>;
+//   ResolvedTarget gives: t.attr(name) (select already resolved), t.providers (this target's, from (b)),
+//   t.edges(kind, provides) -> [Edge{ dep, alias, role }]  (PER-EDGE, R-β),  edge.dep.provider(ty, instance=) (cross-instance),
+//   helpers fold/cc_link etc. resolved from (b). NO DdsWrite. NO globals.  → an imperative shortcut does not type-check (AD3).
+struct ActionDecl { kind, args: Args, inputs: Vec<File>, outputs: Vec<File>, env: Map, exec_instance? }
+```
+
+### The `Args` builder — "create the data to invoke the tool" (Bazel `CommandLineArgsApi`)
+The command line is a **structured, lazily-expandable `Args`**, never raw string concat — so
+the engine can hash/key it without materializing and expand depsets at execution:
+```
+Args()
+  .add(x) | .add(flag, x)
+  .add_all(values | Depset, map_each=fn, before_each=str, format_each="-I%s")   // lazy depset expansion
+  .add_joined(values, join_with=",", format_each=…)
+  .format(template, *args)                                                       // expand_template for files
+```
+The `ActionDecl.args` is stored in the `Action` fact as a lazy `Args` (expanded for `ActionKey`
+per §10 determinism); `inputs`/`outputs` are declared `File`s (incl. `File::Generated` for
+codegen→consume).
+
+### Rules of the form
+- **Forcing is type-level (AD3).** `actions(...)` receives read-only `&ResolvedTarget`/`&FactView`
+  and **returns** `Vec<ActionDecl>`; no `DdsWrite`, no globals reachable → the imperative
+  shortcut **does not compile**. The propagation `provides` is *data*, so the engine computes
+  the read-set + field-granular cutoff **without running `actions`**.
+- **Capabilities are facets, not a god-constructor (S5).** `uses` is declared; the registry
+  **rejects at load** a pack using a reserved-but-unimplemented capability or an incompatible
+  `kernel_abi` (55-2 H5), and exposes capability discovery (turns R12 into a query). V2 keeps
+  this minimal — one `kernel_abi` int + the `uses` allow-list (48-3 calibration).
+- **`Constrain`** (§3) is the only non-fold production construct, engine-provided (cc feature
+  config); a pack *references* it, doesn't implement it.
+- **Reserved-but-shaped (V2 decision):** `Aspects` (a production parameterized by traversal —
+  proto), general `Transitions` (split/per-edge config — go mixed-mode; **exec/host is NOT
+  reserved — it's in via `in_instance`** and the cc gate exercises it), and `DynamicIO` (tree
+  artifacts + `map_directory` + discovered/unused inputs — proto/aapt2/java-apt + cc-header
+  pruning) have declared, additive extension points (`DepEdge.transition`, open `File::Tree`,
+  `Action.discovered_inputs`), unimplemented in V2. See `DdsCoveringSet.md` §6 for the rationale.
+
+**Acceptance:** `cc.library`/`rust.library` are expressible entirely as
+`{providers + attrs + provides(query) + actions(UDF) + matchers}` with the worked forms in
+`DdsQuerySystem.md` §2; a second/third pack (rust/py/sh) adds **zero kernel lines**; a
+compile-fail test proves `actions` cannot obtain `DdsWrite`/`commit`; a pack declaring
+`uses:[Aspects]` fails at registry load with a diagnostic.
 
 ---
 
@@ -433,3 +560,6 @@ cross-seam **integration** proof, not the first test of any single seam.*
 | §8 rule-pack + capability negotiation | 2.9 | 3.2 (rust = zero kernel) |
 | §9 matchers (Eq-decidable) | 2.11 | 2.16 |
 | §10 determinism (depset order, action fixtures) | 2.1 / 2.10 | 2.16 |
+| **declaration-stratum invalidation** (`DeclarationSetId` incl. code id, 48-3 B-2/55-5 H3) | 2.14 (needs Analyze) | 2.16 |
+| **analysis early-cutoff positive + range-query invalidation** (read-set engine model) | 2.14 | 2.16 |
+| **Action-subject cross-instance** (intrinsic-only; ownership by TargetKey, 55-5 H2) | 2.1c | 2.16 |

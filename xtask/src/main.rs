@@ -36,12 +36,140 @@ fn main() -> ExitCode {
         Some("codegen") => codegen(check),
         Some("corpus") => corpus(check),
         Some("flags") => flags(check),
+        Some("gates") => gates(),
         other => {
             eprintln!(
-                "unknown xtask {other:?}\nusage: cargo xtask <codegen|corpus|flags> [--check]"
+                "unknown xtask {other:?}\nusage: cargo xtask <codegen|corpus|flags|gates> [--check]"
             );
             ExitCode::from(64)
         }
+    }
+}
+
+// ── Phase 0.2: forcing gate (AD2 — no ambient state) ────────────────────────────
+// `cargo xtask gates` fails if `thread_local!` / `static mut` appear in `crates/` outside
+// the explicit allowlist (existing sites tracked for Phase-1 removal). New ambient state
+// cannot land — razel's "forcing from line 1" discipline (REQ-TEST-004).
+const BANNED: &[(&str, &str)] = &[
+    ("thread_local!", "ambient state — pass the Analysis/DDS handle instead (AD2)"),
+    ("static mut", "ambient mutable state (AD2)"),
+];
+// Visible debt: existing violations slated for Phase-1 removal (the 8 thread-locals → the
+// passed Session/DDS, + the dead second loader's CTX). New files must NOT be added here.
+const GATE_ALLOWLIST: &[&str] = &[
+    "crates/razel-loading/src/lib.rs",
+    "crates/razel-loading/src/rules.rs",
+];
+
+struct GateViolation {
+    path: String,
+    line: usize,
+    pattern: &'static str,
+    reason: &'static str,
+}
+
+/// Pure check (unit-testable without the filesystem) — the heart of the gate.
+fn gate_violations(rel_path: &str, content: &str) -> Vec<GateViolation> {
+    if GATE_ALLOWLIST.contains(&rel_path) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (n, line) in content.lines().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue; // a comment mentioning the pattern is not a use
+        }
+        for (pattern, reason) in BANNED {
+            if line.contains(pattern) {
+                out.push(GateViolation { path: rel_path.into(), line: n + 1, pattern, reason });
+            }
+        }
+    }
+    out
+}
+
+fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if p.file_name().is_none_or(|n| n != "target") {
+                collect_rs(&p, out);
+            }
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+fn gates() -> ExitCode {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    collect_rs(&root.join("crates"), &mut files);
+    let mut violations = Vec::new();
+    for f in &files {
+        let rel = f.strip_prefix(&root).unwrap_or(f).to_string_lossy().replace('\\', "/");
+        if let Ok(content) = std::fs::read_to_string(f) {
+            violations.extend(gate_violations(&rel, &content));
+        }
+    }
+    if violations.is_empty() {
+        eprintln!(
+            "xtask gates: OK — no ambient state (thread_local!/static mut) in crates/ outside the Phase-1 allowlist"
+        );
+        return ExitCode::SUCCESS;
+    }
+    for v in &violations {
+        eprintln!("  BANNED {}:{}  `{}` — {}", v.path, v.line, v.pattern, v.reason);
+    }
+    eprintln!(
+        "\nxtask gates: FAIL — {} forbidden ambient-state use(s) (AD2). \
+         Only tracked Phase-1-removal files belong in GATE_ALLOWLIST.",
+        violations.len()
+    );
+    ExitCode::from(1)
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn flags_new_ambient_state() {
+        // REQ-TEST-004 negative: the gate MUST catch a new violation.
+        let v = gate_violations(
+            "crates/razel-dds/src/store.rs",
+            "fn f() { thread_local! { static X: u32 = const { 0 }; } }",
+        );
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].pattern, "thread_local!");
+    }
+
+    #[test]
+    fn flags_static_mut() {
+        let v = gate_violations("crates/k/src/x.rs", "static mut COUNTER: u64 = 0;");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].pattern, "static mut");
+    }
+
+    #[test]
+    fn allowlists_phase1_debt() {
+        let v = gate_violations(
+            "crates/razel-loading/src/rules.rs",
+            "thread_local! { static S: () = (); }",
+        );
+        assert!(v.is_empty(), "Phase-1 allowlisted file must not trip the gate");
+    }
+
+    #[test]
+    fn passes_clean_code() {
+        assert!(gate_violations("crates/razel-dds/src/lib.rs", "pub struct Dds;").is_empty());
+    }
+
+    #[test]
+    fn ignores_comment_mentions() {
+        assert!(
+            gate_violations("crates/x/src/y.rs", "    // thread_local! is banned by AD2").is_empty()
+        );
     }
 }
 

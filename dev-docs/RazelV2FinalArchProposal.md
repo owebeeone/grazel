@@ -65,9 +65,10 @@ consumes only it; derivations and execution read it. The build is one consumer.
   in one process and across the mesh — possible.
 - **AD3 — Forcing: declarative-by-construction for razel's *own* authoring.** Native rule
   packs, derivations, and matchers are **pure, closed, returning** contracts —
-  `fn(facts, &Analysis) -> Declared{providers, actions, facts}` — with **no reachable
-  mutable global and no editable core**. The imperative shortcut *does not compile*. (The
-  YIDL test: the easy path is the *forced* path.)
+  `lower(target, &DdsRead) -> Declared{providers, actions, facts}` — receiving a **read-only
+  `DdsRead`/`FactView`** (never the `DdsWrite` handle, 55-3 B1) and **returning** their facts;
+  no reachable mutable store, no editable core. The imperative shortcut *does not compile*.
+  (The YIDL test: the easy path is the *forced* path.)
 - **AD4 — The yidl-lite rule-pack layer is the support infra (the enabler).** A rule pack
   is a **declaration**, not imperative code: it declares target-kinds + attr schemas +
   provider schemas + a pure **lowering** (facts → actions) + optional inference/validation,
@@ -102,40 +103,69 @@ consumes only it; derivations and execution read it. The build is one consumer.
 
 ---
 
-## 3. Component model
+## 3. Crate & boundary model (the structure the reviews derived)
 
-**The spine is the DDS** (`RazelV2Contracts.md` §0) — the in-memory typed fact database the
-canonical contract (AD1), the Session (AD2), the registry (AD4), `FactView`, and the merge
-engine (AD9) are all facets of. Everything below instantiates or reads it.
+The iterative review process didn't just find bugs — it **derived the architecture's real
+internal boundaries**. Consolidated, the kernel is a **layered crate DAG with one dependency
+rule** (55-4 B6): *everything depends down toward the DDS; the DDS depends on nothing above
+it.* That inverted dependency is what stops the spine becoming the next gravity well.
 
-**The kernel (built once). Be honest about what is reuse vs rebuild vs greenfield
-(Review-48 BL-1/2/3 — verified against code):**
-- *Genuine reuse:* `razel-actions`/`-exec` — content-addressed, sandboxed action kernel
-  (the quarantined process I/O); `razel-wire` — taut IR → CBOR, the **serialization
-  substrate** for facts/providers (AD6).
-- *Rebuild (existing crate is a skeleton/algorithm-reference, not a base):* `razel-engine`
-  is today a `String`→`Digest` toy (no typed node values, no taxonomy; daemon bypasses it) —
-  its value/key model is **rebuilt** to carry typed `Analyze→ProviderSet` / `ActionPlan` /
-  `ActionExec` nodes. `razel-vfs` supplies only a `ContentProvider` abstraction with **no
-  dependents** — the loading nodes (`SourceSnapshot`/`DirListing`/`BzlLoad`/`RepoMap`) are
-  **new**.
-- *Greenfield (does not exist today):* the typed, serializable **contract** (`Target`,
-  `ProviderKey`/typed `Provider`, `Action`, `Fact`, provenance) atop `razel-core`/`-ir`; the
-  **provider type system + `provider()` builtin + rule-impl return-capture** (today the
-  return is discarded, `attrs` ignored, only a side-effecting `DefaultInfo`); the
-  **`Analysis` (Session)** fact store (AD2); the **rule-pack API + matcher/derivation
-  evaluator + registry** (AD4/AD9).
+```
+  L5 surfaces      razel-cli · razel-daemon · razel-mcp(query/explain/provenance) · razel-mesh(iroh export/merge)
+                        │ depend on engine + adapters + dds
+  L4 adapters      razel-adapter-bazel  (Starlark eval + effect-capturing ctx → facts)   ← THE imperative boundary
+                   (future: grazel-descriptors, mcp-txn)        │ depend on rulepack + dds (+ starlark)
+  L3 dialect       razel-rulepack  (facet API · pure lower · capability negotiation · kernel
+                   primitives fold_deps/match_toolchain · bounded matcher/derivation evaluator)  │ depends on dds (DdsRead only)
+  L2 engine/exec   razel-engine (demand graph · node taxonomy · *uses* dds snapshots, stores
+                   ReadSetDigest as memo metadata) · razel-actions/-exec (action kernel)   │ depend on dds + core
+  L1 SPINE         ► razel-dds ◄  facts · keys/identity · ProviderSchema · merge-classes ·
+                   DdsRead⊥DdsWrite · transactions · snapshot+read-set *mechanism* · query
+                   ordering · export/merge validation · provenance      │ depends on core + wire ONLY
+  L0 primitives    razel-core (Digest, RepoId, encodings) · razel-wire (taut/CBOR codec)
+```
 
-**The Bazel adapter (front-end):** Starlark embedding + the lowering of
-`rule()`/`ctx.actions`/providers/`load()` into rule-pack invocations and contract facts
-(AD5). The imperative boundary; this is the seam to prove early.
+**`razel-dds` is an independent crate (55-4 B6), and the dependency rule is CI-enforced:**
+it owns fact/key/schema/provenance types, the read/write traits, merge-classes,
+transactions, deterministic query ordering, and import/export validation — and it **must not
+import** adapter, rule-pack, engine, MCP, mesh, CLI, daemon, exec, or Starlark code. A
+boundary check fails CI on a forbidden import. The DDS is reusable in-process by analysis,
+derivations, MCP explain/query, and mesh merge **without importing any of those surfaces**.
 
-**Rule packs (declarative, parallel-authored):** cc, rust, py, sh, skylib, config-repos,
-…— each a declaration file set against the rule-pack API + one manifest row + a test
-against stock `.bzl` (AD4, §4).
+**The boundaries derived (each a hard seam, not a convention):**
+- **`DdsRead` ⊥ `DdsWrite`** (the producer/store wall, type-level) — producers get read-only;
+  only commit code mutates (AD3, §0).
+- **declaration stratum ⊥ analysis stratum** — two fact namespaces; the declaration set has
+  its own identity (`DeclarationSetId`, incl. rule-pack *code* digest) that is part of
+  analysis identity.
+- **live store ⊥ per-node snapshot/read-set** — an engine node computes against a frozen
+  snapshot; its read-set is its memo key (the anti-ambient-state seam).
+- **imperative Starlark ⊥ pure contract** — *all* effect-capture happens in the adapter
+  (L4); everything below it (L0–L3) is pure over facts. The single imperative boundary in
+  the stack.
+- **transaction boundary** — `commit`/`merge` are atomic (no partial fact sets).
+- **mesh boundary** — an `ExportBundle` carries facts *plus* the declarations needed to
+  validate them; nothing else crosses a node.
 
-**Surfaces:** Bazel adapter (now); MCP query/explain/provenance (mission); Grazel `.razel`
-descriptors (deferred option the clean contract keeps free).
+**Honest build status of each crate (verified against code, Review-48 + 48-3):**
+- *Genuine reuse:* `razel-exec` sandbox/CAS; the **taut/CBOR codec *mechanism*** in
+  `razel-wire`.
+- *Rebuild / unify (existing-but-not-a-base):* `razel-engine` (`String`→`Digest` toy → typed
+  node values); `razel-vfs` (`ContentProvider` only → the loading nodes are new); the
+  **`Action` model** — `razel-actions::Action` plus the *ad-hoc* `ActionNode`s that
+  `razel-build`/`-exec` actually carry today are **unified** into one `ActionKey`-keyed
+  contract Action (not greenfield, not clean reuse — a unify); the **`Target`/`Label`**
+  identity — orphaned `razel-core::Label` vs the live `String` `canon_label` — likewise
+  unified into the typed keys (48-3 B-3).
+- *Greenfield (does not exist):* **`razel-dds`**; the provider type system + `provider()` +
+  rule-impl return-capture (return discarded, `attrs` ignored, only a side-effecting
+  `DefaultInfo`); `razel-rulepack`; the adapter's fact-capture; **the fact/`ExportBundle` IR +
+  merge codec** (the taut *substrate* is reuse, the fact codec itself is new — 48-3 HR).
+
+**Rule packs** (cc, rust, py, sh, skylib, config-repos) are declarations against
+`razel-rulepack` (L3) — one file + one manifest row each, parallel-authored (§4).
+**Surfaces:** Bazel adapter now; MCP query/explain/provenance (mission); Grazel `.razel`
+descriptors are a deferred option the clean contract keeps free.
 
 ---
 
@@ -212,13 +242,17 @@ before Phase-2 code and proven by the `cc` gate. (Each maps to a Review-55 requi
   invalidation keys**, so editing a BUILD, editing a loaded `.bzl`, adding/removing a
   globbed file, or changing a repo mapping invalidates *exactly* the affected nodes.
 - **Contract identity (B3; `REQ-CONTRACT`).** `TargetKey`/`ProviderKey`/`FactKey`/`ActionKey`
-  have **canonical encodings + equality rules**. Provider schemas carry **stable identity**
-  (for Starlark providers: defining module/label + exported symbol or explicit provider id;
-  for native: a stable namespace) **+ version/schema-digest + field types + unknown-field
-  policy**. Depset ordering, stable sets, path normalization, and action argv/env ordering
-  are **deterministic** (taut/CBOR fixtures). *Required because facts merge across the mesh.*
+  have **canonical encodings + equality rules**. Provider identity is **two-level** — a stable
+  **`ProviderTypeId`** (Starlark: `BzlModuleKey + ProvId` of the *defining* provider object;
+  native: a stable namespace) + a **`ProviderSchemaId`** (version digest); lookup matches the
+  type first, then schema-compat. Depset ordering, stable sets, path normalization, and
+  action argv/env ordering are **deterministic** (taut/CBOR fixtures). The **declaration
+  stratum** (rule-packs/schemas/matchers) is itself part of analysis identity (`DeclarationSetId`).
+  *Required because facts merge across the mesh.*
 - **Analysis-instance identity (B4; `REQ-CONFIG`).** An **`AnalysisInstanceKey`** =
-  repo-mapping + target platform + exec platform/toolchain context + selected config values.
+  **`DeclarationSetId` (incl. rule-pack code identity)** + repo-mapping + target platform +
+  exec platform/toolchain context + selected config values (via a pre-analysis
+  `RequestedInstanceKey` + a bounded `ToolchainResolution` node — no bootstrap cycle).
   `TargetKey` is label-like **only within one immutable analysis instance** — never globally
   "this label under all configs." **Multi-instance *is* the configuration boundary** (this
   is how AD8's "key by Label" and "the contract has config dimensions" reconcile). A bounded
@@ -244,6 +278,20 @@ before Phase-2 code and proven by the `cc` gate. (Each maps to a Review-55 requi
 
 ---
 
+## 5c. Scope of the architecture-of-record (55-5 H6)
+
+**The V2 architecture-of-record contracts the *substrate*: the DDS spine + identity + loading
++ engine + rule-pack/adapter + the cc proof.** F17 (orthogonal derivation) and F24
+(mesh distribution) — *the product* — are **downstream phases (Phase 5) enabled by that
+substrate**, not yet contracted. Their thin contracts (`DerivId` identity, `Scope`, consumed
+`FactView`, output-fact keying, mesh merge behavior + one F17 acceptance fixture) are written
+**before Phase-5 implementation**, not now. The DDS boundary (§3) is what makes this safe:
+MCP/iroh/UI/derivation specifics **must not bleed into `razel-dds`** — they sit *above* the
+fact substrate. So "the product is the derivation server" is the *mission*; the *V2
+deliverable* is the substrate that makes it cheap to build.
+
+---
+
 ## 6. Explicitly deferred / out of scope for V2
 
 - **Full TensorFlow-class builds** — need `cc_common`-equivalent native runtime + external
@@ -253,8 +301,10 @@ before Phase-2 code and proven by the `cc` gate. (Each maps to a Review-55 requi
   interface; fetching is later.
 - **In-graph `(Target×Config)` transitions / config-as-axis** — cross-platform via
   multi-instance instead (AD8); only a bounded exec/host transition if forced.
-- **Parallel *analysis*** and **analysis-level early-cutoff digest discipline** — deferred;
-  execution-parallelism is the budgeted step.
+- **Parallel *analysis*** — deferred (execution-parallelism is the budgeted step).
+  *Single-threaded* analysis-level early-cutoff is **NOT deferred** (55-3 H1): Phase 2 requires
+  stable `ProviderSet`/`ActionPlan` hashing + DDS snapshot/read-set digests so a `.bzl` edit
+  invalidates exactly the affected `Analyze` nodes. Only *parallel* analysis is out of scope.
 - **The `.razel` (Grazel) authoring surface + inference passes** — a deferred *option* the
   clean contract preserves for free; not built in V2.
 - **General non-monotonic composition** — bounded to declared-merge/decidable matchers.

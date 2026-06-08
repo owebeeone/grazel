@@ -1,26 +1,51 @@
 # Razel V2 — Realization Plan
 
-Actionable plan for `RazelV2FinalArchProposal.md` + `RazelV2Contracts.md`. **Governing
-principle:** *build the support structure (the kernel + the yidl-lite rule-pack API)
-**once**, prove it on a single reference rule pack, and only **then** fan out — so adding
-Bazel/`.bzl` support becomes parallel throughput, not a serialized bottleneck.* We do
-**not** add rule support one-at-a-time before the infra exists.
+Actionable plan for `RazelV2FinalArchProposal.md` + `RazelV2Contracts.md` +
+`RazelParityHarness.md`. **Governing principle (reshaped):** *the **rule representation** —
+declaring providers/attrs, the propagation query, and the invocation builder — is ~90% of
+Bazel compatibility and the highest-fidelity-risk surface. Build it FIRST as standalone
+crates, validated by **golden parity against Bazel** (`aquery`/`cquery`), **decoupled from
+the engine**. Only then build the engine/exec (the known-kind 10%) that wires the
+already-proven rule representation, and only then fan out rule packs (each parity-gated).*
+
+## Phase map (reshaped — rule-representation first, engine second)
+| Phase | What | Gate |
+|---|---|---|
+| **0** | branch + forcing/boundary CI gates + **bazel-goldens prerequisite** (pinned bazel + rulesets, capture xtask) | gates fail on violation |
+| **1** | demolition (delete dead loader) + Lexicon + **Session/DDS keystone** (kill thread-locals) | green; no thread-locals |
+| **2 — RULE REPRESENTATION (standalone, NO engine)** | `razel-dds` + `razel-rulepack` (§8 form) + `razel-adapter-bazel` (Starlark→facts, *simple read+eval loading*) + `razel-parity` + the corpus | ⛔ **cc & rust pass their `aquery`/`cquery` goldens** (parity) — *no engine, no toolchains* |
+| **3 — ENGINE + EXEC (wire the proven rule-rep)** | typed-value `razel-engine` (IVM: dirty→`VERIFIED_CLEAN`, restart, reification, field-granular read-sets) + loading-as-graph-effect (`razel-vfs` nodes) + `razel-exec` (sandbox/CAS) | cpp-tutorial **builds + runs incrementally**; CLI+daemon on the engine |
+| **4** | parallel rule-pack fan-out (skylib, config-repos, genrule, depth) | each pack: **zero kernel edits + its goldens pass** |
+| **5** | mission surfaces (F17 derivations · F24 mesh · MCP) | MCP/UI consume live derived views |
+| **6** | external-dep identity/mapping + scale | bigger repos build |
+
+**The decoupling that makes this work:** the rule representation produces *declared* action
+graphs + providers — exactly what `aquery`/`cquery` expose — so **Phase 2 is parity-proven in
+isolation, with no engine and no compilers** (`RazelParityHarness.md`). The cc dogfood gate is
+now an **`aquery` parity diff**, not "builds green" — far stronger and engine-free. Phase 3
+then wires a *known-good* rule-rep into the IVM, so we never debug fidelity and incrementality
+at once. (The detailed steps below keep their numbers; **2.0–2.5, 2.9–2.13, 2.15–2.16 are
+Phase 2 (rule-rep)**; **2.6–2.8, 2.14 are Phase 3 (engine)** — re-bucketed by this map.)
+
+We still do **not** add rule support one-at-a-time before the infra exists.
 
 **Granularity (this revision):** every step is scoped to **≲500 LOC of complexity
 exposure** (a soft ceiling — a unit small enough to review, test, and land green on its
 own). Steps carry inline **[R#]** risk tags resolved in the consolidated *Risks* section.
 LOC figures are rough budgets, not contracts.
 
-Confidence: **high** on Phases 0–1 (no-regret; verified). **Phase 2 is heavier than a prior
-draft claimed (Review-48): four of its biggest items are *from-scratch subsystems*, not
-"reuse"/"refactor"** — the typed engine value-model (`razel-engine` is a `String`→`Digest`
-toy today), the loading graph (`razel-vfs` is unwired), the provider type system +
-return-capture (today the rule impl's return is discarded, no `provider()`, `attrs` ignored),
-and `select`/toolchain matchers (today `select` picks the first branch). So Phase 2 is
-**medium confidence**, budget-heavy, and several steps split (below). **Gated** thereafter on
-the Phase-2/3 proof. The make-or-break is the **provider system + effect-capturing adapter on
-typed `Analyze` engine nodes** — de-risked by dogfooding `cc` through the public API *and the
-engine* before parallelizing.
+Confidence: **high** on Phases 0–1 (no-regret; verified). **Phase 2 (rule representation) is
+the compat-critical, highest-fidelity-risk surface** — all greenfield: the provider type
+system + return-capture (today the rule impl's return is discarded, no `provider()`, `attrs`
+ignored), the `Args` invocation builder, `select`/toolchain matchers (today `select` picks
+the first branch), and `Constrain` (cc feature config). It is **medium confidence but
+de-risked by golden parity**: cc & rust must match `bazel aquery`/`cquery` **before** anything
+else, **with no engine and no toolchains** — so fidelity is proven in isolation. **Phase 3
+(engine + exec)** is the typed-value IVM (`razel-engine` is a `String`→`Digest` toy) + the
+loading graph (`razel-vfs` unwired) — real builds, but a **known kind** (Skyframe) *wiring a
+rule-rep already proven correct*, so we never debug fidelity and incrementality together. The
+make-or-break moves earlier and gets cheaper: it's now the **cc `aquery` parity diff**, not a
+green build on a typed `Analyze` node.
 
 ---
 
@@ -29,10 +54,19 @@ engine* before parallelizing.
   `RazelV2Contracts.md` as the architecture of record. *(≈0 LOC)*
 - **0.2** Forcing CI gates *(≈120 LOC)*: clippy `disallowed_*` + CI grep denying
   `thread_local!`/`static mut` in loading/kernel crates; **negative tests** (`REQ-TEST-004`)
-  — the *ambient-state* negatives (`thread_local!`, mutable global) land **now**; the
-  *unregistered-provider* and *rule-pack-kernel-edit* negatives presume machinery that
-  doesn't exist yet, so they land with **2.3** and **2.10** respectively (Review-48). **[R6]**
-- *Exit:* gates fail the build (and the negative tests prove they fail) when violated.
+  — the *ambient-state* negatives (`thread_local!`, mutable global) land **now**;
+  *unregistered-provider* lands with **2.3**. The *forcing* negatives split (55-5 H5):
+  **type-level** "a pack cannot obtain `DdsWrite`/`commit`/`merge`" lands with **2.1b** (DDS
+  write-split) + **2.9** (compiled against the real public rule-pack API); the **`razel-dds`
+  dependency-boundary** CI check lands with **2.1b** (DDS crate creation); a repo-process
+  "can't edit kernel files" rule is *not* a kernel test. **[R6]**
+- **0.3** **Bazel-goldens prerequisite** (`RazelParityHarness.md`): obtain a *pinned* bazel
+  binary + fetch the rulesets into a shared capture workspace; write the `capture-goldens`
+  xtask + the **shared normalization lib** (used by capture *and* the hermetic runner). This is
+  the *only* bazel/JDK dependency, and it's **dev/authoring-only** — the test suite never needs
+  it. *(≈300 LOC + setup)* **[R-parity: normalization correctness]**
+- *Exit:* gates fail the build (and the negative tests prove they fail) when violated; the
+  capture xtask produces a golden for one trivial `cc` case end-to-end.
 
 ## Phase 1 — Demolition + foundation (sequential; no-regret; green at each step)
 Strangler work on existing code. **Each step starts with a characterization/regression test
@@ -57,10 +91,16 @@ pinning the retained live-path behavior before the change (`REQ-TEST-001`). [R7]
   24 `exists(){return}` skips, not a policy. *(≈250 LOC)* **[R3b]**
 - *Exit:* no thread-locals remain; `rules.rs` shrinking; the harness exists; all tests green.
 
-## Phase 2 — Kernel + yidl-lite rule-pack API (THE enabler; build once, well)
-Dissolve the rest of `rules.rs`; build the infra Phase 4 parallelizes against; the §5b seams
-are Phase-2 contracts proven *together* by the cc gate. **Review-48 correction: four of these
-are *greenfield*, not "reuse"/"refactor" — the typed engine value-model (engine is a
+## Phase 2 / 3 detailed steps (re-bucketed by the reshaped phase map above)
+> **Bucketing:** per the phase map, **rule-representation steps = Phase 2** (2.0–2.5, 2.9–2.13,
+> 2.15 + the parity harness/corpus + the **parity gate**, *no engine*); **engine/exec steps =
+> Phase 3** (2.6–2.8, 2.14 + `razel-exec` + cpp-tutorial-runs). The step *numbers* are kept for
+> traceability; read them under this bucketing. The cc dogfood is an **`aquery` parity diff**
+> (Phase 2), not a green build (Phase 3).
+
+### Rule-representation + kernel steps (Phase 2/3 substrate; build once, well)
+Dissolve the rest of `rules.rs`. **Review-48 correction: these are *greenfield*, not
+"reuse"/"refactor" — the typed engine value-model (engine is a
 `String`→`Digest` toy), the loading graph (`razel-vfs` is unwired), the provider system +
 return-capture (the rule impl's return is discarded, no `provider()`, `attrs` ignored), and
 `select`/toolchain matchers (`select` picks the first branch). Steps are re-framed, re-sized,
@@ -72,19 +112,44 @@ own **failing contract test before implementation** (the §11 row→step map in
 integration** proof only — *not* the first test of keys/schemas/loading/depset/return-capture/
 typed-nodes. Phase 2 has **four visible sub-gates** so failure is caught early, not at 2.16:
 **2A** identity + repo-map + provider schema + fact key + determinism fixtures (2.1–2.5);
-**2B** loading graph + typed engine value-model (2.6a–2.8); **2C** rule-pack facets + provider
+**2B** loading graph + typed engine value-model (2.6a–2.8) — **2B does not pass until an
+engine node carries a *typed* value (not a `Digest`)**, e.g. a loading/`ActionExec` node
+value (`ProviderSet` specifically lands at 2D); 48-4 B-4; **2C** rule-pack facets + provider
 system + adapter return-capture (2.9–2.13); **2D** cc dogfood through the engine + provenance
 (2.14–2.16). **Three compatibility tests must pass before Phase 3:** provider `D1` consumer
 accepts compatible `D2` *by stable type id*; two repo-mappings resolve the same apparent
 `@foo//:defs.bzl` to different modules without provider-identity collision; a toolchain change
 shifts `AnalysisInstanceId` without changing the target label.
 
+**Four DDS gates added (55-3):** (1) **forcing** — a compile-fail test proves a rule pack
+cannot `commit`/`merge` (read/write split, B1); (2) **transaction** — a batch with a
+conflicting fact rolls back completely, no partial write (B4), tested *before* the adapter
+asserts; (3) **declaration-stratum invalidation** — changing a rule-pack lowering / provider
+schema / matcher invalidates dependent `Analyze` even with source+config unchanged (B3); (4)
+**snapshot/read-set** — a node reading through `FactView` exposes a stable read-set/snapshot
+digest so early-cutoff is defensible (B2). Loading-key gates name `BzlModuleKey`/`PackageKey`/
+`SourceKey` explicitly (B5).
+
 *Contracts & identity*
-- **2.1** Key types + the **DDS store** — `Label`/`RepoId`, `BzlModuleKey`(≠Label, B4),
-  **two-level provider identity** (`ProviderTypeId` + `ProviderSchemaId`, 55-2 B1),
-  **namespaced `FactKey`** (B2), **complete `ActionKey`** ((path,digest) inputs + tool/exec/
-  workdir/output-shape/param-files, B5) + encodings/equality/taut fixtures **incl. the
-  path-sensitive + env + param-file action fixtures** (Contracts §0, §1, §10). *(≈380 LOC)*
+- **2.0** **`taut` sum-type/union extension (48-4 HR — most under-scoped).** Today `taut`
+  (`razel-wire/wire/razel.taut.py`) has **no union construct**, but the fact IR is pervasively
+  sum-typed (`Subject`, `FieldId`, `File`, `FieldType`, `ProviderTypeId`, `MergeClass`). Extend
+  `tautc` with tagged unions + deterministic CBOR encoding, *before* the key/fact types depend
+  on it. *(≈300 LOC, incl. codec fixtures)* **[R0]** the serialization spine.
+- **2.1a** Key structs + canonical encodings + equality fixtures — `Label`/`RepoId`,
+  `BzlModuleKey`(≠Label), `PackageKey`/`SourceKey`, two-level provider identity
+  (`ProviderTypeId`+`ProviderSchemaId`), `ProvId` derivation, namespaced `FactKey`
+  (whole-provider tag 0), `File` tagged artifact (Contracts §1). *(≈320 LOC)*
+- **2.1b** **DDS minimal store** — `DdsRead`/`FactView` vs `DdsWrite` **split at compile
+  time** (55-3 B1; a compile-fail test proves a pack can't `commit`), **atomic
+  `commit(Declared)`** (55-3 B4; partial-batch rolls back), `read_set` digest (55-3 B2), and
+  derived (non-authoritative) indexes (55-3 H4) (Contracts §0). *(≈400 LOC)* **[R1]**
+- **2.1c** `ActionKey` semantic fixtures — a **path-sensitive** compile (same digest, diff
+  logical path → diff key), an **env-dependent**, and a **param-file** action (55-2 B5,
+  Contracts §10). *(≈200 LOC)*
+- **2.1d** Deterministic **fixture regeneration gate over the *fact graph* + `ExportBundle`**
+  (the greenfield fact codec from 2.0, not just the existing taut substrate) — re-encode is
+  byte-identical (Contracts §10; 55-5 low-sev). *(≈150 LOC)*
 - **2.2** `RequestedInstanceKey` + **`ToolchainResolution` node** → `AnalysisInstanceId`
   (the **two-stage bootstrap**, 55-2 B3 — no cycle); instance-scoping of `TargetKey`; tests:
   same-label-two-configs, and **toolchain-change → different `AnalysisInstanceId`, no
@@ -117,7 +182,7 @@ shifts `AnalysisInstanceId` without changing the target label.
   `Analyze`/`ActionPlan` nodes wait for 2.13 — they need the rule pack; BL-4.)*
 
 *The yidl-lite layer — GREENFIELD (BL-1, HR-1)*
-- **2.9** Rule-pack API as **capability facets** + pure `lower(facts,&Analysis)->Declared` +
+- **2.9** Rule-pack API as **capability facets** + pure `lower(target, &DdsRead)->Declared` +
   reserved extension points (`REQ-RULEPACK`). *(≈350 LOC)* **[R10]**
 - **2.10** Kernel primitives: `fold_deps`, action templates, and **`depset` with real
   traversal order + deterministic dedup + byte-stable encoding** (HR-2 — order is dropped
@@ -132,32 +197,50 @@ shifts `AnalysisInstanceId` without changing the target label.
   records `ctx.actions` + **the returned typed provider** as facts; macro + native-shim paths
   (`REQ-ADAPTER`). *(≈400 LOC)* **[R4]** the make-or-break evaluated-`.bzl` seam (Q6).
 
-*Analyze nodes + dogfood + gate*
-- **2.14** Wire the **`Analyze(TargetKey)→ProviderSet` + `ActionPlan` engine nodes** — now the
-  rule-pack/adapter that computes them exists (**resolves the BL-4 cycle**); complete
-  CLI+daemon **analysis-on-graph** + early-cutoff (a `.bzl` edit invalidates `Analyze` via its
-  `BzlLoad` dep). *(≈300 LOC)* **[R9]**
-- **2.15** Registry/manifest + assembler; `cc` reference pack through the **public API +
-  engine only**. `rules.rs` is gone (→ thin `assembler` + `analysis/orchestrate` + adapter +
-  cc pack). *(≈450 LOC)* **[R1]**
-- **2.16** Strengthened gate test-suite. *(≈450 LOC tests)*
-- ⛔ **Exit gate (all hold; else fix the contract/API *now*, before fan-out):** keys+fixtures
-  incl. a **depset-order fixture** (HR-2) · loading via VFS with the **4 invalidation
-  scenarios** · **CLI & daemon on the engine with typed `Analyze`/`BzlLoad` nodes present — a
-  build whose graph has zero `Analyze` nodes FAILS the gate** (BL-2) · a **nontrivial
-  evaluated Starlark `rule()` impl that `return`s a typed provider**, with the gate asserting
-  *that returned provider landed as a fact* (not the `DefaultInfo` side-effect path) (BL-1) ·
-  **same label under two `AnalysisInstanceKey`s, no collision** · `cc` builds **cpp-tutorial
-  1–3** via API+engine · negatives pass (schema mismatch, confluence conflict, config
-  collision, ambient state, kernel-edit-from-pack) · minimal **explain/provenance** for cc.
+*Dogfood + parity (Phase 2 — NO engine)*
+- **2.15** Registry/manifest + assembler; `cc` reference pack through the **public API only**
+  (simple read+eval loading, *no engine*) producing **declared** actions + providers. `rules.rs`
+  is gone (→ thin `assembler` + adapter + cc pack). *(≈450 LOC)* **[R1]**
+- **2.16** The **parity harness + corpus** (`RazelParityHarness.md`): the hermetic runner +
+  the cc & rust case folders + checked-in `aquery`/`cquery` goldens (captured via 0.3). *(≈450 LOC + corpus)*
+- ⛔ **Phase-2 exit gate = GOLDEN PARITY (engine-free, toolchain-free; the make-or-break):**
+  `cc` **and** `rust` rule packs' **declared action graph + providers match `bazel aquery`/
+  `cquery`** for their corpus cases (normalized). This proves, *in isolation*: the `Args`
+  invocation builder, `Constrain` (argv is post-feature-config), the propagation folds
+  (`cquery` providers), per-edge `--extern` + the proc-macro **exec/host** cross-instance, the
+  **depset order** (HR-2), an evaluated `rule()` that `return`s a typed provider captured as a
+  fact (BL-1, vs the `DefaultInfo` path), and **same label under two `AnalysisInstanceKey`s, no
+  collision**. Plus negatives (schema mismatch, confluence conflict, config collision, ambient
+  state, kernel-edit-from-pack) + minimal **explain/provenance**. *If a pack can't match
+  `aquery`, fix the rule-rep now — no engine in the picture.*
 
-## Phase 3 — First `.bzl` surfaces from declarations + validate the flow
+*Engine + exec (Phase 3 — wire the proven rule-rep)*
+- **2.6–2.8** loading-as-graph-effect (`razel-vfs` nodes) + the typed-value `razel-engine`
+  rebuild + CLI/daemon engine routing. **2.14** wire `Analyze(TargetKey)→ProviderSet` +
+  `ActionPlan` nodes (resolves BL-4: the rule-rep that computes them is already proven). Add
+  `razel-exec` (sandbox/CAS).
+- ⛔ **Phase-3 exit gate (engine):** **typed `Analyze`/`BzlLoad` nodes present — zero-`Analyze`
+  build FAILS** (BL-2); the **4 VFS invalidation scenarios**; **analysis-level early-cutoff
+  *positive*** (read-set-unchanged edit → no `Analyze` recompute, 48-3 B-4); **declaration-
+  stratum invalidation** (B3); `cc` **builds + runs cpp-tutorial 1–3 incrementally** via
+  API+engine. (The rule-rep was already parity-proven in Phase 2, so this gate is about
+  *incrementality + execution*, not fidelity.)
+
+## Steps 3.x — load surfaces + py/sh packs (parity-gated; bucket into reshaped Phase 2/4)
+> Re-bucketed: `rust` is the *second Phase-2 parity pack* (in the 2.16 gate); `py`/`sh` are the
+> first **Phase-4 fan-out** packs. Each is **golden-parity-gated** (its `aquery`/`cquery` corpus
+> passes) *and* adds **zero kernel lines** — the two-part fan-out gate.
 - **3.1** Declare `@rules_cc`/`@rules_python`/`@rules_rust`/`@rules_shell` load surfaces as
   manifests against the API. *(≈200 LOC)*
 - **3.2** `rust` rule pack as declarations — **the "second pack proves the model" gate: zero
   kernel changes**. *(≈300 LOC)* **[R10]**
-- **3.3** `py` rule pack (PYTHONPATH/runfiles/launcher). *(≈300 LOC)*
-- **3.4** `sh` rule pack (script-as-exe + data/runfiles). *(≈150 LOC)*
+- **3.3** `py` rule pack (PYTHONPATH/launcher; **runfiles deferred** — `Runfiles` is a
+  reserved capability, 55-4 B5). *(≈300 LOC)*
+- **3.4** `sh` rule pack (script-as-exe + `data` as a **minimal action input layout, not the
+  reserved runfiles capability**, 55-4 B5). *(≈150 LOC)*
+- *Runfiles decision (55-4 B5):* a full runfiles tree is **out of V2 scope**; the proof packs
+  use only declared inputs + a minimal data layout. Don't use runfiles to prove "zero kernel
+  edits."
 - **3.5** Stock-`.bzl` tests, **each classified by what it proves** (Review-55): macro-expand
   · evaluated `rule()` · provider declare+consume · action declare · depset order ·
   `select`/toolchain · repo mapping. *(≈300 LOC tests)*
@@ -171,7 +254,7 @@ stock-`.bzl` test, disjoint files (the proven rust/py/sh pattern, at scale).
 - **4.x** work items (parallel): `@bazel_skylib` rules + `lib` (`selects`/`paths`/`sets`) ·
   config-repo shims (`@local_config_*`, cuda/rocm `if_*_is_configured`) · `genrule` +
   make-vars/`$(location)` · cc depth (`cc_test`, transitive include dirs) · rust/py/sh depth
-  (transitive, runfiles).
+  (transitive deps; **runfiles is post-V2** — not a fan-out work item, 55-5 H4).
 - Cadence: each pack passes its stock-`.bzl` test + the forcing gates; integrate by
   collecting disjoint files. **No kernel edits permitted [R12]** — if an agent needs one,
   *pause the fan-out, add the capability to the public API with a regression test, resume.*
@@ -211,9 +294,10 @@ from line 1 (0.2) and the mission/scale phases (5–6).
 ---
 
 ## Risks & gates (consolidated; surfaced into the steps above)
-- **R1 — Session / nested-eval borrow.** `eval.extra` can't carry a `&mut` across nested
-  rule eval → interior-mutable `Analysis` fields (the honest minimum, not a relapse). *Steps
-  1.4, 2.15.*
+- **R1 — DDS handle / nested-eval borrow.** `eval.extra` can't carry a `&mut` across nested
+  rule eval → the adapter holds a `DdsWrite` handle with interior mutability while producers
+  get `&FactView` (the honest minimum, not a relapse — the read/write split makes it safe).
+  *Steps 1.4, 2.1b, 2.13.*
 - **R2 — loading not quarantined (greenfield, BL-3).** `razel-vfs` is unwired today; the
   loading nodes are new. If reads stay ambient, incrementality/distribution break. *Steps
   2.6a/2.6b + invalidation tests.*
