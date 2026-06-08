@@ -96,3 +96,47 @@ cc_thing(name = "widget", src = "widget.c")
     assert_eq!(a.outputs, ["widget.o"]);
     assert_eq!(targets[0].default_info, ["widget.o"]);
 }
+
+/// End-to-end: razel's REAL analyzed cc data (from `analyze_bazel`) drives the §8c faithful argv
+/// via the Constrain interpreter. Proves the loader→Constrain wiring on live data. The FLAGS are
+/// Bazel-faithful; the PATHS are razel's (the path-model gap — byte-parity needs razel's output
+/// layout to match Bazel's `_objs/...`, a separate step). The faithful argv is the *declared*
+/// graph (for parity) — distinct from razel's executable command (it names Bazel's cc_wrapper.sh).
+#[test]
+fn real_analyzed_cc_data_drives_the_faithful_argv() {
+    use razel_cc_toolchain::{CompileInputs, cc_compile_argv, macos_core_config};
+
+    let src = r#"
+load("@rules_cc//cc:defs.bzl", "cc_library")
+cc_library(name = "greet", srcs = ["greet.cc"], hdrs = ["greet.h"])
+"#;
+    let targets = analyze_bazel(src).unwrap();
+    let greet = targets.iter().find(|t| t.name == "greet").unwrap();
+    let compile = greet.actions.iter().find(|a| a.mnemonic == "CppCompile").unwrap();
+    let source = compile.inputs.iter().find(|i| i.ends_with(".cc")).unwrap().clone();
+    let output = compile.outputs[0].clone();
+
+    let cfg = macos_core_config().unwrap();
+    let argv = cc_compile_argv(
+        &cfg,
+        &CompileInputs {
+            source_file: source.clone(),
+            output_file: output.clone(),
+            dependency_file: format!("{output}.d"),
+            quote_include_paths: vec![".".into()],
+            minimum_os_version: "26.4".into(),
+        },
+    );
+
+    // Bazel-faithful flags, from razel's real analyzed data:
+    assert_eq!(argv[0], "cc_wrapper.sh");
+    assert!(argv.contains(&"-fstack-protector".to_string()));
+    assert!(argv.contains(&"-std=c++17".to_string()));
+    assert!(argv.contains(&"-mmacosx-version-min=26.4".to_string()));
+    assert!(argv.contains(&"-D__DATE__=\"redacted\"".to_string()));
+    // razel's own source/output paths flow through -c / -o (the path-model gap vs Bazel's _objs/):
+    let c = argv.iter().position(|x| x == "-c").unwrap();
+    assert_eq!(argv[c + 1], source);
+    let o = argv.iter().position(|x| x == "-o").unwrap();
+    assert_eq!(argv[o + 1], output);
+}
