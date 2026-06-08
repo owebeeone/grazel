@@ -170,6 +170,41 @@ pub fn cc_archive_argv(config: &FeatureConfig, inputs: &ArchiveInputs) -> Vec<St
     config.full_command_line(&config.select(&[]), "c++-link-static-library", &vars)
 }
 
+/// Strip a cc source extension to get the object stem (`util.cc` → `util`).
+fn obj_stem(src: &str) -> &str {
+    [".cc", ".cpp", ".cxx", ".c", ".C"]
+        .iter()
+        .find_map(|e| src.strip_suffix(e))
+        .unwrap_or(src)
+}
+
+/// Bazel's compile-action variables for a cc source — the `bazel-out/<cfg>/bin/<pkg>/_objs/
+/// <target>/<stem>.{o,d}` output layout + `-iquote .`/`-iquote bazel-out/<cfg>/bin`. This is the
+/// path model razel must adopt to byte-match Bazel's argv *independently* (vs the runner feeding
+/// the golden's paths). `cfg`/`sdk` are the (normalized) config segment + SDK host params.
+pub fn bazel_compile_inputs(cfg: &str, pkg: &str, target: &str, src: &str, sdk: &str) -> CompileInputs {
+    let base = format!("bazel-out/{cfg}/bin/{pkg}/_objs/{target}/{}", obj_stem(src));
+    CompileInputs {
+        source_file: format!("{pkg}/{src}"),
+        output_file: format!("{base}.o"),
+        dependency_file: format!("{base}.d"),
+        minimum_os_version: sdk.to_string(),
+        quote_include_paths: vec![".".to_string(), format!("bazel-out/{cfg}/bin")],
+    }
+}
+
+/// Bazel's static-archive variables: `bazel-out/<cfg>/bin/<pkg>/lib<target>.a` + the per-source
+/// object outputs (matching [`bazel_compile_inputs`]).
+pub fn bazel_archive_inputs(cfg: &str, pkg: &str, target: &str, srcs: &[&str]) -> ArchiveInputs {
+    ArchiveInputs {
+        output_execpath: format!("bazel-out/{cfg}/bin/{pkg}/lib{target}.a"),
+        libraries_to_link: srcs
+            .iter()
+            .map(|s| format!("bazel-out/{cfg}/bin/{pkg}/_objs/{target}/{}.o", obj_stem(s)))
+            .collect(),
+    }
+}
+
 /// The ported macOS cc toolchain config (core compile + archive features), parsed from the
 /// embedded fixture. The accessor the loader + parity runner use to drive `Constrain`. (When
 /// host-value ingestion lands, this takes the detected flag lists + SDK instead of the fixture's.)
@@ -319,21 +354,17 @@ CONFIG = struct(
         let golden = include_str!("../../../parity/corpus/cc/transitive/golden.txt");
         let cfg = macos_core_config().unwrap();
 
-        let compile = cc_compile_argv(&cfg, &CompileInputs {
-            source_file: "corpus/cc/transitive/util.cc".into(),
-            output_file: "bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o".into(),
-            dependency_file: "bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.d".into(),
-            minimum_os_version: "<sdk>".into(),
-            quote_include_paths: vec![".".into(), "bazel-out/<cfg>/bin".into()],
-        });
+        // razel COMPUTES the paths (the path-model formula) — independent of the golden:
+        let compile = cc_compile_argv(
+            &cfg,
+            &bazel_compile_inputs("<cfg>", "corpus/cc/transitive", "util", "util.cc", "<sdk>"),
+        );
         assert_eq!(compile, golden_argv(golden, "Compiling corpus/cc/transitive/util.cc"));
 
-        let archive = cc_archive_argv(&cfg, &ArchiveInputs {
-            output_execpath: "bazel-out/<cfg>/bin/corpus/cc/transitive/libutil.a".into(),
-            libraries_to_link: vec![
-                "bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o".into(),
-            ],
-        });
+        let archive = cc_archive_argv(
+            &cfg,
+            &bazel_archive_inputs("<cfg>", "corpus/cc/transitive", "util", &["util.cc"]),
+        );
         assert_eq!(archive, golden_argv(golden, "Linking corpus/cc/transitive/libutil.a"));
     }
 }
