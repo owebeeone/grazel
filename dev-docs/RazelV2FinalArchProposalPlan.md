@@ -76,12 +76,18 @@ pinning the retained live-path behavior before the change (`REQ-TEST-001`). [R7]
 - **1.2** Delete the dead second loader — `lib.rs` `load_build`/`TargetDecl`/`query_targets`
   + `razel_analysis::analyze` + `Depset<T>` + their tests (verified: no non-test callers).
   *(≈ −400 LOC)* **[R8]**
-- **1.3** Extract the **Lexicon** (`canon_label`, `glob_match`, `fold_depset`, `shquote`,
-  path/quoting) + direct unit tests; `canon_label` etc. now take pkg/state as **params**
-  (no thread-local read) — precursor to the Session. *(≈250 LOC + 150 tests)*
-- **1.4** Introduce the **`Analysis` Session** via `eval.extra`; migrate `RESULTS`→
-  `results` first (it is also the provider store). *(≈220 LOC)* **[R1]** the nested-eval
-  borrow (interior-mutability fields).
+- **1.3/1.4 REORDERED (verified during 1.1):** `canon_label` (12 sites) + `qualify` (8 sites)
+  = **20 call sites** read `CURRENT_PKG`. Parameterizing them with explicit `pkg` args (old
+  1.3) and *then* migrating to the Session (old 1.4) double-touches all 20. So **introduce the
+  Session first**, then have the Lexicon read `pkg` from it — each site touched once. The pure
+  helpers (`pkg_of`, `shquote`, `glob_match`) are already thread-local-free and can be grouped
+  into a `lexicon` module independently/first (zero-risk).
+- **1.3 (was 1.4)** Introduce the **`Analysis` Session** via `eval.extra`; migrate the statics
+  to Session fields, `RESULTS`→`results` first (it is also the provider store). `canon_label`/
+  `qualify` read `pkg` from the Session. *(≈220 LOC)* **[R1]** the nested-eval borrow
+  (interior-mutability fields) — the delicate keystone; build it carefully + incrementally.
+- **1.4 (was 1.3)** Finalize the **Lexicon** module (`canon_label`/`qualify` now Session-param,
+  `pkg_of`/`shquote`/`glob_match` pure) + direct unit tests. *(≈250 LOC + 150 tests)*
 - **1.5** Migrate the remaining 7 statics (`STATE`/`CONFIGS`/`WORKSPACE`/`CURRENT_PKG`/
   `LOADED`/`GLOBAL`) + `CTX` to Session fields; delete the divergent hand-resets; unify the
   drifted globals-builders; **turn on the ambient-state CI deny**. *(≈300 LOC)*
