@@ -190,6 +190,30 @@ impl ProviderSchema {
 pub trait DdsRead {
     /// The provider of type `ty` on `target`, if any has been asserted.
     fn provider(&self, target: &TargetKey, ty: &ProviderTypeId) -> Option<&Provider>;
+
+    /// `target`'s declared dep edges — the graph the propagation folds traverse (§8b).
+    fn deps(&self, target: &TargetKey) -> &[TargetKey];
+
+    /// Fold a `Set`-valued provider field over the transitive dep closure (§8b `provides`): the
+    /// target's own field ∪ the same field on every transitive dep. V1 set semantics (unordered,
+    /// dedup, cycle-safe); the ordered `OrderedDepset` family is reserved. This is the rule-rep's
+    /// propagation **query** — declared once here, ON THE READ INTERFACE, so every consumer (and
+    /// any `&dyn DdsRead`) gets it; never re-implemented per rule.
+    fn fold_set(&self, root: &TargetKey, ty: &ProviderTypeId, field: &FieldId) -> BTreeSet<Scalar> {
+        let mut acc = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut stack = vec![root.clone()];
+        while let Some(t) = stack.pop() {
+            if !visited.insert(t.clone()) {
+                continue; // already folded — dedup + cycle guard
+            }
+            if let Some(FieldValue::Set(s)) = self.provider(&t, ty).and_then(|p| p.get(field)) {
+                acc.extend(s.iter().cloned());
+            }
+            stack.extend(self.deps(&t).iter().cloned());
+        }
+        acc
+    }
 }
 
 /// The fact store: atomic provider facts keyed by `(TargetKey, ProviderTypeId)`. Only code
@@ -262,43 +286,6 @@ impl Dds {
         self.deps.insert(target, deps);
     }
 
-    /// Fold a `Set`-valued provider field over the transitive dep closure (§8b `provides`): the
-    /// target's own field ∪ the same field on every transitive dep. V1 set semantics (unordered,
-    /// dedup, cycle-safe); the ordered `OrderedDepset` family is reserved. This is the rule-rep's
-    /// propagation **query** — declared once here, not re-implemented per rule.
-    pub fn fold_set(
-        &self,
-        root: &TargetKey,
-        ty: &ProviderTypeId,
-        field: &FieldId,
-    ) -> BTreeSet<Scalar> {
-        let mut acc = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        self.fold_into(root, ty, field, &mut acc, &mut visited);
-        acc
-    }
-
-    fn fold_into(
-        &self,
-        t: &TargetKey,
-        ty: &ProviderTypeId,
-        field: &FieldId,
-        acc: &mut BTreeSet<Scalar>,
-        visited: &mut BTreeSet<TargetKey>,
-    ) {
-        if !visited.insert(t.clone()) {
-            return; // already folded — dedup + cycle guard
-        }
-        if let Some(FieldValue::Set(s)) = self.provider(t, ty).and_then(|p| p.get(field)) {
-            acc.extend(s.iter().cloned());
-        }
-        if let Some(deps) = self.deps.get(t) {
-            for d in deps {
-                self.fold_into(d, ty, field, acc, visited);
-            }
-        }
-    }
-
     /// Number of provider facts asserted (across all targets/instances).
     pub fn len(&self) -> usize {
         self.providers.len()
@@ -311,6 +298,10 @@ impl Dds {
 impl DdsRead for Dds {
     fn provider(&self, target: &TargetKey, ty: &ProviderTypeId) -> Option<&Provider> {
         self.providers.get(&(target.clone(), ty.clone()))
+    }
+
+    fn deps(&self, target: &TargetKey) -> &[TargetKey] {
+        self.deps.get(target).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 

@@ -18,6 +18,9 @@ use starlark::syntax::{AstModule, Dialect};
 use starlark::values::list::ListRef;
 use starlark::values::{Heap, Value};
 
+pub mod derive;
+pub use derive::{DeclaredAction, derive_cc_library_actions};
+
 /// Evaluate a Starlark cc toolchain config into a [`FeatureConfig`]. The source must define a
 /// top-level `CONFIG = struct(features = [...], action_configs = [...])`, with each feature /
 /// flag_set / flag_group / with_feature_set / action_config / tool a `struct(...)` carrying the

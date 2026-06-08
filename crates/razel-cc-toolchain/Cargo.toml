@@ -11,5 +11,9 @@ rust-version.workspace = true
 # pure-Starlark constructor functions (as `cc_toolchain_config_lib.bzl` defines them). Loading
 # the real `unix_cc_toolchain_config.bzl` rule impl + a `cc_common` shim is the next slice.
 [dependencies]
+razel-dds = { version = "0.1.0", path = "../razel-dds" }
 razel-rulepack = { version = "0.1.0", path = "../razel-rulepack" }
 starlark = "0.14.2"
+
+[dev-dependencies]
+razel-core = { version = "0.1.0", path = "../razel-core" }
