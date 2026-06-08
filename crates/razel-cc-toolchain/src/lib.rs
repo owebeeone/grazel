@@ -183,4 +183,54 @@ CONFIG = struct(
         let argv = cfg.full_command_line(&cfg.select(&[]), "c++-compile", &Vars::new());
         assert!(!argv.contains(&"-MD".to_string()));
     }
+
+    #[test]
+    fn ported_macos_config_reproduces_the_golden_compile_argv_core() {
+        // The ported real-structure config + real cc_configure flags, evaluated + run through
+        // Constrain, reproduces the captured CppCompile argv — minus the two host-specific
+        // features (-frandom-seed=<path>, -mmacosx-version-min=<sdk>) parameterized separately.
+        let cfg = parse_feature_config(include_str!("../fixtures/cc_macos_core.bzl")).unwrap();
+        let vars = Vars::from([
+            ("source_file".into(), VarValue::Scalar("util.cc".into())),
+            ("output_file".into(), VarValue::Scalar("util.o".into())),
+            ("dependency_file".into(), VarValue::Scalar("util.d".into())),
+            (
+                "quote_include_paths".into(),
+                VarValue::Sequence(vec![".".into(), "bazel-out/<cfg>/bin".into()]),
+            ),
+        ]);
+        let argv = cfg.full_command_line(&cfg.select(&[]), "c++-compile", &vars);
+        assert_eq!(
+            argv,
+            vec![
+                "cc_wrapper.sh",
+                "-U_FORTIFY_SOURCE",
+                "-fstack-protector",
+                "-Wall",
+                "-Wthread-safety",
+                "-Wself-assign",
+                "-Wunused-but-set-parameter",
+                "-Wno-free-nonheap-object",
+                "-fcolor-diagnostics",
+                "-fno-omit-frame-pointer",
+                "-std=c++17",
+                "-MD",
+                "-MF",
+                "util.d",
+                "-iquote",
+                ".",
+                "-iquote",
+                "bazel-out/<cfg>/bin",
+                "-c",
+                "util.cc",
+                "-o",
+                "util.o",
+                "-no-canonical-prefixes",
+                "-Wno-builtin-macro-redefined",
+                "-D__DATE__=\"redacted\"",
+                "-D__TIMESTAMP__=\"redacted\"",
+                "-D__TIME__=\"redacted\"",
+            ]
+        );
+    }
 }
