@@ -7,4 +7,6 @@
 //! rebuilds ordered-set semantics as the DDS `OrderedDepset` monoid (RazelV2Contracts §3).
 
 pub mod analysis;
+pub mod producer;
 pub use analysis::{wire_to_dds, wire_to_ir};
+pub use producer::{CcLibrary, Producer, ProducerCtx, TargetAttrs, assemble};
