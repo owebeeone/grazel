@@ -64,6 +64,28 @@ impl Producer for CcLibrary {
     }
 }
 
+/// The `rust_library` rule as a producer: a `CrateInfo` carrying its OWN rlib + a `DefaultInfo`.
+/// Proves the producer/assembler model is **language-agnostic** — the transitive rlib closure
+/// (what a downstream crate needs for `--extern`/`-L dependency`) is the SAME `fold_set` query as
+/// cc's transitive headers, just on a different provider/field. No machinery is cc-specific.
+pub struct RustLibrary;
+
+impl Producer for RustLibrary {
+    fn produce(&self, ctx: &ProducerCtx) -> Vec<(ProviderTypeId, Provider)> {
+        let rlib = format!("lib{}.rlib", ctx.attrs.name);
+        vec![
+            (
+                ProviderTypeId::new("DefaultInfo"),
+                Provider::new().with(FieldId::new("files"), str_set(&[rlib.clone()])),
+            ),
+            (
+                ProviderTypeId::new("CrateInfo"),
+                Provider::new().with(FieldId::new("rlibs"), str_set(&[rlib])),
+            ),
+        ]
+    }
+}
+
 /// Assemble a [`Dds`] from `(attrs, producer)` declarations given in dependency order (deps before
 /// dependents, so a producer's `dds` queries see its deps' facts). The assembler is the ONLY
 /// holder of `&mut Dds`: producers return facts; it asserts them + the dep edges. The registered
@@ -79,6 +101,10 @@ pub fn assemble(instance: InstanceId, decls: &[(TargetAttrs, &dyn Producer)]) ->
         ProviderSchema::new()
             .field(FieldId::new("hdrs"), FieldKind::Set)
             .field(FieldId::new("cflags"), FieldKind::Set),
+    );
+    dds.register_schema(
+        ProviderTypeId::new("CrateInfo"),
+        ProviderSchema::new().field(FieldId::new("rlibs"), FieldKind::Set),
     );
 
     for (attrs, producer) in decls {
@@ -153,5 +179,43 @@ mod tests {
         let want: BTreeSet<Scalar> =
             ["base.h", "util.h"].iter().map(|s| Scalar::Str(s.to_string())).collect();
         assert_eq!(dds.fold_set(&key("util"), &cci, &hdrs), want);
+    }
+
+    #[test]
+    fn rust_library_producer_uses_the_same_spine() {
+        // Same assemble/fold_set as cc — only the provider differs (CrateInfo.rlibs). The
+        // producer/assembler model is language-agnostic.
+        let base = TargetAttrs {
+            name: "base_rs".into(),
+            srcs: vec!["base.rs".into()],
+            ..Default::default()
+        };
+        let util = TargetAttrs {
+            name: "util_rs".into(),
+            srcs: vec!["util.rs".into()],
+            deps: vec!["base_rs".into()],
+            ..Default::default()
+        };
+        let rust = RustLibrary;
+        let dds = assemble(InstanceId::SINGLE, &[(base, &rust), (util, &rust)]).unwrap();
+
+        let crate_info = ProviderTypeId::new("CrateInfo");
+        let rlibs = FieldId::new("rlibs");
+        // OWN rlib; the transitive closure (for downstream --extern/-L) is the fold.
+        assert_eq!(
+            dds.provider(&key("util_rs"), &crate_info).unwrap().get(&rlibs),
+            Some(&set(&["libutil_rs.rlib"]))
+        );
+        let want: BTreeSet<Scalar> = ["libbase_rs.rlib", "libutil_rs.rlib"]
+            .iter()
+            .map(|s| Scalar::Str(s.to_string()))
+            .collect();
+        assert_eq!(dds.fold_set(&key("util_rs"), &crate_info, &rlibs), want);
+        assert_eq!(
+            dds.provider(&key("util_rs"), &ProviderTypeId::new("DefaultInfo"))
+                .unwrap()
+                .get(&FieldId::new("files")),
+            Some(&set(&["libutil_rs.rlib"]))
+        );
     }
 }
