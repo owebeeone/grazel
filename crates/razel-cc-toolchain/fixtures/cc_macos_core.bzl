@@ -24,6 +24,7 @@ def tool(path):
     return struct(path = path, with_features = [])
 
 CC = ["c++-compile"]
+ARCHIVE = ["c++-link-static-library"]
 
 CONFIG = struct(
     features = [
@@ -80,8 +81,17 @@ CONFIG = struct(
                 '-D__TIME__="redacted"',
             ])]),
         ]),
+        # The static-archive action (macOS libtool): -D -no_warning_for_no_symbols -static -o <a> <objs>.
+        feature(name = "archiver_flags", enabled = True, flag_sets = [
+            flag_set(actions = ARCHIVE, flag_groups = [
+                flag_group(flags = ["-D", "-no_warning_for_no_symbols", "-static"]),
+                flag_group(flags = ["-o", "%{output_execpath}"], expand_if_available = "output_execpath"),
+                flag_group(flags = ["%{libraries_to_link}"], iterate_over = "libraries_to_link"),
+            ]),
+        ]),
     ],
     action_configs = [
         action_config(action_name = "c++-compile", tools = [tool(path = "cc_wrapper.sh")]),
+        action_config(action_name = "c++-link-static-library", tools = [tool(path = "/usr/bin/libtool")]),
     ],
 )

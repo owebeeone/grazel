@@ -237,4 +237,19 @@ CONFIG = struct(
             ]
         );
     }
+
+    #[test]
+    fn ported_macos_config_reproduces_the_archive_argv() {
+        // The static-archive action: only `archiver_flags` fires (action filter), tool = libtool.
+        let cfg = parse_feature_config(include_str!("../fixtures/cc_macos_core.bzl")).unwrap();
+        let vars = Vars::from([
+            ("output_execpath".into(), VarValue::Scalar("libutil.a".into())),
+            ("libraries_to_link".into(), VarValue::Sequence(vec!["util.o".into()])),
+        ]);
+        let argv = cfg.full_command_line(&cfg.select(&[]), "c++-link-static-library", &vars);
+        assert_eq!(
+            argv,
+            ["/usr/bin/libtool", "-D", "-no_warning_for_no_symbols", "-static", "-o", "libutil.a", "util.o"]
+        );
+    }
 }
