@@ -1,14 +1,8 @@
+# Cargo build output — never committed
+/target
+
+# Bazel convenience symlinks (if bazel runs at repo root for parity goldens)
+/bazel-*
+
+# macOS
 .DS_Store
-.venv/
-__pycache__/
-.pytest_cache/
-.coverage
-htmlcov/
-*.pyc
-build/
-dist/
-*.egg-info/
-tests/.uv-venvs/
-tests/actual_test_results/
-scratch/
-*-old.py
