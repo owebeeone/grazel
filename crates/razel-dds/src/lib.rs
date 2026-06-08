@@ -198,6 +198,8 @@ pub trait DdsRead {
 pub struct Dds {
     providers: BTreeMap<(TargetKey, ProviderTypeId), Provider>,
     schemas: BTreeMap<ProviderTypeId, ProviderSchema>,
+    /// Dep edges (a target → its `deps`) — the graph the propagation folds traverse (§8b).
+    deps: BTreeMap<TargetKey, Vec<TargetKey>>,
 }
 
 impl Dds {
@@ -251,6 +253,48 @@ impl Dds {
                     }
                 }
                 Ok(())
+            }
+        }
+    }
+
+    /// Assert a target's dep edges (its `deps`) — the graph the propagation folds traverse (§8b).
+    pub fn assert_deps(&mut self, target: TargetKey, deps: Vec<TargetKey>) {
+        self.deps.insert(target, deps);
+    }
+
+    /// Fold a `Set`-valued provider field over the transitive dep closure (§8b `provides`): the
+    /// target's own field ∪ the same field on every transitive dep. V1 set semantics (unordered,
+    /// dedup, cycle-safe); the ordered `OrderedDepset` family is reserved. This is the rule-rep's
+    /// propagation **query** — declared once here, not re-implemented per rule.
+    pub fn fold_set(
+        &self,
+        root: &TargetKey,
+        ty: &ProviderTypeId,
+        field: &FieldId,
+    ) -> BTreeSet<Scalar> {
+        let mut acc = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        self.fold_into(root, ty, field, &mut acc, &mut visited);
+        acc
+    }
+
+    fn fold_into(
+        &self,
+        t: &TargetKey,
+        ty: &ProviderTypeId,
+        field: &FieldId,
+        acc: &mut BTreeSet<Scalar>,
+        visited: &mut BTreeSet<TargetKey>,
+    ) {
+        if !visited.insert(t.clone()) {
+            return; // already folded — dedup + cycle guard
+        }
+        if let Some(FieldValue::Set(s)) = self.provider(t, ty).and_then(|p| p.get(field)) {
+            acc.extend(s.iter().cloned());
+        }
+        if let Some(deps) = self.deps.get(t) {
+            for d in deps {
+                self.fold_into(d, ty, field, acc, visited);
             }
         }
     }
@@ -397,5 +441,32 @@ mod tests {
             d.assert(tk("//p:t"), cc(), wrong).unwrap_err(),
             MergeError::SchemaViolation { .. }
         ));
+    }
+
+    #[test]
+    fn fold_set_unions_over_transitive_deps() {
+        // a → b → c, each owning one header; the fold is the transitive union.
+        let mut d = dds();
+        let hdrs = FieldId::new("hdrs");
+        for (lbl, h) in [("//:a", "a.h"), ("//:b", "b.h"), ("//:c", "c.h")] {
+            d.assert(tk(lbl), cc(), Provider::new().with(hdrs.clone(), set(&[h]))).unwrap();
+        }
+        d.assert_deps(tk("//:a"), vec![tk("//:b")]);
+        d.assert_deps(tk("//:b"), vec![tk("//:c")]);
+        assert_eq!(
+            FieldValue::Set(d.fold_set(&tk("//:a"), &cc(), &hdrs)),
+            set(&["a.h", "b.h", "c.h"])
+        );
+    }
+
+    #[test]
+    fn fold_set_is_cycle_safe() {
+        let mut d = dds();
+        let hdrs = FieldId::new("hdrs");
+        d.assert(tk("//:a"), cc(), Provider::new().with(hdrs.clone(), set(&["a.h"]))).unwrap();
+        d.assert(tk("//:b"), cc(), Provider::new().with(hdrs.clone(), set(&["b.h"]))).unwrap();
+        d.assert_deps(tk("//:a"), vec![tk("//:b")]);
+        d.assert_deps(tk("//:b"), vec![tk("//:a")]); // cycle → must terminate
+        assert_eq!(FieldValue::Set(d.fold_set(&tk("//:a"), &cc(), &hdrs)), set(&["a.h", "b.h"]));
     }
 }
