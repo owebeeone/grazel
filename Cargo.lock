@@ -1240,6 +1240,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "razel-dds"
+version = "0.1.0"
+dependencies = [
+ "razel-core",
+]
+
+[[package]]
 name = "razel-engine"
 version = "0.1.0"
 dependencies = [

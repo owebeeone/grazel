@@ -185,6 +185,32 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+// ── Phase 2.1b: the DDS dependency-boundary (AD/§3) ─────────────────────────────
+// `razel-dds` is the L1 spine: everything depends DOWN to it, so it must depend only on L0
+// (razel-core + razel-wire). A razel-* dep outside this set would invert the boundary.
+const DDS_ALLOWED_DEPS: &[&str] = &["razel-core", "razel-wire"];
+
+/// Scan a `[dependencies]` block for `razel-*` crates outside the allowlist (a boundary break).
+fn dds_boundary_violations(cargo_toml: &str) -> Vec<String> {
+    let mut in_deps = false;
+    let mut out = Vec::new();
+    for line in cargo_toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_deps = t == "[dependencies]";
+            continue;
+        }
+        if !in_deps || t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let name = t.split([' ', '=']).next().unwrap_or("");
+        if name.starts_with("razel-") && !DDS_ALLOWED_DEPS.contains(&name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 fn gates() -> ExitCode {
     let root = workspace_root();
     let mut files = Vec::new();
@@ -196,19 +222,27 @@ fn gates() -> ExitCode {
             violations.extend(gate_violations(&rel, &content));
         }
     }
-    if violations.is_empty() {
+    // DDS dependency-boundary (2.1b): razel-dds may depend only on core+wire.
+    let boundary: Vec<String> = std::fs::read_to_string(root.join("crates/razel-dds/Cargo.toml"))
+        .map(|c| dds_boundary_violations(&c))
+        .unwrap_or_default();
+
+    if violations.is_empty() && boundary.is_empty() {
         eprintln!(
-            "xtask gates: OK — no ambient state (thread_local!/static mut) anywhere in crates/ (AD2 fully enforced)"
+            "xtask gates: OK — no ambient state anywhere in crates/ (AD2); razel-dds boundary intact (core+wire only)"
         );
         return ExitCode::SUCCESS;
     }
     for v in &violations {
         eprintln!("  BANNED {}:{}  `{}` — {}", v.path, v.line, v.pattern, v.reason);
     }
+    for b in &boundary {
+        eprintln!("  BOUNDARY razel-dds must not depend on `{b}` — the DDS spine is core+wire only");
+    }
     eprintln!(
-        "\nxtask gates: FAIL — {} forbidden ambient-state use(s) (AD2). \
-         Only tracked Phase-1-removal files belong in GATE_ALLOWLIST.",
-        violations.len()
+        "\nxtask gates: FAIL — {} ambient-state + {} boundary violation(s).",
+        violations.len(),
+        boundary.len()
     );
     ExitCode::from(1)
 }
@@ -255,6 +289,19 @@ mod gate_tests {
         assert!(
             gate_violations("crates/x/src/y.rs", "    // thread_local! is banned by AD2").is_empty()
         );
+    }
+
+    #[test]
+    fn dds_boundary_flags_an_upward_dep() {
+        // razel-dds depending on razel-engine would invert the L1→L0 boundary.
+        let toml = "[package]\nname = \"razel-dds\"\n[dependencies]\nrazel-core = { path = \"..\" }\nrazel-engine = { path = \"..\" }\n";
+        assert_eq!(dds_boundary_violations(toml), vec!["razel-engine".to_string()]);
+    }
+
+    #[test]
+    fn dds_boundary_allows_core_wire_and_external() {
+        let toml = "[dependencies]\nrazel-core = { path = \"..\" }\nrazel-wire = { path = \"..\" }\nanyhow = \"1\"\n";
+        assert!(dds_boundary_violations(toml).is_empty());
     }
 }
 
