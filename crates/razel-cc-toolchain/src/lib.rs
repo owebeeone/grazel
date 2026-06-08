@@ -347,6 +347,16 @@ CONFIG = struct(
             .collect()
     }
 
+    /// The `Outputs: [...]` of the golden action whose header contains `header`, sorted.
+    fn golden_outputs(golden: &str, header: &str) -> Vec<String> {
+        let block = &golden[golden.find(&format!("action '{header}")).expect("action")..];
+        let start = block.find("Outputs: [").expect("outputs") + "Outputs: [".len();
+        let end = block[start..].find(']').unwrap() + start;
+        let mut v: Vec<String> = block[start..end].split(", ").map(String::from).collect();
+        v.sort();
+        v
+    }
+
     #[test]
     fn parity_constrain_reproduces_the_real_golden_command_lines() {
         // THE parity check: §8c, fed the golden's variables, reproduces Bazel's ACTUAL captured
@@ -355,16 +365,23 @@ CONFIG = struct(
         let cfg = macos_core_config().unwrap();
 
         // razel COMPUTES the paths (the path-model formula) — independent of the golden:
-        let compile = cc_compile_argv(
-            &cfg,
-            &bazel_compile_inputs("<cfg>", "corpus/cc/transitive", "util", "util.cc", "<sdk>"),
+        let ci = bazel_compile_inputs("<cfg>", "corpus/cc/transitive", "util", "util.cc", "<sdk>");
+        assert_eq!(
+            cc_compile_argv(&cfg, &ci),
+            golden_argv(golden, "Compiling corpus/cc/transitive/util.cc")
         );
-        assert_eq!(compile, golden_argv(golden, "Compiling corpus/cc/transitive/util.cc"));
+        let mut compile_out = vec![ci.output_file.clone(), ci.dependency_file.clone()];
+        compile_out.sort();
+        assert_eq!(compile_out, golden_outputs(golden, "Compiling corpus/cc/transitive/util.cc"));
 
-        let archive = cc_archive_argv(
-            &cfg,
-            &bazel_archive_inputs("<cfg>", "corpus/cc/transitive", "util", &["util.cc"]),
+        let ai = bazel_archive_inputs("<cfg>", "corpus/cc/transitive", "util", &["util.cc"]);
+        assert_eq!(
+            cc_archive_argv(&cfg, &ai),
+            golden_argv(golden, "Linking corpus/cc/transitive/libutil.a")
         );
-        assert_eq!(archive, golden_argv(golden, "Linking corpus/cc/transitive/libutil.a"));
+        assert_eq!(
+            vec![ai.output_execpath.clone()],
+            golden_outputs(golden, "Linking corpus/cc/transitive/libutil.a")
+        );
     }
 }
