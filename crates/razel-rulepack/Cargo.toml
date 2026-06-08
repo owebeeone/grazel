@@ -1,0 +1,13 @@
+[package]
+name = "razel-rulepack"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# L3 — the yidl-lite rule-pack layer (RazelV2Contracts §8): a rule expressed as DATA — its
+# provider schemas (§8a) + its `provides` propagation query (§8b) — interpreted by a generic
+# engine over razel-dds, NOT hand-written per rule. Depends down to the DDS spine.
+[dependencies]
+razel-core = { version = "0.1.0", path = "../razel-core" }
+razel-dds = { version = "0.1.0", path = "../razel-dds" }

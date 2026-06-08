@@ -1286,6 +1286,14 @@ name = "razel-parity"
 version = "0.1.0"
 
 [[package]]
+name = "razel-rulepack"
+version = "0.1.0"
+dependencies = [
+ "razel-core",
+ "razel-dds",
+]
+
+[[package]]
 name = "razel-vfs"
 version = "0.1.0"
 dependencies = [
