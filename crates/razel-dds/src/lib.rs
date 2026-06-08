@@ -85,6 +85,13 @@ pub enum FieldValue {
     Set(BTreeSet<Scalar>),
 }
 
+/// The merge class a provider field *declares* (§2) — the asserted [`FieldValue`] must match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FieldKind {
+    Scalar,
+    Set,
+}
+
 /// Why an [`Dds::assert`] failed — the value algebra surfacing a violation rather than a silent
 /// last-writer-wins (F12: completeness is correctness).
 #[derive(Debug, PartialEq, Eq)]
@@ -93,9 +100,22 @@ pub enum MergeError {
     ScalarConflict { provider: ProviderTypeId, field: FieldId },
     /// Two producers asserted different merge classes for the same field.
     KindMismatch { provider: ProviderTypeId, field: FieldId },
+    /// A provider type with no registered schema was asserted (the unregistered-provider forcing).
+    UnregisteredProvider(ProviderTypeId),
+    /// A field absent from the provider's schema, or whose value's merge class doesn't match
+    /// the declared [`FieldKind`].
+    SchemaViolation { provider: ProviderTypeId, field: FieldId },
 }
 
 impl FieldValue {
+    /// This value's merge class — must match the field's declared [`FieldKind`].
+    fn kind(&self) -> FieldKind {
+        match self {
+            FieldValue::Scalar(_) => FieldKind::Scalar,
+            FieldValue::Set(_) => FieldKind::Set,
+        }
+    }
+
     /// Merge `other` into `self` per the field's monoid (§3). Confluent + commutative.
     fn merge(
         &mut self,
@@ -143,6 +163,25 @@ impl Provider {
     }
 }
 
+/// A provider type's declared **schema** (§2): each field's name + merge class. Rule packs
+/// declare these; the DDS rejects any fact for an unregistered provider, or an unknown /
+/// wrong-kind field — a typo'd provider/field can't silently land (F12).
+#[derive(Clone, Debug, Default)]
+pub struct ProviderSchema {
+    fields: BTreeMap<FieldId, FieldKind>,
+}
+
+impl ProviderSchema {
+    pub fn new() -> Self {
+        ProviderSchema::default()
+    }
+    /// Builder: declare a field and its merge class.
+    pub fn field(mut self, id: FieldId, kind: FieldKind) -> Self {
+        self.fields.insert(id, kind);
+        self
+    }
+}
+
 // ── The store + the read/write split (§0) ───────────────────────────────────────────
 
 /// Read access to the DDS — what **producers** get. Query only: no method can mutate the
@@ -158,11 +197,18 @@ pub trait DdsRead {
 #[derive(Default)]
 pub struct Dds {
     providers: BTreeMap<(TargetKey, ProviderTypeId), Provider>,
+    schemas: BTreeMap<ProviderTypeId, ProviderSchema>,
 }
 
 impl Dds {
     pub fn new() -> Self {
         Dds::default()
+    }
+
+    /// Declare a provider type's schema (§2). Rule packs call this before asserting; asserting
+    /// an unregistered provider (or an unknown/wrong-kind field) is rejected.
+    pub fn register_schema(&mut self, ty: ProviderTypeId, schema: ProviderSchema) {
+        self.schemas.insert(ty, schema);
     }
 
     /// Assert a provider fact (the WRITE capability — assembler only). If a provider of the
@@ -175,6 +221,21 @@ impl Dds {
         ty: ProviderTypeId,
         provider: Provider,
     ) -> Result<(), MergeError> {
+        // Schema check (the forcing): the provider must be registered and every field must
+        // match its declared kind — else the fact is rejected, never silently stored (F12).
+        match self.schemas.get(&ty) {
+            None => return Err(MergeError::UnregisteredProvider(ty.clone())),
+            Some(schema) => {
+                for (field, value) in &provider.fields {
+                    if schema.fields.get(field).copied() != Some(value.kind()) {
+                        return Err(MergeError::SchemaViolation {
+                            provider: ty.clone(),
+                            field: field.clone(),
+                        });
+                    }
+                }
+            }
+        }
         match self.providers.get_mut(&(target.clone(), ty.clone())) {
             None => {
                 self.providers.insert((target, ty), provider);
@@ -222,10 +283,23 @@ mod tests {
     fn set(xs: &[&str]) -> FieldValue {
         FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
     }
+    /// A `Dds` with a `CcInfo` schema registered for the fields the tests assert.
+    fn dds() -> Dds {
+        let mut d = Dds::new();
+        d.register_schema(
+            cc(),
+            ProviderSchema::new()
+                .field(FieldId::new("lib"), FieldKind::Scalar)
+                .field(FieldId::new("hdrs"), FieldKind::Set)
+                .field(FieldId::new("k"), FieldKind::Scalar)
+                .field(FieldId::new("derived"), FieldKind::Scalar),
+        );
+        d
+    }
 
     #[test]
     fn assert_and_query_roundtrip() {
-        let mut dds = Dds::new();
+        let mut dds = dds();
         let p = Provider::new()
             .with(FieldId::new("lib"), FieldValue::Scalar(Scalar::Str("libfoo.a".into())));
         dds.assert(tk("//foo:bar"), cc(), p.clone()).unwrap();
@@ -235,7 +309,7 @@ mod tests {
 
     #[test]
     fn set_field_merges_by_union() {
-        let mut dds = Dds::new();
+        let mut dds = dds();
         dds.assert(tk("//p:t"), cc(), Provider::new().with(FieldId::new("hdrs"), set(&["a.h"])))
             .unwrap();
         dds.assert(tk("//p:t"), cc(), Provider::new().with(FieldId::new("hdrs"), set(&["b.h", "a.h"])))
@@ -248,7 +322,7 @@ mod tests {
 
     #[test]
     fn conflicting_scalar_is_a_merge_error_not_silent() {
-        let mut dds = Dds::new();
+        let mut dds = dds();
         let s = |v: &str| {
             Provider::new().with(FieldId::new("k"), FieldValue::Scalar(Scalar::Str(v.into())))
         };
@@ -259,7 +333,7 @@ mod tests {
 
     #[test]
     fn same_label_two_instances_no_collision() {
-        let mut dds = Dds::new();
+        let mut dds = dds();
         let l = || Label::parse_canonical("//p:t").unwrap();
         let k1 = TargetKey::new(InstanceId::SINGLE, l());
         let k2 = TargetKey::new(InstanceId(1), l());
@@ -284,7 +358,7 @@ mod tests {
             let _can_read = dds.provider(t, &cc()); // read OK
             vec![(FieldId::new("derived"), FieldValue::Scalar(Scalar::Bool(true)))]
         }
-        let mut dds = Dds::new();
+        let mut dds = dds();
         let t = tk("//p:t");
         let facts = producer(&dds, &t); // immutable borrow released here
         let mut p = Provider::new();
@@ -293,5 +367,35 @@ mod tests {
         }
         dds.assert(t.clone(), cc(), p).unwrap();
         assert!(dds.provider(&t, &cc()).unwrap().get(&FieldId::new("derived")).is_some());
+    }
+
+    #[test]
+    fn unregistered_provider_is_rejected() {
+        // The forcing: no schema registered → the fact cannot land.
+        let mut d = Dds::new();
+        let p =
+            Provider::new().with(FieldId::new("lib"), FieldValue::Scalar(Scalar::Str("x".into())));
+        assert!(matches!(
+            d.assert(tk("//p:t"), cc(), p).unwrap_err(),
+            MergeError::UnregisteredProvider(_)
+        ));
+    }
+
+    #[test]
+    fn unknown_or_wrong_kind_field_is_rejected() {
+        let mut d = dds(); // CcInfo schema: lib=Scalar, hdrs=Set, …
+        // a field not in the schema
+        let unknown =
+            Provider::new().with(FieldId::new("nope"), FieldValue::Scalar(Scalar::Int(1)));
+        assert!(matches!(
+            d.assert(tk("//p:t"), cc(), unknown).unwrap_err(),
+            MergeError::SchemaViolation { .. }
+        ));
+        // a declared field with the wrong merge class (`lib` is Scalar, asserted as Set)
+        let wrong = Provider::new().with(FieldId::new("lib"), set(&["a"]));
+        assert!(matches!(
+            d.assert(tk("//p:t"), cc(), wrong).unwrap_err(),
+            MergeError::SchemaViolation { .. }
+        ));
     }
 }

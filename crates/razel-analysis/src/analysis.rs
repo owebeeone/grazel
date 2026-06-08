@@ -5,7 +5,10 @@
 //! `Depset<T>` pipeline — it had no live callers; the live path never used it.)
 
 use razel_core::{ActionId, Digest, FileId, Label, NodeRef, TargetId};
-use razel_dds::{Dds, FieldId, FieldValue, InstanceId, Provider, ProviderTypeId, Scalar, TargetKey};
+use razel_dds::{
+    Dds, FieldId, FieldKind, FieldValue, InstanceId, Provider, ProviderSchema, ProviderTypeId,
+    Scalar, TargetKey,
+};
 use razel_ir::{ActionNode, FileKind, FileNode, Graph, TargetKind, TargetNode};
 
 /// Infer a coarse target kind from the target name's suffix (the dialect convention:
@@ -77,6 +80,17 @@ pub fn wire_to_dds(
     instance: InstanceId,
 ) -> Result<Dds, String> {
     let mut dds = Dds::new();
+    // Declare the provider schemas this assembler produces (the rule-pack's §2 declaration).
+    dds.register_schema(
+        ProviderTypeId::new("DefaultInfo"),
+        ProviderSchema::new().field(FieldId::new("files"), FieldKind::Set),
+    );
+    dds.register_schema(
+        ProviderTypeId::new("CcInfo"),
+        ProviderSchema::new()
+            .field(FieldId::new("hdrs"), FieldKind::Set)
+            .field(FieldId::new("cflags"), FieldKind::Set),
+    );
     for t in targets {
         // Single-package mode yields bare names (not canonical); root-package them as `//:name`.
         let label = Label::parse_canonical(&t.name)
