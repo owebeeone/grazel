@@ -12,7 +12,8 @@
 //! workspace root), matching how cc uses `-iquote .`.
 
 use crate::rules::{
-    AnalyzedAction, AnalyzedTarget, canon_label, qualify, record_target, resolve_dep, unpack,
+    AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, record_target, resolve_dep,
+    session, unpack,
 };
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
@@ -57,11 +58,12 @@ fn crate_name_of(canon: &str) -> String {
 
 /// Resolve `deps` to `(--extern crate=rlib args, dep rlib inputs, dep canon names)`.
 fn extern_args(
+    sess: &Session,
     deps: Option<UnpackList<String>>,
 ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let (mut args, mut inputs, mut names) = (Vec::new(), Vec::new(), Vec::new());
     for d in &unpack(deps) {
-        let dep = resolve_dep(d)?;
+        let dep = resolve_dep(sess, d)?;
         let crate_name = crate_name_of(&dep.canon);
         // A rust_library exports exactly one rlib in default_info → dep.libs.
         for rlib in &dep.libs {
@@ -84,16 +86,18 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
         #[starlark(require = named)] edition: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
+        let sess = session(eval);
+        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
         let crate_root = srcs
             .first()
             .ok_or_else(|| anyhow::anyhow!("rust_library `{name}` needs at least one src"))?
             .clone();
         let edition = edition.unwrap_or_else(|| "2021".into());
-        let (extern_flags, dep_rlibs, dep_names) = extern_args(deps)?;
+        let (extern_flags, dep_rlibs, dep_names) = extern_args(sess, deps)?;
 
-        let rlib = qualify(&format!("lib{name}.rlib"));
+        let rlib = qualify(sess, &format!("lib{name}.rlib"));
         let mut argv = vec![
             rustc(),
             "--edition".into(),
@@ -110,8 +114,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             deps: dep_names,
             actions: vec![AnalyzedAction {
                 mnemonic: "Rustc".into(),
@@ -134,16 +138,18 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
         #[starlark(require = named)] edition: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
+        let sess = session(eval);
+        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
         let crate_root = srcs
             .first()
             .ok_or_else(|| anyhow::anyhow!("rust_binary `{name}` needs at least one src"))?
             .clone();
         let edition = edition.unwrap_or_else(|| "2021".into());
-        let (extern_flags, dep_rlibs, dep_names) = extern_args(deps)?;
+        let (extern_flags, dep_rlibs, dep_names) = extern_args(sess, deps)?;
 
-        let out = qualify(&name);
+        let out = qualify(sess, &name);
         let mut argv = vec![
             rustc(),
             "--edition".into(),
@@ -158,8 +164,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             deps: dep_names,
             actions: vec![AnalyzedAction {
                 mnemonic: "Rustc".into(),

@@ -8,7 +8,9 @@
 //! live in `crate::rules` (`record_target`, `canon_label`, `qualify`, `unpack`,
 //! `AnalyzedTarget`/`AnalyzedAction`); modeled on `rules::cc_rules`.
 
-use crate::rules::{AnalyzedAction, AnalyzedTarget, canon_label, qualify, record_target, unpack};
+use crate::rules::{
+    AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, record_target, session, unpack,
+};
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
@@ -33,15 +35,19 @@ fn install_action(src: &str, out: &str) -> AnalyzedAction {
 /// Analyze a `sh_binary`/`sh_test`: take the single primary script `srcs[0]`, install
 /// it as the executable output `qualify(name)`, and record the target with that output
 /// as its `DefaultInfo`. `data`/`deps` and any unknown kwargs are absorbed.
-fn analyze_sh(name: String, srcs: Option<UnpackList<String>>) -> anyhow::Result<NoneType> {
+fn analyze_sh(
+    sess: &Session,
+    name: String,
+    srcs: Option<UnpackList<String>>,
+) -> anyhow::Result<NoneType> {
     let srcs = unpack(srcs);
     let src = srcs
         .first()
         .ok_or_else(|| anyhow::anyhow!("sh rule `{name}` needs a script in srcs"))?;
-    let src = qualify(src);
-    let out = qualify(&name);
-    record_target(AnalyzedTarget {
-        name: canon_label(&name),
+    let src = qualify(sess, src);
+    let out = qualify(sess, &name);
+    record_target(sess, AnalyzedTarget {
+        name: canon_label(sess, &name),
         deps: Vec::new(),
         actions: vec![install_action(&src, &out)],
         default_info: vec![out],
@@ -59,9 +65,10 @@ fn sh_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] data: Option<UnpackList<String>>,
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let _ = (data, deps);
-        analyze_sh(name, srcs)
+        analyze_sh(session(eval), name, srcs)
     }
 
     fn native_sh_test<'v>(
@@ -70,9 +77,10 @@ fn sh_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] data: Option<UnpackList<String>>,
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let _ = (data, deps);
-        analyze_sh(name, srcs)
+        analyze_sh(session(eval), name, srcs)
     }
 }
 

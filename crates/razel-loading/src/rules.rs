@@ -63,41 +63,52 @@ struct AnalysisState {
     current: Option<AnalyzedTarget>,
 }
 
-thread_local! {
-    static STATE: RefCell<AnalysisState> = RefCell::new(AnalysisState::default());
-}
-
-thread_local! {
-    /// Toolchain configs declared via `define_config` (for host-config selection, D7).
-    static CONFIGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Names of configs declared via `define_config` in the last `analyze_starlark` run.
-pub fn registered_configs() -> Vec<String> {
-    CONFIGS.with_borrow(|c| c.clone())
-}
-
-thread_local! {
-    /// Analyzed targets by **canonical label** → providers, so a dependent's `deps`
-    /// reads them (cross-target/-package provider flow). In single-package mode the
-    /// key is the bare name; in workspace mode it's `//pkg:name`.
-    static RESULTS: RefCell<BTreeMap<String, AnalyzedTarget>> = const { RefCell::new(BTreeMap::new()) };
-}
-
-thread_local! {
-    /// Workspace root (set in multi-package mode) — used to read a dep package's
-    /// BUILD on demand. `None` ⇒ single-package mode (no package qualification).
-    static WORKSPACE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+/// Per-analysis state, threaded explicitly — the precursor of the DDS (RazelV2Contracts §0)
+/// and razel's answer to AD2 (no ambient state). Built fresh per `analyze_*` call (so there is
+/// no `reset` to forget), stashed in `eval.extra`, and read by builtins via [`session`];
+/// non-builtin helpers take `&Session`. Interior mutability (`RefCell`) on the fields mutated
+/// during eval; `workspace`/`global` are set once at construction.
+///
+/// Re-entrant under nested package loads (`resolve_dep` → `load_package` → nested
+/// `eval_build_src`): every borrow is kept short and **never held across an `eval_*` call**
+/// (the [R1] discipline — a held `results`/`state` borrow across a nested eval would
+/// double-borrow-panic). Multiple `Session`s coexist → multi-instance analysis (F24).
+#[derive(Default, ProvidesStaticType)]
+pub(crate) struct Session {
+    state: RefCell<AnalysisState>,
+    /// Analyzed targets by **canonical label** → providers, so a dependent's `deps` reads
+    /// them (cross-target/-package provider flow). Bare name in single-package mode,
+    /// `//pkg:name` in a workspace. This map is the embryonic DDS fact store.
+    results: RefCell<BTreeMap<String, AnalyzedTarget>>,
+    /// Toolchain configs declared via `define_config` (host-config selection, D7).
+    configs: RefCell<Vec<String>>,
     /// The package currently being evaluated (`None` ⇒ single-package mode).
-    static CURRENT_PKG: RefCell<Option<String>> = const { RefCell::new(None) };
+    current_pkg: RefCell<Option<String>>,
     /// Packages whose BUILD has been loaded (cycle/repeat guard).
-    static LOADED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    loaded: RefCell<HashSet<String>>,
+    /// Workspace root (multi-package mode); `None` ⇒ single-package. Set once.
+    workspace: Option<PathBuf>,
+    /// CLI flags riding every cc action (`--copt`/`--linkopt`/`-c`). Set once.
+    global: GlobalFlags,
 }
 
-thread_local! {
-    /// CLI-level flags applied to every cc action this analysis produces (Bazel's
-    /// `--copt`/`--linkopt`/… and `-c` expanded to compile flags). Set per analyze.
-    static GLOBAL: RefCell<GlobalFlags> = RefCell::new(GlobalFlags::default());
+impl Session {
+    fn new(workspace: Option<PathBuf>, global: GlobalFlags) -> Self {
+        Session { workspace, global, ..Default::default() }
+    }
+    /// Take the accumulated targets out (consumes the in-flight `state.targets`).
+    fn take_targets(&self) -> Vec<AnalyzedTarget> {
+        std::mem::take(&mut self.state.borrow_mut().targets)
+    }
+}
+
+/// The per-analysis [`Session`] stashed in `eval.extra` by the analysis entry points.
+/// Panics only on a programming error: a builtin reached without an initialized analysis.
+pub(crate) fn session<'a>(eval: &Evaluator<'_, 'a, '_>) -> &'a Session {
+    eval.extra
+        .expect("analysis not initialized: Session missing from eval.extra")
+        .downcast_ref::<Session>()
+        .expect("eval.extra is not a Session")
 }
 
 /// Build-wide flags from the command line that ride every cc action: `copts` prepend
@@ -111,8 +122,8 @@ pub struct GlobalFlags {
 
 /// Canonicalize a target name/label against the current package. Single-package
 /// mode keeps bare names; workspace mode produces `//pkg:name`.
-pub(crate) fn canon_label(s: &str) -> String {
-    CURRENT_PKG.with_borrow(|p| match p {
+pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
+    match &*sess.current_pkg.borrow() {
         None => s.strip_prefix(':').unwrap_or(s).to_string(),
         Some(pkg) => {
             if let Some(rest) = s.strip_prefix("//") {
@@ -123,15 +134,15 @@ pub(crate) fn canon_label(s: &str) -> String {
                 format!("//{pkg}:{s}")
             }
         }
-    })
+    }
 }
 
 /// Package-qualify a source/output path (`x.cc` → `pkg/x.cc` in workspace mode).
-pub(crate) fn qualify(path: &str) -> String {
-    CURRENT_PKG.with_borrow(|p| match p {
+pub(crate) fn qualify(sess: &Session, path: &str) -> String {
+    match &*sess.current_pkg.borrow() {
         Some(pkg) => format!("{pkg}/{path}"),
         None => path.to_string(),
-    })
+    }
 }
 
 /// The package of a canonical label `//pkg:name`.
@@ -142,12 +153,10 @@ fn pkg_of(label: &str) -> Option<String> {
         .map(|(p, _)| p.to_string())
 }
 
-fn with_current<F: FnOnce(&mut AnalyzedTarget)>(f: F) {
-    STATE.with_borrow_mut(|s| {
-        if let Some(c) = s.current.as_mut() {
-            f(c);
-        }
-    });
+fn with_current<F: FnOnce(&mut AnalyzedTarget)>(sess: &Session, f: F) {
+    if let Some(c) = sess.state.borrow_mut().current.as_mut() {
+        f(c);
+    }
 }
 
 /// Single-quote a string for safe embedding in a `/bin/sh -c` script.
@@ -190,7 +199,9 @@ fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(require = named)] inputs: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] arguments: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
         let exe = executable.map(file_path).unwrap_or_else(|| "run".into());
         let mut argv = vec![exe.clone()];
         // arguments may contain plain strings, lists, File values, and args() objects.
@@ -201,7 +212,7 @@ fn actions_methods(b: &mut MethodsBuilder) {
             l.map(|l| l.items.into_iter().map(file_path).collect())
                 .unwrap_or_default()
         };
-        with_current(|c| {
+        with_current(sess, |c| {
             c.actions.push(AnalyzedAction {
                 mnemonic: exe,
                 argv,
@@ -226,7 +237,9 @@ fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(require = named)] output: Value<'v>,
         #[starlark(require = named)] content: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
         let output = file_path(output);
         // Real write: a /bin/sh action printf-ing the content into the output file.
         let script = format!(
@@ -234,7 +247,7 @@ fn actions_methods(b: &mut MethodsBuilder) {
             shquote(&content.unwrap_or_default()),
             shquote(&output)
         );
-        with_current(|c| {
+        with_current(sess, |c| {
             c.actions.push(AnalyzedAction {
                 mnemonic: "FileWrite".into(),
                 argv: vec!["/bin/sh".into(), "-c".into(), script],
@@ -485,6 +498,7 @@ where
     ) -> starlark::Result<Value<'v>> {
         let named = args.names_map()?;
         let heap = eval.heap();
+        let sess = session(eval);
         let mut name = String::new();
         let mut dep_labels: Vec<String> = Vec::new();
         let mut fields: Vec<(String, Value<'v>)> = Vec::new();
@@ -504,9 +518,9 @@ where
                             let label = item.unpack_str().unwrap_or_default();
                             // Key by canonical label — bare in single-package mode,
                             // //pkg:name in a workspace (matches the native rules).
-                            let dep = canon_label(label);
-                            let files = RESULTS
-                                .with_borrow(|r| r.get(&dep).map(|t| t.default_info.clone()));
+                            let dep = canon_label(sess, label);
+                            let files =
+                                sess.results.borrow().get(&dep).map(|t| t.default_info.clone());
                             let Some(files) = files else {
                                 return Err(anyhow::anyhow!(
                                     "dep `{dep}` not analyzed yet — declare it before its users \
@@ -524,19 +538,17 @@ where
             }
         }
 
-        STATE.with_borrow_mut(|s| {
-            s.current = Some(AnalyzedTarget {
-                name: canon_label(&name),
-                deps: dep_labels,
-                ..Default::default()
-            })
+        sess.state.borrow_mut().current = Some(AnalyzedTarget {
+            name: canon_label(sess, &name),
+            deps: dep_labels,
+            ..Default::default()
         });
 
         // ctx.outputs.<attr> — string-valued attrs are predeclared output filenames
         // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
         // (qualified). ctx.executable is empty until an executable-label attr is wired.
         // (razel resolves attribute values directly; the schema is not consulted.)
-        let mk_file = |s: &str| heap.alloc_complex_no_freeze(File { path: qualify(s) });
+        let mk_file = |s: &str| heap.alloc_complex_no_freeze(File { path: qualify(sess, s) });
         let outputs_fields: Vec<(String, Value<'v>)> = named
             .iter()
             .filter_map(|(k, v)| v.unpack_str().map(|s| (k.as_str().to_string(), mk_file(s))))
@@ -556,21 +568,22 @@ where
         let ctx = heap.alloc_complex_no_freeze(Ctx {
             attr: heap.alloc(AllocStruct(fields)),
             actions: heap.alloc_complex_no_freeze(Actions),
-            label: heap.alloc(canon_label(&name)),
+            label: heap.alloc(canon_label(sess, &name)),
             outputs: heap.alloc(AllocStruct(outputs_fields)),
             files: heap.alloc(AllocStruct(files_fields)),
             executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
         });
         eval.eval_function(self.implementation.to_value(), &[ctx], &[])?;
 
-        STATE.with_borrow_mut(|s| {
-            if let Some(c) = s.current.take() {
-                RESULTS.with_borrow_mut(|r| {
-                    r.insert(c.name.clone(), c.clone());
-                });
-                s.targets.push(c);
+        // Post-eval (after the nested rule impl ran): commit the analyzed target. `sess` is
+        // still valid — it borrows the extra target, not `eval`. Short, non-overlapping borrows.
+        {
+            let mut st = sess.state.borrow_mut();
+            if let Some(c) = st.current.take() {
+                sess.results.borrow_mut().insert(c.name.clone(), c.clone());
+                st.targets.push(c);
             }
-        });
+        }
         Ok(Value::new_none())
     }
 }
@@ -648,9 +661,11 @@ fn rule_globals(b: &mut GlobalsBuilder) {
     fn config_setting<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             ..Default::default()
         });
         Ok(NoneType)
@@ -658,9 +673,11 @@ fn rule_globals(b: &mut GlobalsBuilder) {
     fn test_suite<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             ..Default::default()
         });
         Ok(NoneType)
@@ -668,9 +685,11 @@ fn rule_globals(b: &mut GlobalsBuilder) {
     fn alias<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             ..Default::default()
         });
         Ok(NoneType)
@@ -679,10 +698,12 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let files: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        let sess = session(eval);
+        let files: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             default_info: files.clone(),
             hdrs: files,
             ..Default::default()
@@ -695,10 +716,11 @@ fn rule_globals(b: &mut GlobalsBuilder) {
     fn DefaultInfo<'v>(
         #[starlark(require = named)] files: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         if let Some(f) = files {
             let paths = extract_files(f);
-            with_current(|c| c.default_info = paths);
+            with_current(session(eval), |c| c.default_info = paths);
         }
         Ok(NoneType)
     }
@@ -762,7 +784,7 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] link: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        CONFIGS.with_borrow_mut(|c| c.push(name));
+        session(eval).configs.borrow_mut().push(name);
         let mut fields: Vec<(String, Value<'v>)> = vec![("compile".to_string(), compile)];
         if let Some(a) = archive {
             fields.push(("archive".to_string(), a));
@@ -780,17 +802,19 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = pos)] include: UnpackList<String>,
         #[starlark(require = named)] exclude: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<String>> {
-        do_glob(include.items, exclude.map(|l| l.items).unwrap_or_default())
+        do_glob(session(eval), include.items, exclude.map(|l| l.items).unwrap_or_default())
     }
 }
 
 /// Shared `glob()`/`native.glob()` implementation: scan the current package dir
 /// against the include/exclude patterns, package-relative, sorted.
-fn do_glob(include: Vec<String>, exclude: Vec<String>) -> anyhow::Result<Vec<String>> {
-    let dir = WORKSPACE
-        .with_borrow(|w| w.clone())
-        .zip(CURRENT_PKG.with_borrow(|p| p.clone()))
+fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let dir = sess
+        .workspace
+        .clone()
+        .zip(sess.current_pkg.borrow().clone())
         .map(|(root, pkg)| root.join(&pkg));
     let Some(dir) = dir else {
         return Err(anyhow::anyhow!(
@@ -844,11 +868,9 @@ fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
 const CXX: &str = "/usr/bin/c++";
 const AR: &str = "/usr/bin/ar";
 
-pub(crate) fn record_target(t: AnalyzedTarget) {
-    RESULTS.with_borrow_mut(|r| {
-        r.insert(t.name.clone(), t.clone());
-    });
-    STATE.with_borrow_mut(|s| s.targets.push(t));
+pub(crate) fn record_target(sess: &Session, t: AnalyzedTarget) {
+    sess.results.borrow_mut().insert(t.name.clone(), t.clone());
+    sess.state.borrow_mut().targets.push(t);
 }
 
 /// What a dep contributes to its users: linkable outputs, exported hdrs, exported
@@ -863,20 +885,22 @@ pub(crate) struct DepInfo {
 /// Resolve a dep label to its [`DepInfo`]. In workspace mode a cross-package dep
 /// whose package isn't loaded yet is loaded on demand; otherwise a forward/cross
 /// reference errors clearly.
-pub(crate) fn resolve_dep(label: &str) -> anyhow::Result<DepInfo> {
-    let canon = canon_label(label);
+pub(crate) fn resolve_dep(sess: &Session, label: &str) -> anyhow::Result<DepInfo> {
+    let canon = canon_label(sess, label);
     let get = || {
-        RESULTS.with_borrow(|r| {
-            r.get(&canon)
-                .map(|t| (t.default_info.clone(), t.hdrs.clone(), t.cflags.clone()))
-        })
+        sess.results
+            .borrow()
+            .get(&canon)
+            .map(|t| (t.default_info.clone(), t.hdrs.clone(), t.cflags.clone()))
     };
     let hit = get().or_else(|| {
-        // Workspace mode: pull in the dep's package, then retry.
-        if WORKSPACE.with_borrow(|w| w.is_some())
+        // Workspace mode: pull in the dep's package, then retry. The `get()` borrow is
+        // dropped before `load_package` recurses into a nested eval (the [R1] discipline —
+        // a `results` borrow held across the nested eval would double-borrow-panic).
+        if sess.workspace.is_some()
             && let Some(pkg) = pkg_of(&canon)
         {
-            let _ = load_package(&pkg);
+            let _ = load_package(sess, &pkg);
         }
         get()
     });
@@ -906,14 +930,16 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] defines: Option<UnpackList<String>>,
         #[starlark(require = named)] includes: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
-        let hdrs: Vec<String> = unpack(hdrs).iter().map(|h| qualify(h)).collect();
+        let sess = session(eval);
+        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
+        let hdrs: Vec<String> = unpack(hdrs).iter().map(|h| qualify(sess, h)).collect();
         let copts = unpack(copts);
 
         let (mut dep_names, mut dep_hdrs, mut dep_cflags) = (Vec::new(), Vec::new(), Vec::new());
         for d in &unpack(deps) {
-            let dep = resolve_dep(d)?;
+            let dep = resolve_dep(sess, d)?;
             dep_hdrs.extend(dep.hdrs);
             dep_cflags.extend(dep.cflags);
             dep_names.push(dep.canon);
@@ -921,10 +947,10 @@ fn cc_rules(b: &mut GlobalsBuilder) {
 
         // Exported flags (propagate to dependents): own defines/includes + dep cflags.
         let mut export_cflags = define_flags(defines);
-        export_cflags.extend(include_flags(includes));
+        export_cflags.extend(include_flags(sess, includes));
         export_cflags.extend(dep_cflags);
         // This lib's own compiles see global flags first, then local copts, then exports.
-        let mut compile_flags = GLOBAL.with_borrow(|g| g.copts.clone());
+        let mut compile_flags = sess.global.copts.clone();
         compile_flags.extend(copts);
         compile_flags.extend(export_cflags.iter().cloned());
 
@@ -939,7 +965,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             actions.push(compile_action(s, &o, &compile_flags, inputs));
             objs.push(o);
         }
-        let lib = qualify(&format!("lib{name}.a"));
+        let lib = qualify(sess, &format!("lib{name}.a"));
         let mut ar_argv = vec![AR.into(), "rcs".into(), lib.clone()];
         ar_argv.extend(objs.clone());
         actions.push(AnalyzedAction {
@@ -951,8 +977,8 @@ fn cc_rules(b: &mut GlobalsBuilder) {
 
         let mut export_hdrs = hdrs;
         export_hdrs.extend(dep_hdrs);
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             deps: dep_names,
             actions,
             default_info: vec![lib],
@@ -968,19 +994,21 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
         #[starlark(require = named)] copts: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
+        let sess = session(eval);
+        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
         let (mut dep_names, mut dep_libs, mut dep_hdrs, mut dep_cflags) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for d in &unpack(deps) {
-            let dep = resolve_dep(d)?;
+            let dep = resolve_dep(sess, d)?;
             dep_libs.extend(dep.libs);
             dep_hdrs.extend(dep.hdrs);
             dep_cflags.extend(dep.cflags);
             dep_names.push(dep.canon);
         }
         // Binary compiles see global flags + local copts + the deps' exported flags.
-        let mut compile_flags = GLOBAL.with_borrow(|g| g.copts.clone());
+        let mut compile_flags = sess.global.copts.clone();
         compile_flags.extend(unpack(copts));
         compile_flags.extend(dep_cflags);
 
@@ -992,21 +1020,21 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             actions.push(compile_action(s, &o, &compile_flags, inputs));
             objs.push(o);
         }
-        let out = qualify(&name);
+        let out = qualify(sess, &name);
         let mut link_inputs = objs.clone();
         link_inputs.extend(dep_libs.clone());
         let mut link_argv = vec![CXX.into(), "-o".into(), out.clone()];
         link_argv.extend(objs);
         link_argv.extend(dep_libs);
-        link_argv.extend(GLOBAL.with_borrow(|g| g.linkopts.clone()));
+        link_argv.extend(sess.global.linkopts.clone());
         actions.push(AnalyzedAction {
             mnemonic: "CppLink".into(),
             argv: link_argv,
             inputs: link_inputs,
             outputs: vec![out.clone()],
         });
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             deps: dep_names,
             actions,
             default_info: vec![out],
@@ -1027,10 +1055,10 @@ fn define_flags(defines: Option<UnpackList<String>>) -> Vec<String> {
 }
 
 /// `includes = ["inc"]` → `["-Ipkg/inc"]` (package-qualified include dirs).
-fn include_flags(includes: Option<UnpackList<String>>) -> Vec<String> {
+fn include_flags(sess: &Session, includes: Option<UnpackList<String>>) -> Vec<String> {
     unpack(includes)
         .iter()
-        .map(|i| format!("-I{}", qualify(i)))
+        .map(|i| format!("-I{}", qualify(sess, i)))
         .collect()
 }
 
@@ -1070,9 +1098,9 @@ fn rules_cc_module() -> Result<FrozenModule, String> {
 }
 
 /// Record an analysis-visible target with no actions (a build-graph placeholder).
-fn record_named(name: &str) {
-    record_target(AnalyzedTarget {
-        name: canon_label(name),
+fn record_named(sess: &Session, name: &str) {
+    record_target(sess, AnalyzedTarget {
+        name: canon_label(sess, name),
         ..Default::default()
     });
 }
@@ -1089,71 +1117,81 @@ fn skylib_rules(b: &mut GlobalsBuilder) {
     fn native_bzl_library<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_build_test<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_diff_test<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_string_flag<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_bool_flag<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_int_flag<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_string_list_flag<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_string_setting<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_expand_template<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
     fn native_copy_file<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        record_named(&name);
+        record_named(session(eval), &name);
         Ok(NoneType)
     }
 }
@@ -1223,8 +1261,8 @@ fn auto_config_module(reexport: &str) -> Result<FrozenModule, String> {
 /// `package_name` is the current package and `repository_name` is `@`.
 #[starlark::starlark_module]
 fn native_members(b: &mut GlobalsBuilder) {
-    fn package_name() -> anyhow::Result<String> {
-        Ok(CURRENT_PKG.with_borrow(|p| p.clone()).unwrap_or_default())
+    fn package_name<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
+        Ok(session(eval).current_pkg.borrow().clone().unwrap_or_default())
     }
     fn repository_name() -> anyhow::Result<String> {
         Ok("@".to_string())
@@ -1233,8 +1271,9 @@ fn native_members(b: &mut GlobalsBuilder) {
         #[starlark(require = pos)] include: UnpackList<String>,
         #[starlark(require = named)] exclude: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<String>> {
-        do_glob(include.items, exclude.map(|l| l.items).unwrap_or_default())
+        do_glob(session(eval), include.items, exclude.map(|l| l.items).unwrap_or_default())
     }
 }
 
@@ -1315,14 +1354,14 @@ fn build_globals() -> Globals {
 
 /// Resolve a `.bzl` load label to a file under `root`. `//pkg:f.bzl` → `root/pkg/f.bzl`;
 /// `:f.bzl` → `root/<current pkg>/f.bzl`. External repos other than `@rules_cc` error.
-fn resolve_bzl(root: &Path, label: &str) -> Result<PathBuf, String> {
+fn resolve_bzl(root: &Path, label: &str, current_pkg: Option<&str>) -> Result<PathBuf, String> {
     if let Some(rest) = label.strip_prefix("//") {
         let (pkg, file) = rest
             .split_once(':')
             .ok_or_else(|| format!("bad .bzl label `{label}`"))?;
         Ok(root.join(pkg).join(file))
     } else if let Some(file) = label.strip_prefix(':') {
-        let pkg = CURRENT_PKG.with_borrow(|p| p.clone()).unwrap_or_default();
+        let pkg = current_pkg.unwrap_or_default();
         Ok(root.join(pkg).join(file))
     } else {
         Err(format!(
@@ -1348,6 +1387,7 @@ struct BzlLoader<'a> {
     rulesets: &'a [Ruleset],
     globals: &'a Globals,
     cache: RefCell<HashMap<String, FrozenModule>>,
+    session: &'a Session,
 }
 
 impl FileLoader for BzlLoader<'_> {
@@ -1359,10 +1399,13 @@ impl FileLoader for BzlLoader<'_> {
             return Ok(m.clone());
         }
         let err = |m: String| starlark::Error::new_other(anyhow::anyhow!(m));
-        let root = WORKSPACE
-            .with_borrow(|w| w.clone())
+        let root = self
+            .session
+            .workspace
+            .clone()
             .ok_or_else(|| err(format!("load(\"{path}\") needs workspace mode")))?;
-        let fs = resolve_bzl(&root, path).map_err(err)?;
+        let cur = self.session.current_pkg.borrow().clone();
+        let fs = resolve_bzl(&root, path, cur.as_deref()).map_err(err)?;
         let src = std::fs::read_to_string(&fs)
             .map_err(|e| err(format!("cannot read {}: {e}", fs.display())))?;
 
@@ -1371,6 +1414,7 @@ impl FileLoader for BzlLoader<'_> {
             {
                 let mut eval = Evaluator::new(&module);
                 eval.set_loader(self); // recursive: a .bzl may load other .bzl
+                eval.extra = Some(self.session);
                 eval.eval_module(ast, self.globals)?;
             }
             module
@@ -1425,33 +1469,25 @@ fn ruleset_modules() -> Result<Vec<Ruleset>, String> {
 /// Evaluate one BUILD source with the ruleset loaders + the rule globals.
 /// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
 /// cross-package load appends, never clears).
-fn eval_build_src(name: &str, src: &str) -> Result<(), String> {
+fn eval_build_src(session: &Session, name: &str, src: &str) -> Result<(), String> {
     let rulesets = ruleset_modules()?;
     let globals = build_globals();
     let loader = BzlLoader {
         rulesets: &rulesets,
         globals: &globals,
         cache: RefCell::new(HashMap::new()),
+        session,
     };
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
     Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
+        eval.extra = Some(session); // builtins read the Session via `session(eval)`
         eval.eval_module(ast, &globals)
             .map_err(|e| format!("{e}"))?;
         Ok(())
     })
-}
-
-fn reset_analysis() {
-    STATE.with_borrow_mut(|s| {
-        s.targets.clear();
-        s.current = None;
-    });
-    CONFIGS.with_borrow_mut(|c| c.clear());
-    RESULTS.with_borrow_mut(|r| r.clear());
-    LOADED.with_borrow_mut(|l| l.clear());
 }
 
 /// Evaluate a **real Bazel `BUILD`** that `load()`s cc rules from `@rules_cc`,
@@ -1467,27 +1503,21 @@ pub fn analyze_bazel_with(
     build_src: &str,
     flags: GlobalFlags,
 ) -> Result<Vec<AnalyzedTarget>, String> {
-    reset_analysis();
-    CURRENT_PKG.with_borrow_mut(|p| *p = None);
-    WORKSPACE.with_borrow_mut(|w| *w = None);
-    GLOBAL.with_borrow_mut(|g| *g = flags);
-    let res = eval_build_src("BUILD", build_src);
-    GLOBAL.with_borrow_mut(|g| *g = GlobalFlags::default());
-    res?;
-    Ok(STATE.with_borrow_mut(|s| std::mem::take(&mut s.targets)))
+    let session = Session::new(None, flags);
+    eval_build_src(&session, "BUILD", build_src)?;
+    Ok(session.take_targets())
 }
 
 /// Load a package's BUILD (once) under workspace mode, evaluating it with that
 /// package as context. Cross-package deps trigger further loads via `resolve_dep`.
-fn load_package(pkg: &str) -> Result<(), String> {
-    if LOADED.with_borrow(|l| l.contains(pkg)) {
+fn load_package(sess: &Session, pkg: &str) -> Result<(), String> {
+    if sess.loaded.borrow().contains(pkg) {
         return Ok(());
     }
-    LOADED.with_borrow_mut(|l| {
-        l.insert(pkg.to_string());
-    });
-    let root = WORKSPACE
-        .with_borrow(|w| w.clone())
+    sess.loaded.borrow_mut().insert(pkg.to_string());
+    let root = sess
+        .workspace
+        .clone()
         .ok_or("load_package called outside workspace mode")?;
     let build_path = ["BUILD", "BUILD.bazel"]
         .iter()
@@ -1496,9 +1526,11 @@ fn load_package(pkg: &str) -> Result<(), String> {
         .ok_or_else(|| format!("no BUILD in package `{pkg}` ({})", root.join(pkg).display()))?;
     let src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
 
-    let prev = CURRENT_PKG.with_borrow_mut(|p| p.replace(pkg.to_string()));
-    let res = eval_build_src(&format!("{pkg}/BUILD"), &src);
-    CURRENT_PKG.with_borrow_mut(|p| *p = prev);
+    // Short borrows around the nested eval (the [R1] discipline): set current_pkg, drop the
+    // borrow, recurse, then restore — never hold a Session borrow across `eval_build_src`.
+    let prev = sess.current_pkg.borrow_mut().replace(pkg.to_string());
+    let res = eval_build_src(sess, &format!("{pkg}/BUILD"), &src);
+    *sess.current_pkg.borrow_mut() = prev;
     res
 }
 
@@ -1515,28 +1547,17 @@ pub fn analyze_workspace_with(
     top_label: &str,
     flags: GlobalFlags,
 ) -> Result<Vec<AnalyzedTarget>, String> {
-    reset_analysis();
-    WORKSPACE.with_borrow_mut(|w| *w = Some(root.to_path_buf()));
-    GLOBAL.with_borrow_mut(|g| *g = flags);
-    let top_pkg = pkg_of(&canon_label(top_label))
+    let session = Session::new(Some(root.to_path_buf()), flags);
+    let top_pkg = pkg_of(&canon_label(&session, top_label))
         .ok_or_else(|| format!("top label must be //pkg:name, got `{top_label}`"))?;
-    let res = load_package(&top_pkg);
-    WORKSPACE.with_borrow_mut(|w| *w = None);
-    CURRENT_PKG.with_borrow_mut(|p| *p = None);
-    GLOBAL.with_borrow_mut(|g| *g = GlobalFlags::default());
-    res?;
-    Ok(STATE.with_borrow_mut(|s| std::mem::take(&mut s.targets)))
+    load_package(&session, &top_pkg)?;
+    Ok(session.take_targets())
 }
 
 /// Evaluate a `BUILD`/`.bzl` that defines and instantiates Starlark rules, running each
 /// rule impl (same-scope analysis); returns the analyzed targets.
 pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, String> {
-    STATE.with_borrow_mut(|s| {
-        s.targets.clear();
-        s.current = None;
-    });
-    CONFIGS.with_borrow_mut(|c| c.clear());
-    RESULTS.with_borrow_mut(|r| r.clear());
+    let session = Session::default();
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
     let globals = GlobalsBuilder::extended_by(&[
@@ -1552,12 +1573,13 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
     .build();
     let res: Result<(), String> = Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
+        eval.extra = Some(&session);
         eval.eval_module(ast, &globals)
             .map_err(|e| format!("{e}"))?;
         Ok(())
     });
     res?;
-    Ok(STATE.with_borrow_mut(|s| std::mem::take(&mut s.targets)))
+    Ok(session.take_targets())
 }
 
 #[cfg(test)]

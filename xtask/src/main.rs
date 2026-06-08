@@ -140,11 +140,10 @@ const BANNED: &[(&str, &str)] = &[
     ("thread_local!", "ambient state — pass the Analysis/DDS handle instead (AD2)"),
     ("static mut", "ambient mutable state (AD2)"),
 ];
-// Visible debt: thread-locals slated for Phase-1.5 removal (→ the passed Session/DDS). Shrinks
-// as Phase 1 proceeds; new files must NOT be added here. (lib.rs's CTX was removed in 1.2.)
-const GATE_ALLOWLIST: &[&str] = &[
-    "crates/razel-loading/src/rules.rs",
-];
+// AD2 is now FULLY ENFORCED — no ambient state anywhere in crates/. Phase 1.5 emptied this:
+// razel-loading's last 7 thread-locals (STATE/RESULTS/CONFIGS/WORKSPACE/CURRENT_PKG/LOADED/
+// GLOBAL) became fields of the passed `Session`. Nothing may ever be added here again.
+const GATE_ALLOWLIST: &[&str] = &[];
 
 struct GateViolation {
     path: String,
@@ -199,7 +198,7 @@ fn gates() -> ExitCode {
     }
     if violations.is_empty() {
         eprintln!(
-            "xtask gates: OK — no ambient state (thread_local!/static mut) in crates/ outside the Phase-1 allowlist"
+            "xtask gates: OK — no ambient state (thread_local!/static mut) anywhere in crates/ (AD2 fully enforced)"
         );
         return ExitCode::SUCCESS;
     }
@@ -237,12 +236,13 @@ mod gate_tests {
     }
 
     #[test]
-    fn allowlists_phase1_debt() {
+    fn no_file_is_exempt_now() {
+        // Phase 1.5 emptied the allowlist — even the loading crate is now subject to the ban.
         let v = gate_violations(
             "crates/razel-loading/src/rules.rs",
             "thread_local! { static S: () = (); }",
         );
-        assert!(v.is_empty(), "Phase-1 allowlisted file must not trip the gate");
+        assert_eq!(v.len(), 1, "AD2 fully enforced: no file is exempt from the ambient-state ban");
     }
 
     #[test]

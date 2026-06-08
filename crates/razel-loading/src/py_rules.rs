@@ -11,7 +11,8 @@
 //! `rules::cc_rules`.
 
 use crate::rules::{
-    AnalyzedAction, AnalyzedTarget, canon_label, qualify, record_target, resolve_dep, unpack,
+    AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, record_target, resolve_dep,
+    session, unpack,
 };
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
@@ -36,13 +37,14 @@ struct PySources {
 /// Qualify this target's `srcs` and resolve `deps` to their exported source files
 /// (which flow transitively through `DepInfo.hdrs`).
 fn gather(
+    sess: &Session,
     srcs: Option<UnpackList<String>>,
     deps: Option<UnpackList<String>>,
 ) -> anyhow::Result<PySources> {
-    let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(s)).collect();
+    let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
     let (mut dep_srcs, mut dep_names) = (Vec::new(), Vec::new());
     for d in &unpack(deps) {
-        let dep = resolve_dep(d)?;
+        let dep = resolve_dep(sess, d)?;
         dep_srcs.extend(dep.hdrs);
         dep_names.push(dep.canon);
     }
@@ -68,13 +70,15 @@ fn py_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] srcs: Option<UnpackList<String>>,
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let g = gather(srcs, deps)?;
+        let sess = session(eval);
+        let g = gather(sess, srcs, deps)?;
         // Exported sources: own srcs + transitive dep srcs (the `hdrs` channel).
         let mut exported = g.srcs.clone();
         exported.extend(g.dep_srcs);
-        record_target(AnalyzedTarget {
-            name: canon_label(&name),
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
             deps: g.dep_names,
             actions: Vec::new(),
             default_info: g.srcs,
@@ -95,8 +99,9 @@ fn py_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
         #[starlark(require = named)] main: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        py_executable(name, srcs, deps, main)
+        py_executable(session(eval), name, srcs, deps, main)
     }
 
     /// `py_test(...)` — same launcher mechanism as `py_binary`.
@@ -106,22 +111,24 @@ fn py_rules(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] deps: Option<UnpackList<String>>,
         #[starlark(require = named)] main: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        py_executable(name, srcs, deps, main)
+        py_executable(session(eval), name, srcs, deps, main)
     }
 }
 
 /// Shared body of `py_binary`/`py_test`: build the launcher target.
 fn py_executable(
+    sess: &Session,
     name: String,
     srcs: Option<UnpackList<String>>,
     deps: Option<UnpackList<String>>,
     main: Option<String>,
 ) -> anyhow::Result<NoneType> {
-    let g = gather(srcs, deps)?;
+    let g = gather(sess, srcs, deps)?;
     // Entrypoint: `main` (package-qualified) or the first src (already qualified).
     let entry = match main {
-        Some(m) => qualify(&m),
+        Some(m) => qualify(sess, &m),
         None => g
             .srcs
             .first()
@@ -129,7 +136,7 @@ fn py_executable(
             .ok_or_else(|| anyhow::anyhow!("py_binary `{name}` has no srcs and no main"))?,
     };
 
-    let out = qualify(&name);
+    let out = qualify(sess, &name);
     // Depth of the launcher's package → how many `../` to climb back to the exec root.
     // `out` is `pkg/.../name`; the exec root is that many parents up from the launcher.
     let depth = out.matches('/').count();
@@ -162,8 +169,8 @@ fn py_executable(
         inputs,
         outputs: vec![out.clone()],
     };
-    record_target(AnalyzedTarget {
-        name: canon_label(&name),
+    record_target(sess, AnalyzedTarget {
+        name: canon_label(sess, &name),
         deps: g.dep_names,
         actions: vec![action],
         default_info: vec![out],

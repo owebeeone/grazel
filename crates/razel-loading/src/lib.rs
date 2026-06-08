@@ -17,7 +17,7 @@ mod rust_rules;
 mod sh_rules;
 pub use rules::{
     AnalyzedAction, AnalyzedTarget, GlobalFlags, analyze_bazel, analyze_bazel_with,
-    analyze_starlark, analyze_workspace, analyze_workspace_with, registered_configs,
+    analyze_starlark, analyze_workspace, analyze_workspace_with,
 };
 
 /// Match a `glob` pattern against a path. Supports `*` (within a segment) and `**`
