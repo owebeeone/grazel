@@ -170,6 +170,13 @@ pub fn cc_archive_argv(config: &FeatureConfig, inputs: &ArchiveInputs) -> Vec<St
     config.full_command_line(&config.select(&[]), "c++-link-static-library", &vars)
 }
 
+/// The ported macOS cc toolchain config (core compile + archive features), parsed from the
+/// embedded fixture. The accessor the loader + parity runner use to drive `Constrain`. (When
+/// host-value ingestion lands, this takes the detected flag lists + SDK instead of the fixture's.)
+pub fn macos_core_config() -> Result<FeatureConfig, String> {
+    parse_feature_config(include_str!("../fixtures/cc_macos_core.bzl"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,7 +240,7 @@ CONFIG = struct(
         // Constrain, reproduces the ENTIRE captured CppCompile argv — including the host-specific
         // -frandom-seed / -mmacosx-version-min (here fed by the output_file / minimum_os_version
         // variables). (-mmacosx-version-min=26.4 normalizes to <sdk> at parity-diff time.)
-        let cfg = parse_feature_config(include_str!("../fixtures/cc_macos_core.bzl")).unwrap();
+        let cfg = macos_core_config().unwrap();
         let argv = cc_compile_argv(&cfg, &CompileInputs {
             source_file: "util.cc".into(),
             output_file: "util.o".into(),
@@ -280,7 +287,7 @@ CONFIG = struct(
     #[test]
     fn ported_macos_config_reproduces_the_archive_argv() {
         // The static-archive action: only `archiver_flags` fires (action filter), tool = libtool.
-        let cfg = parse_feature_config(include_str!("../fixtures/cc_macos_core.bzl")).unwrap();
+        let cfg = macos_core_config().unwrap();
         let argv = cc_archive_argv(&cfg, &ArchiveInputs {
             output_execpath: "libutil.a".into(),
             libraries_to_link: vec!["util.o".into()],
