@@ -39,6 +39,9 @@ pub fn normalize(raw: &str) -> String {
         s = normalize_segment(&s, "external/", "<repo>");
         // Host SDK version (macOS) — machine-specific, must be placeholdered.
         s = replace_value(&s, "-mmacosx-version-min=", "<sdk>");
+        // rules_rust per-crate metadata hash (`-` + 6+ digits) — a content hash razel can't
+        // reproduce, so host-volatile like the SDK (`libutil-12716653.rlib`, `metadata=-12716653`).
+        s = normalize_rust_hash(&s);
         out.push_str(&s);
         out.push('\n');
     }
@@ -89,6 +92,30 @@ fn replace_value(s: &str, key: &str, placeholder: &str) -> String {
     result
 }
 
+/// Replace every `-` + 6-or-more decimal digits with `-<hash>` — rules_rust's per-crate metadata
+/// hash (`libutil-12716653.rlib`, `--codegen=metadata=-12716653`, `--extern=base=…-791554189.rlib`).
+/// Razel can't reproduce Bazel's content hash, so it's normalized like a host value. Hex
+/// toolchain-lib hashes have letters → not matched (they live only in inputs). Idempotent
+/// (`<hash>` has no digits).
+fn normalize_rust_hash(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '-' {
+            let ndigits = s[i + 1..].chars().take_while(char::is_ascii_digit).count();
+            if ndigits >= 6 {
+                result.push_str("-<hash>");
+                for _ in 0..ndigits {
+                    chars.next();
+                }
+                continue;
+            }
+        }
+        result.push(c);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,8 +161,23 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_rust_metadata_hash() {
+        assert_eq!(
+            normalize("    '--codegen=metadata=-12716653' \\"),
+            "    '--codegen=metadata=-<hash>' \\\n"
+        );
+        // Combined with the <cfg> segment normalization on an rlib output path.
+        assert_eq!(
+            normalize("  Outputs: [bazel-out/c/bin/libutil-12716653.rlib]"),
+            "  Outputs: [bazel-out/<cfg>/bin/libutil-<hash>.rlib]\n"
+        );
+        // Short digit runs (opt-level, the cc date defines) are untouched.
+        assert_eq!(normalize("    '--codegen=opt-level=0'"), "    '--codegen=opt-level=0'\n");
+    }
+
+    #[test]
     fn idempotent() {
-        let raw = "  Outputs: [bazel-out/c/bin/x]\n  Inputs: [external/r/y]\n  '-mmacosx-version-min=26.4'";
+        let raw = "  Outputs: [bazel-out/c/bin/libx-12716653.rlib]\n  Inputs: [external/r/y]\n  '-mmacosx-version-min=26.4'\n    '--codegen=metadata=-791554189'";
         let once = normalize(raw);
         assert_eq!(normalize(&once), once, "normalization must be idempotent");
     }

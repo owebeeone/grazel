@@ -4,3 +4,10 @@ module(name = "razel_parity_corpus", version = "0.0")
 # This workspace exists ONLY so `cargo xtask capture-goldens` can run `bazel aquery`/`cquery`
 # over the corpus; it is dev/authoring-only — the test suite never touches bazel.
 bazel_dep(name = "rules_cc", version = "0.1.1")
+bazel_dep(name = "rules_rust", version = "0.70.0")
+
+# Rust toolchain for golden capture (fetched on demand; dev/authoring-only, like the rest).
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(edition = "2021")
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
