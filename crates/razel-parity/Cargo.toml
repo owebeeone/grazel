@@ -1,0 +1,10 @@
+[package]
+name = "razel-parity"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Golden compat-testing support (RazelParityHarness.md): the SHARED normalization used by
+# the `capture-goldens` xtask (authoring) and — later — the hermetic test runner. Pure std,
+# no deps: deterministic + offline.
+[dependencies]
