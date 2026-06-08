@@ -10,7 +10,7 @@
 //! is the next slice — the extraction below is the same.
 
 use razel_rulepack::constrain::{
-    ActionConfig, Feature, FeatureConfig, FlagGroup, FlagSet, Tool, WithFeatures,
+    ActionConfig, Feature, FeatureConfig, FlagGroup, FlagSet, Tool, VarValue, Vars, WithFeatures,
 };
 use starlark::environment::{GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
@@ -126,10 +126,53 @@ fn action_config<'v>(v: Value<'v>, heap: Heap<'v>) -> ActionConfig {
     }
 }
 
+/// The variables a cc **compile** action provides — fed by the §8b propagation queries (include
+/// paths) + the target's attrs + host params (the SDK).
+#[derive(Debug, Clone, Default)]
+pub struct CompileInputs {
+    pub source_file: String,
+    pub output_file: String,
+    pub dependency_file: String,
+    pub quote_include_paths: Vec<String>,
+    pub minimum_os_version: String,
+}
+
+/// Build the `CppCompile` argv via [`Constrain`](razel_rulepack::constrain) over the toolchain
+/// `config` + the action's inputs — the §8c **actions UDF** for cc. The loader calls this with
+/// an analyzed target's data; the result is the action's command line.
+pub fn cc_compile_argv(config: &FeatureConfig, inputs: &CompileInputs) -> Vec<String> {
+    let vars = Vars::from([
+        ("source_file".to_string(), VarValue::Scalar(inputs.source_file.clone())),
+        ("output_file".to_string(), VarValue::Scalar(inputs.output_file.clone())),
+        ("dependency_file".to_string(), VarValue::Scalar(inputs.dependency_file.clone())),
+        ("minimum_os_version".to_string(), VarValue::Scalar(inputs.minimum_os_version.clone())),
+        (
+            "quote_include_paths".to_string(),
+            VarValue::Sequence(inputs.quote_include_paths.clone()),
+        ),
+    ]);
+    config.full_command_line(&config.select(&[]), "c++-compile", &vars)
+}
+
+/// The variables a cc **static-archive** action provides.
+#[derive(Debug, Clone, Default)]
+pub struct ArchiveInputs {
+    pub output_execpath: String,
+    pub libraries_to_link: Vec<String>,
+}
+
+/// Build the `CppArchive` argv via `Constrain` — the §8c actions UDF for the static archive.
+pub fn cc_archive_argv(config: &FeatureConfig, inputs: &ArchiveInputs) -> Vec<String> {
+    let vars = Vars::from([
+        ("output_execpath".to_string(), VarValue::Scalar(inputs.output_execpath.clone())),
+        ("libraries_to_link".to_string(), VarValue::Sequence(inputs.libraries_to_link.clone())),
+    ]);
+    config.full_command_line(&config.select(&[]), "c++-link-static-library", &vars)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use razel_rulepack::constrain::{VarValue, Vars};
 
     const CFG: &str = r#"
 def flag_group(flags = [], iterate_over = None, expand_if_available = None):
@@ -191,17 +234,13 @@ CONFIG = struct(
         // -frandom-seed / -mmacosx-version-min (here fed by the output_file / minimum_os_version
         // variables). (-mmacosx-version-min=26.4 normalizes to <sdk> at parity-diff time.)
         let cfg = parse_feature_config(include_str!("../fixtures/cc_macos_core.bzl")).unwrap();
-        let vars = Vars::from([
-            ("source_file".into(), VarValue::Scalar("util.cc".into())),
-            ("output_file".into(), VarValue::Scalar("util.o".into())),
-            ("dependency_file".into(), VarValue::Scalar("util.d".into())),
-            ("minimum_os_version".into(), VarValue::Scalar("26.4".into())),
-            (
-                "quote_include_paths".into(),
-                VarValue::Sequence(vec![".".into(), "bazel-out/<cfg>/bin".into()]),
-            ),
-        ]);
-        let argv = cfg.full_command_line(&cfg.select(&[]), "c++-compile", &vars);
+        let argv = cc_compile_argv(&cfg, &CompileInputs {
+            source_file: "util.cc".into(),
+            output_file: "util.o".into(),
+            dependency_file: "util.d".into(),
+            minimum_os_version: "26.4".into(),
+            quote_include_paths: vec![".".into(), "bazel-out/<cfg>/bin".into()],
+        });
         assert_eq!(
             argv,
             vec![
@@ -242,11 +281,10 @@ CONFIG = struct(
     fn ported_macos_config_reproduces_the_archive_argv() {
         // The static-archive action: only `archiver_flags` fires (action filter), tool = libtool.
         let cfg = parse_feature_config(include_str!("../fixtures/cc_macos_core.bzl")).unwrap();
-        let vars = Vars::from([
-            ("output_execpath".into(), VarValue::Scalar("libutil.a".into())),
-            ("libraries_to_link".into(), VarValue::Sequence(vec!["util.o".into()])),
-        ]);
-        let argv = cfg.full_command_line(&cfg.select(&[]), "c++-link-static-library", &vars);
+        let argv = cc_archive_argv(&cfg, &ArchiveInputs {
+            output_execpath: "libutil.a".into(),
+            libraries_to_link: vec!["util.o".into()],
+        });
         assert_eq!(
             argv,
             ["/usr/bin/libtool", "-D", "-no_warning_for_no_symbols", "-static", "-o", "libutil.a", "util.o"]
