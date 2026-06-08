@@ -19,7 +19,9 @@ use starlark::values::list::ListRef;
 use starlark::values::{Heap, Value};
 
 pub mod derive;
+pub mod rust;
 pub use derive::{DeclaredAction, derive_cc_library_actions};
+pub use rust::derive_rust_library_action;
 
 /// Evaluate a Starlark cc toolchain config into a [`FeatureConfig`]. The source must define a
 /// top-level `CONFIG = struct(features = [...], action_configs = [...])`, with each feature /
