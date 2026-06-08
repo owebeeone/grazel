@@ -7,6 +7,8 @@
 //! (§8c — the `Args` invocation builder), matchers (§8d), and capability declaration (§8e)
 //! are reserved for later slices.
 
+pub mod constrain;
+
 use razel_dds::{
     Dds, DdsRead, FieldId, FieldKind, FieldValue, ProviderSchema, ProviderTypeId, Scalar, TargetKey,
 };
