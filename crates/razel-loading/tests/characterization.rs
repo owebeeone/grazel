@@ -140,3 +140,36 @@ cc_library(name = "greet", srcs = ["greet.cc"], hdrs = ["greet.h"])
     let o = argv.iter().position(|x| x == "-o").unwrap();
     assert_eq!(argv[o + 1], output);
 }
+
+/// Parity (source-level inputs): razel's transitive-header propagation produces the same source
+/// inputs (sources + own + transitive-dep headers) as Bazel's `CppCompile`, reduced to the
+/// build-relevant set. Bazel additionally lists generated `.cppmap`s and `external/` toolchain
+/// inputs (modules + sandbox detail) and a package prefix — razel's simpler model omits those.
+#[test]
+fn cc_compile_source_inputs_match_the_golden() {
+    let corpus = r#"
+load("@rules_cc//cc:defs.bzl", "cc_library")
+cc_library(name = "base", srcs = ["base.cc"], hdrs = ["base.h"])
+cc_library(name = "util", srcs = ["util.cc"], hdrs = ["util.h"], deps = [":base"])
+"#;
+    let targets = analyze_bazel(corpus).unwrap();
+    let util = targets.iter().find(|t| t.name == "util").unwrap();
+    let compile = util.actions.iter().find(|a| a.mnemonic == "CppCompile").unwrap();
+    let mut razel = compile.inputs.clone();
+    razel.sort();
+
+    // The golden's util CppCompile inputs, reduced to source-level: keep package-relative paths,
+    // drop generated `.cppmap`s + `external/` toolchain inputs, strip the package prefix.
+    let golden = include_str!("../../../parity/corpus/cc/transitive/golden.txt");
+    let block = &golden[golden.find("Compiling corpus/cc/transitive/util.cc").unwrap()..];
+    let line = &block[block.find("Inputs: [").unwrap() + "Inputs: [".len()..];
+    let pkg = "corpus/cc/transitive/";
+    let mut golden_src: Vec<String> = line[..line.find(']').unwrap()]
+        .split(", ")
+        .filter(|t| t.starts_with(pkg) && !t.ends_with(".cppmap"))
+        .map(|t| t[pkg.len()..].to_string())
+        .collect();
+    golden_src.sort();
+
+    assert_eq!(razel, golden_src); // {base.h, util.cc, util.h}
+}
