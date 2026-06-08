@@ -140,10 +140,9 @@ const BANNED: &[(&str, &str)] = &[
     ("thread_local!", "ambient state — pass the Analysis/DDS handle instead (AD2)"),
     ("static mut", "ambient mutable state (AD2)"),
 ];
-// Visible debt: existing violations slated for Phase-1 removal (the 8 thread-locals → the
-// passed Session/DDS, + the dead second loader's CTX). New files must NOT be added here.
+// Visible debt: thread-locals slated for Phase-1.5 removal (→ the passed Session/DDS). Shrinks
+// as Phase 1 proceeds; new files must NOT be added here. (lib.rs's CTX was removed in 1.2.)
 const GATE_ALLOWLIST: &[&str] = &[
-    "crates/razel-loading/src/lib.rs",
     "crates/razel-loading/src/rules.rs",
 ];
 
