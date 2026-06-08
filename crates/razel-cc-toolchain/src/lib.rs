@@ -185,15 +185,17 @@ CONFIG = struct(
     }
 
     #[test]
-    fn ported_macos_config_reproduces_the_golden_compile_argv_core() {
+    fn ported_macos_config_reproduces_the_full_golden_compile_argv() {
         // The ported real-structure config + real cc_configure flags, evaluated + run through
-        // Constrain, reproduces the captured CppCompile argv — minus the two host-specific
-        // features (-frandom-seed=<path>, -mmacosx-version-min=<sdk>) parameterized separately.
+        // Constrain, reproduces the ENTIRE captured CppCompile argv — including the host-specific
+        // -frandom-seed / -mmacosx-version-min (here fed by the output_file / minimum_os_version
+        // variables). (-mmacosx-version-min=26.4 normalizes to <sdk> at parity-diff time.)
         let cfg = parse_feature_config(include_str!("../fixtures/cc_macos_core.bzl")).unwrap();
         let vars = Vars::from([
             ("source_file".into(), VarValue::Scalar("util.cc".into())),
             ("output_file".into(), VarValue::Scalar("util.o".into())),
             ("dependency_file".into(), VarValue::Scalar("util.d".into())),
+            ("minimum_os_version".into(), VarValue::Scalar("26.4".into())),
             (
                 "quote_include_paths".into(),
                 VarValue::Sequence(vec![".".into(), "bazel-out/<cfg>/bin".into()]),
@@ -214,6 +216,8 @@ CONFIG = struct(
                 "-fcolor-diagnostics",
                 "-fno-omit-frame-pointer",
                 "-std=c++17",
+                "-frandom-seed=util.o",
+                "-mmacosx-version-min=26.4",
                 "-MD",
                 "-MF",
                 "util.d",

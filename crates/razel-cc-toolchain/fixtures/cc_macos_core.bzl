@@ -3,9 +3,10 @@
 # structure is a one-time port of the (stable) upstream template; the flag VALUES are the real
 # cc_configure-detected lists (compile_flags / cxx_flags / unfiltered_compile_flags), verbatim.
 #
-# Reproduces the deterministic core of the captured CppCompile argv. The two host-specific
-# features omitted here (random_seed `-frandom-seed=`, macos_minimum_os `-mmacosx-version-min=`)
-# are parameterized separately (host params; BazelCcCommandLine.md §"externalize").
+# Reproduces the FULL captured CppCompile argv. The two host-specific features (random_seed,
+# macos_minimum_os) are included but parameterized — their values flow from variables
+# (`%{output_file}`, `%{minimum_os_version}`) supplied per host, not detected here
+# (BazelCcCommandLine.md §"externalize").
 
 def flag_group(flags = [], iterate_over = None, expand_if_available = None):
     return struct(flags = flags, iterate_over = iterate_over, expand_if_available = expand_if_available)
@@ -41,6 +42,17 @@ CONFIG = struct(
             ])]),
             # cc_configure-detected `cxx_flags` (c++ actions):
             flag_set(actions = CC, flag_groups = [flag_group(flags = ["-std=c++17"])]),
+        ]),
+        # Host-specific (parameterized via variables — values supplied per host, not detected here):
+        feature(name = "random_seed", enabled = True, flag_sets = [
+            flag_set(actions = CC, flag_groups = [
+                flag_group(flags = ["-frandom-seed=%{output_file}"], expand_if_available = "output_file"),
+            ]),
+        ]),
+        feature(name = "macos_minimum_os", enabled = True, flag_sets = [
+            flag_set(actions = CC, flag_groups = [
+                flag_group(flags = ["-mmacosx-version-min=%{minimum_os_version}"], expand_if_available = "minimum_os_version"),
+            ]),
         ]),
         feature(name = "dependency_file", enabled = True, flag_sets = [
             flag_set(actions = CC, flag_groups = [
