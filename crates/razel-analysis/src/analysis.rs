@@ -4,7 +4,8 @@
 //! consumed by `razel-build`. (Phase 1 removed the dead parallel `analyze`/`TargetDecl`/
 //! `Depset<T>` pipeline — it had no live callers; the live path never used it.)
 
-use razel_core::{ActionId, Digest, FileId, NodeRef, TargetId};
+use razel_core::{ActionId, Digest, FileId, Label, NodeRef, TargetId};
+use razel_dds::{Dds, FieldId, FieldValue, InstanceId, Provider, ProviderTypeId, Scalar, TargetKey};
 use razel_ir::{ActionNode, FileKind, FileNode, Graph, TargetKind, TargetNode};
 
 /// Infer a coarse target kind from the target name's suffix (the dialect convention:
@@ -66,6 +67,49 @@ pub fn wire_to_ir(package: &str, targets: &[razel_loading::AnalyzedTarget]) -> G
     g
 }
 
+/// Assemble the analyzed targets' providers into a [`Dds`] (the assembler step — §0): each
+/// target contributes a `DefaultInfo` (its output `files`); a cc target (one that exports
+/// `hdrs`/`cflags`) also contributes a `CcInfo`. String members are Set-valued (the V1 algebra;
+/// ordered link semantics are the reserved `OrderedDepset`). This is `Session.results`
+/// graduating into typed DDS facts — the spine going load-bearing on the live path.
+pub fn wire_to_dds(
+    targets: &[razel_loading::AnalyzedTarget],
+    instance: InstanceId,
+) -> Result<Dds, String> {
+    let mut dds = Dds::new();
+    for t in targets {
+        // Single-package mode yields bare names (not canonical); root-package them as `//:name`.
+        let label = Label::parse_canonical(&t.name)
+            .or_else(|_| Label::parse_canonical(&format!("//:{}", t.name)))
+            .map_err(|e| format!("{e}"))?;
+        let key = TargetKey::new(instance, label);
+
+        dds.assert(
+            key.clone(),
+            ProviderTypeId::new("DefaultInfo"),
+            Provider::new().with(FieldId::new("files"), str_set(&t.default_info)),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+
+        if !t.hdrs.is_empty() || !t.cflags.is_empty() {
+            dds.assert(
+                key,
+                ProviderTypeId::new("CcInfo"),
+                Provider::new()
+                    .with(FieldId::new("hdrs"), str_set(&t.hdrs))
+                    .with(FieldId::new("cflags"), str_set(&t.cflags)),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        }
+    }
+    Ok(dds)
+}
+
+/// A `Set`-valued field of string scalars (the V1 set-valued provider field).
+fn str_set(xs: &[String]) -> FieldValue {
+    FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.clone())).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +131,24 @@ cc_thing(name = "widget", src = "widget.c")
         // Editing the rule's input affects its target, through the wired IR.
         let (_tests, deliverables) = g.impacted_targets(&FileId::new("pkg/widget.c"));
         assert!(deliverables.contains(&TargetId::new("//pkg:widget")));
+    }
+
+    #[test]
+    fn wire_to_dds_captures_cc_providers() {
+        use razel_dds::DdsRead;
+        let src = r#"
+load("@rules_cc//cc:defs.bzl", "cc_library")
+cc_library(name = "greet", srcs = ["greet.cc"], hdrs = ["greet.h"])
+"#;
+        let targets = razel_loading::analyze_bazel(src).unwrap();
+        let dds = wire_to_dds(&targets, InstanceId::SINGLE).unwrap();
+        let key = TargetKey::new(InstanceId::SINGLE, Label::parse_canonical("//:greet").unwrap());
+
+        let want_set = |x: &str| FieldValue::Set([Scalar::Str(x.to_string())].into_iter().collect());
+        // DefaultInfo.files = the archive; CcInfo.hdrs = the exported header.
+        let di = dds.provider(&key, &ProviderTypeId::new("DefaultInfo")).unwrap();
+        assert_eq!(di.get(&FieldId::new("files")), Some(&want_set("libgreet.a")));
+        let cc = dds.provider(&key, &ProviderTypeId::new("CcInfo")).unwrap();
+        assert_eq!(cc.get(&FieldId::new("hdrs")), Some(&want_set("greet.h")));
     }
 }

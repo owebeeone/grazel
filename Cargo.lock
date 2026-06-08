@@ -1179,6 +1179,7 @@ name = "razel-analysis"
 version = "0.1.0"
 dependencies = [
  "razel-core",
+ "razel-dds",
  "razel-ir",
  "razel-loading",
 ]
