@@ -251,7 +251,7 @@ CONFIG = struct(
         assert_eq!(
             argv,
             vec![
-                "cc_wrapper.sh",
+                "external/<repo>/cc_wrapper.sh",
                 "-U_FORTIFY_SOURCE",
                 "-fstack-protector",
                 "-Wall",
@@ -296,5 +296,44 @@ CONFIG = struct(
             argv,
             ["/usr/bin/libtool", "-D", "-no_warning_for_no_symbols", "-static", "-o", "libutil.a", "util.o"]
         );
+    }
+
+    /// Parse the `Command Line: (exec … )` of the golden action whose header contains `header`
+    /// into argv tokens (drop `\` continuations; strip the single-quotes Bazel adds).
+    fn golden_argv(golden: &str, header: &str) -> Vec<String> {
+        let block = &golden[golden.find(&format!("action '{header}")).expect("action")..];
+        let after = &block[block.find("Command Line: (exec ").expect("cmdline")
+            + "Command Line: (exec ".len()..];
+        let end = after.find(')').unwrap_or(after.len());
+        after[..end]
+            .split_whitespace()
+            .filter(|t| *t != "\\")
+            .map(|t| t.trim_matches('\'').to_string())
+            .collect()
+    }
+
+    #[test]
+    fn parity_constrain_reproduces_the_real_golden_command_lines() {
+        // THE parity check: §8c, fed the golden's variables, reproduces Bazel's ACTUAL captured
+        // command lines (parsed from golden.txt) — both compile and archive, byte-for-byte.
+        let golden = include_str!("../../../parity/corpus/cc/transitive/golden.txt");
+        let cfg = macos_core_config().unwrap();
+
+        let compile = cc_compile_argv(&cfg, &CompileInputs {
+            source_file: "corpus/cc/transitive/util.cc".into(),
+            output_file: "bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o".into(),
+            dependency_file: "bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.d".into(),
+            minimum_os_version: "<sdk>".into(),
+            quote_include_paths: vec![".".into(), "bazel-out/<cfg>/bin".into()],
+        });
+        assert_eq!(compile, golden_argv(golden, "Compiling corpus/cc/transitive/util.cc"));
+
+        let archive = cc_archive_argv(&cfg, &ArchiveInputs {
+            output_execpath: "bazel-out/<cfg>/bin/corpus/cc/transitive/libutil.a".into(),
+            libraries_to_link: vec![
+                "bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o".into(),
+            ],
+        });
+        assert_eq!(archive, golden_argv(golden, "Linking corpus/cc/transitive/libutil.a"));
     }
 }

@@ -91,7 +91,7 @@ CONFIG = struct(
         ]),
     ],
     action_configs = [
-        action_config(action_name = "c++-compile", tools = [tool(path = "cc_wrapper.sh")]),
+        action_config(action_name = "c++-compile", tools = [tool(path = "external/<repo>/cc_wrapper.sh")]),
         action_config(action_name = "c++-link-static-library", tools = [tool(path = "/usr/bin/libtool")]),
     ],
 )

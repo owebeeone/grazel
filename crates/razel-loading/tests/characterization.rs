@@ -129,7 +129,7 @@ cc_library(name = "greet", srcs = ["greet.cc"], hdrs = ["greet.h"])
     );
 
     // Bazel-faithful flags, from razel's real analyzed data:
-    assert_eq!(argv[0], "cc_wrapper.sh");
+    assert_eq!(argv[0], "external/<repo>/cc_wrapper.sh");
     assert!(argv.contains(&"-fstack-protector".to_string()));
     assert!(argv.contains(&"-std=c++17".to_string()));
     assert!(argv.contains(&"-mmacosx-version-min=26.4".to_string()));
