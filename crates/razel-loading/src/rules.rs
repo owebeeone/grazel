@@ -9,6 +9,10 @@
 //! freeze model comes when caching / cross-target dep-providers demand it.
 
 
+use crate::state::{AnalyzedTarget, CcToolchainMode, GlobalFlags, Session, canon_label, pkg_of};
+use crate::engine::{attr_members, native_members, razel_build_members};
+use crate::shims::{auto_config_module, rules_cc_module, rules_java_module, rules_skylib_module};
+use crate::dialect::rule_globals;
 use starlark::environment::{
     FrozenModule, Globals, GlobalsBuilder, LibraryExtension, Module,
 };
@@ -18,11 +22,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[allow(unused_imports)]
-pub(crate) use crate::{
-    deps::*, dialect::*, engine::*, glob::*, native_cc::*, providers::*, shims::*, state::*,
-    values::*,
-};
 
 
 pub(crate) fn build_globals() -> Globals {

@@ -1,5 +1,8 @@
 //! Native cc rules (host-compiler backend): cc_library/cc_binary actions + flag helpers. C0.
 
+use crate::state::{AR, AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, session};
+use crate::deps::{record_target, resolve_dep};
+use crate::values::unpack;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
@@ -7,13 +10,6 @@ use starlark::values::list::UnpackList;
 use starlark::values::none::NoneType;
 use starlark::values::Value;
 
-#[allow(unused_imports)]
-use crate::{
-    deps::*, dialect::*, engine::*, glob::*, providers::*, shims::*, state::*,
-    values::*,
-};
-#[allow(unused_imports)]
-use crate::rules::*;
 
 
 #[starlark::starlark_module]
@@ -150,10 +146,6 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
     }
 }
 
-
-pub(crate) fn unpack(list: Option<UnpackList<String>>) -> Vec<String> {
-    list.map(|l| l.items).unwrap_or_default()
-}
 
 
 /// `defines = ["FOO=1"]` → `["-DFOO=1"]`.

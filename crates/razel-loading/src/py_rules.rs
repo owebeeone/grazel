@@ -10,10 +10,9 @@
 //! `unpack`, `AnalyzedTarget`/`AnalyzedAction`) live in `crate::rules`; modelled on
 //! `rules::cc_rules`.
 
-use crate::rules::{
-    AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, record_target, resolve_dep,
-    session, unpack,
-};
+use crate::state::{AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, session};
+use crate::deps::{record_target, resolve_dep};
+use crate::values::unpack;
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;

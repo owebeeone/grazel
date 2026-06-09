@@ -1,5 +1,6 @@
 //! Starlark value types for rule impls (ctx.actions / Args / File / depset). C0.
 
+use crate::state::{session, with_current, AnalyzedAction};
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::collections::SmallMap;
@@ -16,12 +17,6 @@ use starlark::values::{
 use std::cell::RefCell;
 use std::fmt;
 
-#[allow(unused_imports)]
-use crate::{
-    deps::*, dialect::*, engine::*, glob::*, native_cc::*, providers::*, shims::*, state::*,
-    };
-#[allow(unused_imports)]
-use crate::rules::*;
 
 
 /// Single-quote a string for safe embedding in a `/bin/sh -c` script.
@@ -317,3 +312,8 @@ pub(crate) fn extract_files(v: Value) -> Vec<String> {
 }
 
 
+
+/// `Option<UnpackList<T>>` -> `Vec<T>` (an omitted Starlark list attr means empty). A value helper.
+pub(crate) fn unpack(list: Option<UnpackList<String>>) -> Vec<String> {
+    list.map(|l| l.items).unwrap_or_default()
+}

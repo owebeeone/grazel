@@ -1,13 +1,9 @@
 //! Dep-provider resolution: record_target, resolve_dep, the DepInfo a dependent reads. C0.
 
+use crate::state::{AnalyzedTarget, Session, canon_label, pkg_of};
+use crate::rules::load_package;
 
-#[allow(unused_imports)]
-use crate::{
-    dialect::*, engine::*, glob::*, native_cc::*, providers::*, shims::*, state::*,
-    values::*,
-};
-#[allow(unused_imports)]
-use crate::rules::*;
+
 
 
 // ---- native cc rules (the "build Google's BUILD files" path) -------------------

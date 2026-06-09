@@ -1,5 +1,10 @@
 //! The rule-authoring API: Ctx, the rule() object, rule_globals (rule/Label/select/providers). C0.
 
+use crate::state::{AnalyzedTarget, canon_label, qualify, session, with_current};
+use crate::values::{Actions, Depset, File, extract_files, file_path, unpack};
+use crate::glob::do_glob;
+use crate::providers::{fold_compile_jars, fold_headers, fold_runtime_jars};
+use crate::deps::record_target;
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
@@ -16,13 +21,6 @@ use starlark::values::{
 };
 use std::fmt;
 
-#[allow(unused_imports)]
-use crate::{
-    deps::*, engine::*, glob::*, native_cc::*, providers::*, shims::*, state::*,
-    values::*,
-};
-#[allow(unused_imports)]
-use crate::rules::*;
 
 
 // ---- ctx ------------------------------------------------------------------------

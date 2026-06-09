@@ -1,5 +1,10 @@
 //! Ruleset shim modules: the synthetic @rules_cc/@rules_java/skylib/auto_config modules. C0.
 
+use crate::state::{CcToolchainMode, session};
+use crate::native_cc::cc_rules;
+use crate::engine::razel_build_members;
+use crate::deps::record_named;
+use crate::dialect::rule_globals;
 use starlark::collections::SmallMap;
 use starlark::environment::{
     FrozenModule, GlobalsBuilder, Module,
@@ -11,13 +16,6 @@ use starlark::values::{
     Value,
 };
 
-#[allow(unused_imports)]
-use crate::{
-    deps::*, dialect::*, engine::*, glob::*, native_cc::*, providers::*, state::*,
-    values::*,
-};
-#[allow(unused_imports)]
-use crate::rules::*;
 
 
 /// The synthetic `@rules_cc` module, by toolchain mode (§7). **Native** re-exports razel's native

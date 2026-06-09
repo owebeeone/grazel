@@ -1,14 +1,8 @@
 //! glob() support: filesystem walk for source globbing. C0.
 
+use crate::state::Session;
 use std::path::Path;
 
-#[allow(unused_imports)]
-use crate::{
-    deps::*, dialect::*, engine::*, native_cc::*, providers::*, shims::*, state::*,
-    values::*,
-};
-#[allow(unused_imports)]
-use crate::rules::*;
 
 
 /// Shared `glob()`/`native.glob()` implementation: scan the current package dir

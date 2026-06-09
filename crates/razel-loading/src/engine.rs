@@ -1,5 +1,7 @@
 //! The engine namespaces exposed to .bzl: native.* / attr.* / razel_build.*. C0.
 
+use crate::state::session;
+use crate::glob::do_glob;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
@@ -7,13 +9,6 @@ use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
 use starlark::values::Value;
 
-#[allow(unused_imports)]
-use crate::{
-    deps::*, dialect::*, glob::*, native_cc::*, providers::*, shims::*, state::*,
-    values::*,
-};
-#[allow(unused_imports)]
-use crate::rules::*;
 
 
 /// The globals available to BUILD and `.bzl` evaluation: `rule()`, `DefaultInfo`,
