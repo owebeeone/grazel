@@ -207,8 +207,20 @@ impl Report {
     }
 }
 
+/// Inputs reduced to the source-level set for comparison (A0b): drop the toolchain inputs
+/// (`external/<repo>/…`) and generated `.cppmap`s razel does not model — the §8 tail. (The action
+/// set's `omit` allowlist handles the *actions*; this handles their leftover *inputs*.)
+fn source_inputs(inputs: &[String]) -> Vec<String> {
+    inputs
+        .iter()
+        .filter(|i| !i.starts_with("external/<repo>/") && !i.ends_with(".cppmap"))
+        .cloned()
+        .collect()
+}
+
 /// Diff razel's declared action set against the golden's. `omit` = mnemonics razel intentionally
 /// does not model (e.g. `CppModuleMap`); recorded in `Report::omitted`, never silently ignored.
+/// Inputs are compared source-level ([`source_inputs`]).
 pub fn diff(razel: &[Action], golden: &[Action], omit: &[&str]) -> Report {
     use std::collections::{BTreeMap, BTreeSet};
     let mut report = Report::default();
@@ -225,7 +237,7 @@ pub fn diff(razel: &[Action], golden: &[Action], omit: &[&str]) -> Report {
             None => report.missing.push(g.key()),
             Some(r) => {
                 let argv_differs = r.argv != g.argv;
-                let inputs_differ = r.inputs != g.inputs;
+                let inputs_differ = source_inputs(&r.inputs) != source_inputs(&g.inputs);
                 if argv_differs || inputs_differ {
                     report.mismatched.push(Mismatch { key: g.key(), argv_differs, inputs_differ });
                 } else {
@@ -363,5 +375,28 @@ mod tests {
         let r = diff(&razel, &golden, &["CppModuleMap"]);
         assert!(r.is_match());
         assert_eq!(r.omitted.len(), 1);
+    }
+
+    #[test]
+    fn diff_compares_inputs_source_level() {
+        // Same key + argv; the golden carries toolchain + cppmap inputs razel won't emit — filtered
+        // out, so the action still matches on its source-level inputs (A0b).
+        let golden = vec![Action {
+            mnemonic: "CppCompile".into(),
+            argv: vec!["cc".into()],
+            inputs: vec![
+                "a.cc".into(),
+                "external/<repo>/cc_wrapper.sh".into(),
+                "bazel-out/<cfg>/bin/p/base.cppmap".into(),
+            ],
+            outputs: vec!["a.o".into()],
+        }];
+        let razel = vec![Action {
+            mnemonic: "CppCompile".into(),
+            argv: vec!["cc".into()],
+            inputs: vec!["a.cc".into()],
+            outputs: vec!["a.o".into()],
+        }];
+        assert!(diff(&razel, &golden, &[]).is_match());
     }
 }
