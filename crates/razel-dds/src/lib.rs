@@ -124,7 +124,11 @@ impl FieldValue {
         }
     }
 
-    /// Merge `other` into `self` per the field's monoid (§3). Confluent + commutative.
+    /// Merge `other` into `self` per the field's monoid (§3). `Scalar` (idempotent-or-conflict) and
+    /// `Set` (union) are confluent + commutative; **`OrderedDepset` is associative but NOT commutative**
+    /// (append-dedup preserves assertion order — see the variant doc). So re-asserting an OrderedDepset
+    /// field from two producers is order-dependent; the intended discipline is single-producer-per-
+    /// `(target, field)` (Phase C decides whether to enforce that). `[F4]`
     fn merge(
         &mut self,
         other: FieldValue,
