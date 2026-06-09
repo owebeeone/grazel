@@ -68,6 +68,15 @@ precise structural diff (which action's argv/inputs, which provider field). The 
 > self-authored expectations.
 
 ## 5. The shared normalization spec — the one piece of "matching logic"
+
+> **V1 vs this spec (F11).** The shipped `razel-parity::normalize` (`norm_version = 2`) implements a
+> SUBSET of the spec below: cfg→`<cfg>` (prefix-preserving), repo→`<repo>`, the rust metadata-hash
+> rule, and a source-level **input** filter (drops `external/<repo>/*` + `*.cppmap`). Host tools like
+> `/usr/bin/libtool` are NOT normalized — instead the **platform is pinned** in `meta.toml`
+> (`platform = darwin_arm64`), so host-specific tokens are contained by construction rather than
+> rewritten. The `<exec>`/`<bin>`/`<src>` placeholder scheme below is the designed target; bump
+> `norm_version` when the implemented set grows.
+
 Used by **both** capture and the runner; **versioned** (`meta.toml` records it, so a
 normalization change shows up as a reviewable golden refresh). Canonicalizes:
 - **Paths** → placeholders: `<exec>` (exec root), `<bin>` (output), `<src>` (workspace),

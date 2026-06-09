@@ -745,7 +745,6 @@ fn rule_globals(b: &mut GlobalsBuilder) {
     /// `Label("//pkg:name")` — a minimal Label exposing `.package`/`.name`/
     /// `.workspace_root`/`.workspace_name`. razel treats everything as the main repo,
     /// so workspace_root/workspace_name are empty (matching Bazel on the main repo).
-    #[allow(non_snake_case)]
     fn Label<'v>(
         #[starlark(require = pos)] s: String,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -868,7 +867,6 @@ fn rule_globals(b: &mut GlobalsBuilder) {
     /// `hdrs`; the transitive set a dependent sees is recovered by folding over deps
     /// ([`fold_headers`]). Other kwargs absorbed. (A2a: the rule()-return providers are captured by
     /// side-effect, mirroring `DefaultInfo`.)
-    #[allow(non_snake_case)]
     fn CcInfo<'v>(
         #[starlark(require = named)] headers: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
@@ -886,7 +884,6 @@ fn rule_globals(b: &mut GlobalsBuilder) {
     /// classpath is the preorder fold over deps ([`fold_compile_jars`] — the OrderedDepset analog).
     /// Other kwargs (runtime_jars, …) absorbed. Mirrors `CcInfo`, the SECOND hardcoded provider — the
     /// B5 ledger signal that Phase C should generalize provider-capture to a schema-driven map.
-    #[allow(non_snake_case)]
     fn JavaInfo<'v>(
         #[starlark(require = named)] compile_jars: Option<Value<'v>>,
         #[starlark(require = named)] runtime_jars: Option<Value<'v>>,
@@ -1375,6 +1372,12 @@ fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
         })
         .build();
     Module::with_temp_heap(|module| {
+        // F21 — KNOWN GAP, clearly marked: in Adopt-Bazel mode `cc_library` is faithful (the engine),
+        // but `cc_binary` falls back to the NATIVE host-compiler backend (bare `/usr/bin/c++` link),
+        // which is NOT Bazel's declared graph. Harmless today (no `cc_binary` in any parity corpus),
+        // but a `cc_binary` analyzed in this mode silently gets a non-faithful graph. The faithful
+        // `CppLink` backend lands in Phase E (the link golden); until then, treat any Adopt-Bazel
+        // `cc_binary` result as NOT parity-grade.
         let src = format!("{}\ncc_binary = native_cc_binary\n", include_str!("cc_defs.bzl"));
         let ast =
             AstModule::parse("@rules_cc", src, &Dialect::Extended).map_err(|e| format!("{e}"))?;
@@ -1400,7 +1403,6 @@ fn record_named(sess: &Session, name: &str) {
 /// libraries, so these are analysis-visible placeholders (they build to nothing).
 /// skylib's *lib* helpers (`selects`/`paths`/`sets`) are pure-Starlark namespaces —
 /// handled separately as TF reaches them.
-#[allow(non_snake_case)]
 #[starlark::starlark_module]
 fn skylib_rules(b: &mut GlobalsBuilder) {
     fn native_bzl_library<'v>(

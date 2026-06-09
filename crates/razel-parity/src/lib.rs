@@ -97,6 +97,13 @@ fn replace_value(s: &str, key: &str, placeholder: &str) -> String {
 /// Razel can't reproduce Bazel's content hash, so it's normalized like a host value. Hex
 /// toolchain-lib hashes have letters → not matched (they live only in inputs). Idempotent
 /// (`<hash>` has no digits).
+///
+/// F10 — blast radius (this is in the SHARED `normalize()`, so cc/java tokens pass through it too):
+/// it replaces ANY `-<6+ consecutive decimal digits>`, length-based, not anchored to rust metadata.
+/// A decimal flag value of that shape (e.g. a hypothetical `-1234567`) would also be rewritten. None
+/// exists in any current golden (`grep -E '-[0-9]{6,}'` = 0), and realistic numeric flags carry a
+/// `=`/letter between the dash and the digits (`-frandom-seed=123456`), so the surface is narrow —
+/// but if a future golden adds a bare `-<digits>` token, anchor this to `metadata=`/`.rlib`/`.rmeta`.
 fn normalize_rust_hash(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.char_indices().peekable();
@@ -171,6 +178,10 @@ fn parse_bracket_list(block: &str, key: &str) -> Vec<String> {
 }
 
 /// The `Command Line: (exec … )` argv (drop `\` continuations; strip Bazel's single-quotes).
+// F7: cuts the command line at the FIRST `)`, so an argv token containing `)` would truncate the
+// GOLDEN side (razel's argv is built in-engine and never parsed here) → a loud MISMATCH, not a silent
+// false match. Today no golden token contains `)`; if one ever does, this needs balanced-paren/quote
+// awareness. (See the regression test `parse_command_line_truncates_at_embedded_paren`.)
 fn parse_command_line(block: &str) -> Vec<String> {
     const K: &str = "Command Line: (exec ";
     let Some(start) = block.find(K) else { return Vec::new() };
@@ -183,15 +194,23 @@ fn parse_command_line(block: &str) -> Vec<String> {
         .collect()
 }
 
-/// A discrepancy on a paired action (same `key`, differing argv/inputs).
+/// A discrepancy on a paired action (same `key`, differing argv/inputs). Carries the delta so a
+/// failure is self-explanatory (F8): the first differing argv index + the symmetric source-input sets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mismatch {
     pub key: String,
     pub argv_differs: bool,
     pub inputs_differ: bool,
+    /// Index of the first differing argv token (the shorter length if one argv is a prefix of the other).
+    pub first_argv_diff: Option<usize>,
+    /// Source-level inputs in the golden but not razel.
+    pub golden_only_inputs: Vec<String>,
+    /// Source-level inputs in razel but not the golden.
+    pub razel_only_inputs: Vec<String>,
 }
 
-/// A graph diff. `is_match()` ⇔ nothing mismatched/missing/extra (allowlisted `omitted` is fine).
+/// A graph diff. `is_match()` ⇔ nothing mismatched/missing/extra **and no duplicate keys** (allowlisted
+/// `omitted` is fine).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     pub matched: Vec<String>,
@@ -199,11 +218,15 @@ pub struct Report {
     pub missing: Vec<String>, // in golden (not omitted), absent from razel
     pub extra: Vec<String>,   // in razel, absent from golden
     pub omitted: Vec<String>, // golden actions dropped by the allowlist (logged, not a failure)
+    pub duplicate_keys: Vec<String>, // razel actions whose key collided (last-wins would hide one; F6)
 }
 
 impl Report {
     pub fn is_match(&self) -> bool {
-        self.mismatched.is_empty() && self.missing.is_empty() && self.extra.is_empty()
+        self.mismatched.is_empty()
+            && self.missing.is_empty()
+            && self.extra.is_empty()
+            && self.duplicate_keys.is_empty()
     }
 }
 
@@ -224,7 +247,14 @@ fn source_inputs(inputs: &[String]) -> Vec<String> {
 pub fn diff(razel: &[Action], golden: &[Action], omit: &[&str]) -> Report {
     use std::collections::{BTreeMap, BTreeSet};
     let mut report = Report::default();
-    let razel_by: BTreeMap<String, &Action> = razel.iter().map(|a| (a.key(), a)).collect();
+    // Index razel, detecting duplicate keys (F6): a collision silently drops an action from a
+    // last-wins map and inflates `matched`, so surface it rather than absorb it.
+    let mut razel_by: BTreeMap<String, &Action> = BTreeMap::new();
+    for a in razel {
+        if razel_by.insert(a.key(), a).is_some() {
+            report.duplicate_keys.push(a.key());
+        }
+    }
     let mut golden_keys = BTreeSet::new();
 
     for g in golden {
@@ -237,9 +267,26 @@ pub fn diff(razel: &[Action], golden: &[Action], omit: &[&str]) -> Report {
             None => report.missing.push(g.key()),
             Some(r) => {
                 let argv_differs = r.argv != g.argv;
-                let inputs_differ = source_inputs(&r.inputs) != source_inputs(&g.inputs);
+                let (rin, gin) = (source_inputs(&r.inputs), source_inputs(&g.inputs));
+                let inputs_differ = rin != gin;
                 if argv_differs || inputs_differ {
-                    report.mismatched.push(Mismatch { key: g.key(), argv_differs, inputs_differ });
+                    // F8: carry the delta — first differing argv token + the symmetric input sets.
+                    let first_argv_diff = r
+                        .argv
+                        .iter()
+                        .zip(g.argv.iter())
+                        .position(|(a, b)| a != b)
+                        .or((r.argv.len() != g.argv.len()).then_some(r.argv.len().min(g.argv.len())));
+                    let rset: BTreeSet<&String> = rin.iter().collect();
+                    let gset: BTreeSet<&String> = gin.iter().collect();
+                    report.mismatched.push(Mismatch {
+                        key: g.key(),
+                        argv_differs,
+                        inputs_differ,
+                        first_argv_diff,
+                        golden_only_inputs: gin.iter().filter(|x| !rset.contains(x)).cloned().collect(),
+                        razel_only_inputs: rin.iter().filter(|x| !gset.contains(x)).cloned().collect(),
+                    });
                 } else {
                     report.matched.push(g.key());
                 }
@@ -343,6 +390,24 @@ mod tests {
             inputs: vec![],
             outputs: vec![out.into()],
         }
+    }
+
+    #[test]
+    fn diff_reports_duplicate_razel_keys_instead_of_absorbing() {
+        // F6: razel emits the same key twice; the golden has it once. A last-wins map would absorb
+        // the dup and report a clean match — the dup must surface and fail is_match().
+        let a = act("CppCompile", &["cc"], "x.o");
+        let report = diff(&[a.clone(), a.clone()], &[a.clone()], &[]);
+        assert_eq!(report.duplicate_keys.len(), 1, "colliding razel key must be reported");
+        assert!(!report.is_match(), "a duplicate key fails the match even though the golden pairs");
+    }
+
+    #[test]
+    fn parse_command_line_truncates_at_embedded_paren() {
+        // F7 (documented limitation): the first ')' ends the parse, so a token containing ')' drops
+        // the tail. Today no golden token does; a future one would truncate the GOLDEN → loud mismatch.
+        let argv = parse_command_line("Command Line: (exec /bin/cc -DX=(y) more)");
+        assert!(!argv.contains(&"more".to_string()), "first ) terminates the parse: {argv:?}");
     }
 
     #[test]

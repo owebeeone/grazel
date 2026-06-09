@@ -39,5 +39,6 @@ fn live_cc_graph_matches_the_golden_in_adopt_bazel_mode() {
     ));
     let report = razel_parity::diff(&razel, &golden, &["CppModuleMap"]);
     assert!(report.is_match(), "live cc graph must match the golden:\n{report:#?}");
+    assert_eq!(report.matched.len(), 4, "pin the positive set: 2× (CppCompile + CppArchive)"); // F9
     assert_eq!(report.omitted.len(), 2, "the 2 CppModuleMap actions are allowlisted + logged");
 }

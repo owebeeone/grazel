@@ -89,3 +89,27 @@ fn java_diamond_dedups_the_shared_transitive_jar() {
     let n = javac.argv.iter().filter(|a| a.ends_with("libbase-hjar.jar")).count();
     assert_eq!(n, 1, "diamond must dedup base's hjar (got {n}): {:?}", javac.argv);
 }
+
+#[test]
+fn java_neverlink_prunes_transitive_runtime_through_the_rule() {
+    // F14: app -> api(neverlink) -> hidden. api is compile-only; `hidden` (reachable only via api)
+    // must be ABSENT from app's RUNTIME classpath, while api+hidden are present at COMPILE. (R1b
+    // unit-tested the fold's subtree-prune; this pins it through java_defs.bzl + the dep resolution.)
+    let src = format!(
+        "{JAVA_DEFS}\n\
+         java_library(name = \"hidden\", srcs = [\"Hidden.java\"])\n\
+         java_library(name = \"api\", srcs = [\"Api.java\"], deps = [\":hidden\"], neverlink = True)\n\
+         java_library(name = \"app\", srcs = [\"App.java\"], deps = [\":api\"])\n"
+    );
+    let targets = analyze_starlark("BUILD", &src).unwrap();
+    let app = targets.iter().find(|t| t.name.ends_with("app")).unwrap();
+    let javac = app.actions.iter().find(|a| a.mnemonic == "Javac").unwrap();
+    let argv = &javac.argv;
+    let at = |f: &str| argv.iter().position(|a| a == f).unwrap();
+    let compile_cp = &argv[at("--classpath") + 1..at("--runtime_classpath")];
+    let runtime_cp = &argv[at("--runtime_classpath") + 1..at("--sources")];
+    let p = |s: &str| format!("bazel-out/darwin_arm64-fastbuild/bin/{s}");
+    assert!(compile_cp.contains(&p("libapi-hjar.jar")), "compile sees neverlink api: {compile_cp:?}");
+    assert!(compile_cp.contains(&p("libhidden-hjar.jar")), "compile sees api's dep: {compile_cp:?}");
+    assert!(runtime_cp.is_empty(), "neverlink api prunes its whole subtree from runtime: {runtime_cp:?}");
+}
