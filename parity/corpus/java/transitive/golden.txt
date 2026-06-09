@@ -1,0 +1,263 @@
+action 'Compiling Java headers corpus/java/transitive/libbase-hjar.jar (1 source file)'
+  Mnemonic: Turbine
+  Target: //corpus/java/transitive:base
+  Inputs: [bazel-out/<cfg>/bin/external/<repo>/toolchains/platformclasspath.jar, corpus/java/transitive/Base.java, external/<repo>/java_tools/turbine_direct_graal, external/<repo>/lib/ct.sym]
+  Outputs: [bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jar, bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jdeps, bazel-out/<cfg>/bin/corpus/java/transitive/libbase-tjar.jar]
+  Environment: [LC_CTYPE=en_US.UTF-8, PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/java_tools/turbine_direct_graal \
+    '-Dturbine.ctSymPath=external/<repo>/lib/ct.sym' \
+    --output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jar \
+    --header_compilation_output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase-tjar.jar \
+    --output_deps \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jdeps \
+    --bootclasspath \
+    bazel-out/<cfg>/bin/external/<repo>/toolchains/platformclasspath.jar \
+    --sources \
+    corpus/java/transitive/Base.java \
+    --javacopts \
+    -source \
+    11 \
+    -target \
+    11 \
+    '-XDskipDuplicateBridges=true' \
+    '-XDcompilePolicy=simple' \
+    '--should-stop=ifError=FLOW' \
+    -g \
+    -parameters \
+    -Xep:IgnoredPureGetter:OFF \
+    -Xep:EmptyTopLevelDeclaration:OFF \
+    -Xep:LenientFormatStringValidation:OFF \
+    -Xep:ReturnMissingNullable:OFF \
+    -Xep:UseCorrectAssertInTests:OFF \
+    -Xmaxwarns \
+    -1 \
+    -- \
+    --target_label \
+    //corpus/java/transitive:base \
+    --reduce_classpath_mode \
+    NONE)
+  ExecutionInfo: {internal-inline-outputs: bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jdeps, supports-path-mapping: 1}
+
+action 'Building corpus/java/transitive/libbase.jar (1 source file)'
+  Mnemonic: Javac
+  Target: //corpus/java/transitive:base
+  Inputs: [bazel-out/<cfg>/bin/external/<repo>/toolchains/platformclasspath.jar, corpus/java/transitive/Base.java, external/<repo>/lib/jrt-fs.jar, external/<repo>/lib/modules, external/<repo>/release, external/<repo>/java_tools/JavaBuilder_deploy.jar, external/<repo>/bin/jar, external/<repo>/bin/jarsigner, external/<repo>/bin/java, external/<repo>/bin/javac, external/<repo>/bin/javadoc, external/<repo>/bin/javap, external/<repo>/bin/jcmd, external/<repo>/bin/jconsole, external/<repo>/bin/jdb, external/<repo>/bin/jdeprscan, external/<repo>/bin/jdeps, external/<repo>/bin/jfr, external/<repo>/bin/jhsdb, external/<repo>/bin/jimage, external/<repo>/bin/jinfo, external/<repo>/bin/jlink, external/<repo>/bin/jmap, external/<repo>/bin/jmod, external/<repo>/bin/jnativescan, external/<repo>/bin/jpackage, external/<repo>/bin/jps, external/<repo>/bin/jrunscript, external/<repo>/bin/jshell, external/<repo>/bin/jstack, external/<repo>/bin/jstat, external/<repo>/bin/jstatd, external/<repo>/bin/jwebserver, external/<repo>/bin/keytool, external/<repo>/bin/rmiregistry, external/<repo>/bin/serialver, external/<repo>/conf/jaxp-strict.properties.template, external/<repo>/conf/jaxp.properties, external/<repo>/conf/logging.properties, external/<repo>/conf/management/jmxremote.access, external/<repo>/conf/management/jmxremote.password.template, external/<repo>/conf/management/management.properties, external/<repo>/conf/net.properties, external/<repo>/conf/security/java.security, external/<repo>/conf/security/policy/README.txt, external/<repo>/conf/security/policy/limited/default_US_export.policy, external/<repo>/conf/security/policy/limited/default_local.policy, external/<repo>/conf/security/policy/limited/exempt_local.policy, external/<repo>/conf/security/policy/unlimited/default_US_export.policy, external/<repo>/conf/security/policy/unlimited/default_local.policy, external/<repo>/conf/sound.properties, external/<repo>/include/classfile_constants.h, external/<repo>/include/darwin/jawt_md.h, external/<repo>/include/darwin/jni_md.h, external/<repo>/include/jawt.h, external/<repo>/include/jdwpTransport.h, external/<repo>/include/jni.h, external/<repo>/include/jvmti.h, external/<repo>/include/jvmticmlr.h, external/<repo>/lib/classlist, external/<repo>/lib/ct.sym, external/<repo>/lib/fontconfig.bfc, external/<repo>/lib/fontconfig.properties.src, external/<repo>/lib/jfr/default.jfc, external/<repo>/lib/jfr/profile.jfc, external/<repo>/lib/jrt-fs.jar, external/<repo>/lib/jspawnhelper, external/<repo>/lib/jvm.cfg, external/<repo>/lib/libattach.dylib, external/<repo>/lib/libawt.dylib, external/<repo>/lib/libawt_lwawt.dylib, external/<repo>/lib/libdt_socket.dylib, external/<repo>/lib/libextnet.dylib, external/<repo>/lib/libfontmanager.dylib, external/<repo>/lib/libfreetype.dylib, external/<repo>/lib/libinstrument.dylib, external/<repo>/lib/libj2gss.dylib, external/<repo>/lib/libj2pcsc.dylib, external/<repo>/lib/libj2pkcs11.dylib, external/<repo>/lib/libjaas.dylib, external/<repo>/lib/libjava.dylib, external/<repo>/lib/libjavajpeg.dylib, external/<repo>/lib/libjawt.dylib, external/<repo>/lib/libjdwp.dylib, external/<repo>/lib/libjimage.dylib, external/<repo>/lib/libjli.dylib, external/<repo>/lib/libjsig.dylib, external/<repo>/lib/libjsound.dylib, external/<repo>/lib/liblcms.dylib, external/<repo>/lib/libmanagement.dylib, external/<repo>/lib/libmanagement_agent.dylib, external/<repo>/lib/libmanagement_ext.dylib, external/<repo>/lib/libmlib_image.dylib, external/<repo>/lib/libnet.dylib, external/<repo>/lib/libnio.dylib, external/<repo>/lib/libosx.dylib, external/<repo>/lib/libosxapp.dylib, external/<repo>/lib/libosxkrb5.dylib, external/<repo>/lib/libosxsecurity.dylib, external/<repo>/lib/libosxui.dylib, external/<repo>/lib/libprefs.dylib, external/<repo>/lib/librmi.dylib, external/<repo>/lib/libsaproc.dylib, external/<repo>/lib/libsleef.dylib, external/<repo>/lib/libsplashscreen.dylib, external/<repo>/lib/libsyslookup.dylib, external/<repo>/lib/libverify.dylib, external/<repo>/lib/libzip.dylib, external/<repo>/lib/modules, external/<repo>/lib/psfont.properties.ja, external/<repo>/lib/psfontj2d.properties, external/<repo>/lib/security/blocked.certs, external/<repo>/lib/security/cacerts, external/<repo>/lib/security/public_suffix_list.dat, external/<repo>/lib/server/classes.jsa, external/<repo>/lib/server/classes_coh.jsa, external/<repo>/lib/server/classes_nocoops.jsa, external/<repo>/lib/server/classes_nocoops_coh.jsa, external/<repo>/lib/server/libjsig.dylib, external/<repo>/lib/server/libjvm.dylib, external/<repo>/lib/shaders.metallib, external/<repo>/lib/src.zip, external/<repo>/lib/tzdb.dat, external/<repo>/release]
+  Outputs: [bazel-out/<cfg>/bin/corpus/java/transitive/libbase-native-header.jar, bazel-out/<cfg>/bin/corpus/java/transitive/libbase.jar, bazel-out/<cfg>/bin/corpus/java/transitive/libbase.jar_manifest_proto, bazel-out/<cfg>/bin/corpus/java/transitive/libbase.jdeps]
+  Environment: [LC_CTYPE=en_US.UTF-8, PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/bin/java \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.resources=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED' \
+    '--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED' \
+    '--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED' \
+    '--add-opens=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED' \
+    '--add-opens=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED' \
+    '--add-opens=java.base/java.nio=ALL-UNNAMED' \
+    '--add-opens=java.base/java.lang=ALL-UNNAMED' \
+    '-Dsun.io.useCanonCaches=false' \
+    -XX:-CompactStrings \
+    -Xlog:disable \
+    '-Xlog:all=warning:stderr:uptime,level,tags' \
+    -jar \
+    external/<repo>/java_tools/JavaBuilder_deploy.jar \
+    --output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase.jar \
+    --native_header_output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase-native-header.jar \
+    --output_manifest_proto \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase.jar_manifest_proto \
+    --compress_jar \
+    --output_deps_proto \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase.jdeps \
+    --bootclasspath \
+    bazel-out/<cfg>/bin/external/<repo>/toolchains/platformclasspath.jar \
+    --system \
+    external/rules_java++toolchains+local_jdk \
+    --sources \
+    corpus/java/transitive/Base.java \
+    --javacopts \
+    -source \
+    11 \
+    -target \
+    11 \
+    '-XDskipDuplicateBridges=true' \
+    '-XDcompilePolicy=simple' \
+    '--should-stop=ifError=FLOW' \
+    -g \
+    -parameters \
+    -Xep:IgnoredPureGetter:OFF \
+    -Xep:EmptyTopLevelDeclaration:OFF \
+    -Xep:LenientFormatStringValidation:OFF \
+    -Xep:ReturnMissingNullable:OFF \
+    -Xep:UseCorrectAssertInTests:OFF \
+    -Xmaxwarns \
+    -1 \
+    -- \
+    --target_label \
+    //corpus/java/transitive:base \
+    --strict_java_deps \
+    ERROR \
+    --experimental_fix_deps_tool \
+    add_dep)
+  ExecutionInfo: {internal-inline-outputs: bazel-out/<cfg>/bin/corpus/java/transitive/libbase.jdeps, supports-multiplex-workers: 1, supports-path-mapping: 1, supports-worker-cancellation: 1, supports-workers: 1}
+
+action 'Building source jar corpus/java/transitive/libbase-src.jar'
+  Mnemonic: JavaSourceJar
+  Target: //corpus/java/transitive:base
+  Inputs: [corpus/java/transitive/Base.java, external/<repo>/java_tools/src/tools/singlejar/singlejar_local]
+  Outputs: [bazel-out/<cfg>/bin/corpus/java/transitive/libbase-src.jar]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/java_tools/src/tools/singlejar/singlejar_local \
+    --output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase-src.jar \
+    --compression \
+    --normalize \
+    --exclude_build_data \
+    --warn_duplicate_resources \
+    --resources \
+    corpus/java/transitive/Base.java:transitive/Base.java \
+    --build_target \
+    None \
+    --output_jar_creator \
+    None)
+
+action 'Compiling Java headers corpus/java/transitive/libutil-hjar.jar (1 source file)'
+  Mnemonic: Turbine
+  Target: //corpus/java/transitive:util
+  Inputs: [bazel-out/<cfg>/bin/corpus/java/transitive/libbase-tjar.jar, bazel-out/<cfg>/bin/external/<repo>/toolchains/platformclasspath.jar, corpus/java/transitive/Util.java, external/<repo>/java_tools/turbine_direct_graal, external/<repo>/lib/ct.sym]
+  Outputs: [bazel-out/<cfg>/bin/corpus/java/transitive/libutil-hjar.jar, bazel-out/<cfg>/bin/corpus/java/transitive/libutil-hjar.jdeps, bazel-out/<cfg>/bin/corpus/java/transitive/libutil-tjar.jar]
+  Environment: [LC_CTYPE=en_US.UTF-8, PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/java_tools/turbine_direct_graal \
+    '-Dturbine.ctSymPath=external/<repo>/lib/ct.sym' \
+    --output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libutil-hjar.jar \
+    --header_compilation_output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libutil-tjar.jar \
+    --output_deps \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libutil-hjar.jdeps \
+    --bootclasspath \
+    bazel-out/<cfg>/bin/external/<repo>/toolchains/platformclasspath.jar \
+    --sources \
+    corpus/java/transitive/Util.java \
+    --javacopts \
+    -source \
+    11 \
+    -target \
+    11 \
+    '-XDskipDuplicateBridges=true' \
+    '-XDcompilePolicy=simple' \
+    '--should-stop=ifError=FLOW' \
+    -g \
+    -parameters \
+    -Xep:IgnoredPureGetter:OFF \
+    -Xep:EmptyTopLevelDeclaration:OFF \
+    -Xep:LenientFormatStringValidation:OFF \
+    -Xep:ReturnMissingNullable:OFF \
+    -Xep:UseCorrectAssertInTests:OFF \
+    -Xmaxwarns \
+    -1 \
+    -- \
+    --target_label \
+    //corpus/java/transitive:util \
+    --classpath \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase-tjar.jar \
+    --reduce_classpath_mode \
+    NONE)
+  ExecutionInfo: {internal-inline-outputs: bazel-out/<cfg>/bin/corpus/java/transitive/libutil-hjar.jdeps, supports-path-mapping: 1}
+
+action 'Building corpus/java/transitive/libutil.jar (1 source file)'
+  Mnemonic: Javac
+  Target: //corpus/java/transitive:util
+  Inputs: [bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jar, bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jdeps, bazel-out/<cfg>/bin/external/<repo>/toolchains/platformclasspath.jar, corpus/java/transitive/Util.java, external/<repo>/lib/jrt-fs.jar, external/<repo>/lib/modules, external/<repo>/release, external/<repo>/java_tools/JavaBuilder_deploy.jar, external/<repo>/bin/jar, external/<repo>/bin/jarsigner, external/<repo>/bin/java, external/<repo>/bin/javac, external/<repo>/bin/javadoc, external/<repo>/bin/javap, external/<repo>/bin/jcmd, external/<repo>/bin/jconsole, external/<repo>/bin/jdb, external/<repo>/bin/jdeprscan, external/<repo>/bin/jdeps, external/<repo>/bin/jfr, external/<repo>/bin/jhsdb, external/<repo>/bin/jimage, external/<repo>/bin/jinfo, external/<repo>/bin/jlink, external/<repo>/bin/jmap, external/<repo>/bin/jmod, external/<repo>/bin/jnativescan, external/<repo>/bin/jpackage, external/<repo>/bin/jps, external/<repo>/bin/jrunscript, external/<repo>/bin/jshell, external/<repo>/bin/jstack, external/<repo>/bin/jstat, external/<repo>/bin/jstatd, external/<repo>/bin/jwebserver, external/<repo>/bin/keytool, external/<repo>/bin/rmiregistry, external/<repo>/bin/serialver, external/<repo>/conf/jaxp-strict.properties.template, external/<repo>/conf/jaxp.properties, external/<repo>/conf/logging.properties, external/<repo>/conf/management/jmxremote.access, external/<repo>/conf/management/jmxremote.password.template, external/<repo>/conf/management/management.properties, external/<repo>/conf/net.properties, external/<repo>/conf/security/java.security, external/<repo>/conf/security/policy/README.txt, external/<repo>/conf/security/policy/limited/default_US_export.policy, external/<repo>/conf/security/policy/limited/default_local.policy, external/<repo>/conf/security/policy/limited/exempt_local.policy, external/<repo>/conf/security/policy/unlimited/default_US_export.policy, external/<repo>/conf/security/policy/unlimited/default_local.policy, external/<repo>/conf/sound.properties, external/<repo>/include/classfile_constants.h, external/<repo>/include/darwin/jawt_md.h, external/<repo>/include/darwin/jni_md.h, external/<repo>/include/jawt.h, external/<repo>/include/jdwpTransport.h, external/<repo>/include/jni.h, external/<repo>/include/jvmti.h, external/<repo>/include/jvmticmlr.h, external/<repo>/lib/classlist, external/<repo>/lib/ct.sym, external/<repo>/lib/fontconfig.bfc, external/<repo>/lib/fontconfig.properties.src, external/<repo>/lib/jfr/default.jfc, external/<repo>/lib/jfr/profile.jfc, external/<repo>/lib/jrt-fs.jar, external/<repo>/lib/jspawnhelper, external/<repo>/lib/jvm.cfg, external/<repo>/lib/libattach.dylib, external/<repo>/lib/libawt.dylib, external/<repo>/lib/libawt_lwawt.dylib, external/<repo>/lib/libdt_socket.dylib, external/<repo>/lib/libextnet.dylib, external/<repo>/lib/libfontmanager.dylib, external/<repo>/lib/libfreetype.dylib, external/<repo>/lib/libinstrument.dylib, external/<repo>/lib/libj2gss.dylib, external/<repo>/lib/libj2pcsc.dylib, external/<repo>/lib/libj2pkcs11.dylib, external/<repo>/lib/libjaas.dylib, external/<repo>/lib/libjava.dylib, external/<repo>/lib/libjavajpeg.dylib, external/<repo>/lib/libjawt.dylib, external/<repo>/lib/libjdwp.dylib, external/<repo>/lib/libjimage.dylib, external/<repo>/lib/libjli.dylib, external/<repo>/lib/libjsig.dylib, external/<repo>/lib/libjsound.dylib, external/<repo>/lib/liblcms.dylib, external/<repo>/lib/libmanagement.dylib, external/<repo>/lib/libmanagement_agent.dylib, external/<repo>/lib/libmanagement_ext.dylib, external/<repo>/lib/libmlib_image.dylib, external/<repo>/lib/libnet.dylib, external/<repo>/lib/libnio.dylib, external/<repo>/lib/libosx.dylib, external/<repo>/lib/libosxapp.dylib, external/<repo>/lib/libosxkrb5.dylib, external/<repo>/lib/libosxsecurity.dylib, external/<repo>/lib/libosxui.dylib, external/<repo>/lib/libprefs.dylib, external/<repo>/lib/librmi.dylib, external/<repo>/lib/libsaproc.dylib, external/<repo>/lib/libsleef.dylib, external/<repo>/lib/libsplashscreen.dylib, external/<repo>/lib/libsyslookup.dylib, external/<repo>/lib/libverify.dylib, external/<repo>/lib/libzip.dylib, external/<repo>/lib/modules, external/<repo>/lib/psfont.properties.ja, external/<repo>/lib/psfontj2d.properties, external/<repo>/lib/security/blocked.certs, external/<repo>/lib/security/cacerts, external/<repo>/lib/security/public_suffix_list.dat, external/<repo>/lib/server/classes.jsa, external/<repo>/lib/server/classes_coh.jsa, external/<repo>/lib/server/classes_nocoops.jsa, external/<repo>/lib/server/classes_nocoops_coh.jsa, external/<repo>/lib/server/libjsig.dylib, external/<repo>/lib/server/libjvm.dylib, external/<repo>/lib/shaders.metallib, external/<repo>/lib/src.zip, external/<repo>/lib/tzdb.dat, external/<repo>/release]
+  Outputs: [bazel-out/<cfg>/bin/corpus/java/transitive/libutil-native-header.jar, bazel-out/<cfg>/bin/corpus/java/transitive/libutil.jar, bazel-out/<cfg>/bin/corpus/java/transitive/libutil.jar_manifest_proto, bazel-out/<cfg>/bin/corpus/java/transitive/libutil.jdeps]
+  Environment: [LC_CTYPE=en_US.UTF-8, PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/bin/java \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.resources=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED' \
+    '--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED' \
+    '--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED' \
+    '--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED' \
+    '--add-opens=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED' \
+    '--add-opens=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED' \
+    '--add-opens=java.base/java.nio=ALL-UNNAMED' \
+    '--add-opens=java.base/java.lang=ALL-UNNAMED' \
+    '-Dsun.io.useCanonCaches=false' \
+    -XX:-CompactStrings \
+    -Xlog:disable \
+    '-Xlog:all=warning:stderr:uptime,level,tags' \
+    -jar \
+    external/<repo>/java_tools/JavaBuilder_deploy.jar \
+    --output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libutil.jar \
+    --native_header_output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libutil-native-header.jar \
+    --output_manifest_proto \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libutil.jar_manifest_proto \
+    --compress_jar \
+    --output_deps_proto \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libutil.jdeps \
+    --bootclasspath \
+    bazel-out/<cfg>/bin/external/<repo>/toolchains/platformclasspath.jar \
+    --system \
+    external/rules_java++toolchains+local_jdk \
+    --sources \
+    corpus/java/transitive/Util.java \
+    --javacopts \
+    -source \
+    11 \
+    -target \
+    11 \
+    '-XDskipDuplicateBridges=true' \
+    '-XDcompilePolicy=simple' \
+    '--should-stop=ifError=FLOW' \
+    -g \
+    -parameters \
+    -Xep:IgnoredPureGetter:OFF \
+    -Xep:EmptyTopLevelDeclaration:OFF \
+    -Xep:LenientFormatStringValidation:OFF \
+    -Xep:ReturnMissingNullable:OFF \
+    -Xep:UseCorrectAssertInTests:OFF \
+    -Xmaxwarns \
+    -1 \
+    -- \
+    --target_label \
+    //corpus/java/transitive:util \
+    --strict_java_deps \
+    ERROR \
+    --direct_dependencies \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jar \
+    --experimental_fix_deps_tool \
+    add_dep \
+    --classpath \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libbase-hjar.jar)
+  ExecutionInfo: {internal-inline-outputs: bazel-out/<cfg>/bin/corpus/java/transitive/libutil.jdeps, supports-multiplex-workers: 1, supports-path-mapping: 1, supports-worker-cancellation: 1, supports-workers: 1}
+
+action 'Building source jar corpus/java/transitive/libutil-src.jar'
+  Mnemonic: JavaSourceJar
+  Target: //corpus/java/transitive:util
+  Inputs: [corpus/java/transitive/Util.java, external/<repo>/java_tools/src/tools/singlejar/singlejar_local]
+  Outputs: [bazel-out/<cfg>/bin/corpus/java/transitive/libutil-src.jar]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/java_tools/src/tools/singlejar/singlejar_local \
+    --output \
+    bazel-out/<cfg>/bin/corpus/java/transitive/libutil-src.jar \
+    --compression \
+    --normalize \
+    --exclude_build_data \
+    --warn_duplicate_resources \
+    --resources \
+    corpus/java/transitive/Util.java:transitive/Util.java \
+    --build_target \
+    None \
+    --output_jar_creator \
+    None)
