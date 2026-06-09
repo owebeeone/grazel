@@ -213,6 +213,32 @@ Order is fixed: **C3a → C3b → C3c**; the gate is last (it only passes once t
 *Exit (C3 / Phase C):* a generic engine with two instances behind a clean, **gate-enforced** hook
 seam. (The action-transform hook is explicitly **out** — deferred to Phase D, §8.)
 
+## 8b. C3 progress + the channel redesign (revised after C3a.4)
+
+**Done + green** (`razelV2-RSB/C3a.1…C3a.4`): the `ProviderRegistry` is the live source of truth; it
+drives `to_dds`'s schema registration, **both** dep-folds (the Starlark `dialect` path + the native
+`deps::resolve_dep` path, via one shared `dds::fold_dep_fields`), and provider **capture** (the new
+generic `razel_build.info(provider, fields)` — the `CcInfo`/`JavaInfo` builtins are deleted). The rule
+API (`dialect`) and the fold paths (`dds`/`deps`) now carry **zero** language literals.
+
+**The remaining state leak is two `CcInfo.hdrs`-channel abuses** (a real design smell C3a.4 surfaced,
+not a rename):
+- **py** (`py_rules.rs`) pushes `.py` sources through `cc_provider_map`→`CcInfo.hdrs`. py is *tested*
+  (`razel-build/tests/py_rules.rs`) so it needs a real channel: register a **`PyInfo{srcs}`** provider
+  (projection e.g. `py_srcs`); `py_library` captures into it; `gather()` reads `dep.field("py_srcs")`.
+- **`filegroup`** (`dialect.rs`, a *generic* rule) pushes its files through `CcInfo.hdrs` so cc deps
+  pick them up as headers. This hack is **untested** (no test reads a filegroup's headers), so drop it:
+  `filegroup` provides **`DefaultInfo` only**. (If a real cc-on-filegroup case appears later, the right
+  fix is cc reading dep `DefaultInfo.files` as inputs — not a generic rule faking `CcInfo`.)
+- **The accessors** (`AnalyzedTarget::{hdrs,cflags,compile_jars,runtime_jars,neverlink}`) are now
+  *test-only* (the live fold reads the map). They hardcode `"CcInfo"`/`"JavaInfo"` — so replace them
+  with the generic `field_strs(provider, field)` + `scalar_bool(provider, field)` (caller names the
+  provider; tests are allowlisted), and `cc_provider_map` relocates to the cc module once py+filegroup
+  are off it.
+
+**Remaining steps:** **C3a.5** (untangle py+filegroup → relocate `cc_provider_map` + generic
+accessors; de-leaks `state`), then **C3b** (engine toolchain resolver, §4) and **C3c** (the gate).
+
 ## 8. Phase-D handoff (explicitly out of C3)
 
 - The **generic `Toolchain` type** (§4 option i) — needs the real-upstream-toolchain second instance.

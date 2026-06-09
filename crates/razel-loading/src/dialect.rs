@@ -328,10 +328,12 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
         let files: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
+        // C3a.5: filegroup provides DefaultInfo only — it no longer fakes CcInfo to push files into
+        // the cc header channel (that hack was untested; a real cc-on-filegroup case = cc reading dep
+        // DefaultInfo files as inputs, Phase D).
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
-            default_info: files.clone(),
-            providers: crate::state::cc_provider_map(files, Vec::new()),
+            default_info: files,
             ..Default::default()
         });
         Ok(NoneType)

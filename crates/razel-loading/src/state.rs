@@ -66,9 +66,14 @@ impl AnalyzedTarget {
             Some(FieldValue::Scalar(Scalar::Bool(true)))
         )
     }
-    /// Set a provider field (the capture write — `CcInfo`/`JavaInfo` builtins + the native rules).
+    /// Set a provider field (the capture write — `razel_build.info` + the native rules).
     pub fn set_provider(&mut self, ty: &str, field: &str, value: FieldValue) {
         self.providers.insert((ProviderTypeId::new(ty), FieldId::new(field)), value);
+    }
+    /// Set a `Set`-valued provider field from strings — the common native-rule capture. Generic: the
+    /// rule names its own provider (allowed); `state` stays language-free.
+    pub(crate) fn set_set(&mut self, ty: &str, field: &str, values: Vec<String>) {
+        self.set_provider(ty, field, FieldValue::Set(values.into_iter().map(Scalar::Str).collect()));
     }
 }
 

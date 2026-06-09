@@ -44,7 +44,7 @@ fn gather(
     let (mut dep_srcs, mut dep_names) = (Vec::new(), Vec::new());
     for d in &unpack(deps) {
         let dep = resolve_dep(sess, d)?;
-        dep_srcs.extend(dep.field("headers"));
+        dep_srcs.extend(dep.field("py_srcs"));
         dep_names.push(dep.canon);
     }
     Ok(PySources {
@@ -76,13 +76,15 @@ fn py_rules(b: &mut GlobalsBuilder) {
         // Exported sources: own srcs + transitive dep srcs (the `hdrs` channel).
         let mut exported = g.srcs.clone();
         exported.extend(g.dep_srcs);
-        record_target(sess, AnalyzedTarget {
+        let mut t = AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: g.dep_names,
             actions: Vec::new(),
             default_info: g.srcs,
-            providers: crate::state::cc_provider_map(exported, Vec::new()),
-        });
+            ..Default::default()
+        };
+        t.set_set("PyInfo", "srcs", exported); // C3a.5: py's own channel, not cc's hdrs
+        record_target(sess, t);
         Ok(NoneType)
     }
 

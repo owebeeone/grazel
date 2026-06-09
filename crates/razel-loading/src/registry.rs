@@ -94,6 +94,8 @@ pub(crate) fn builtin_registry() -> ProviderRegistry {
     r.register("JavaInfo", "compile_jars", FieldSpec { kind: FieldKind::OrderedDepset, dep_fold: folded("compile_jars", FoldPolicy::Plain) });
     r.register("JavaInfo", "runtime_jars", FieldSpec { kind: FieldKind::OrderedDepset, dep_fold: folded("runtime_jars", FoldPolicy::PrunedBy(FieldId::new("neverlink"))) });
     r.register("JavaInfo", "neverlink", FieldSpec { kind: FieldKind::Scalar, dep_fold: None });
+    // py — its OWN channel for exported `.py` sources (C3a.5: no longer riding cc's `hdrs`).
+    r.register("PyInfo", "srcs", FieldSpec { kind: FieldKind::Set, dep_fold: folded("py_srcs", FoldPolicy::Plain) });
     r
 }
 
