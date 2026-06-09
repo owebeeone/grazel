@@ -92,9 +92,7 @@ pub fn to_dds(targets: &[AnalyzedTarget], instance: InstanceId) -> Result<Dds, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{fold_compile_jars, fold_headers};
     use razel_dds::DdsRead;
-    use std::collections::BTreeMap;
 
     fn at(name: &str, deps: &[&str], hdrs: &[&str], cj: &[&str]) -> AnalyzedTarget {
         AnalyzedTarget {
@@ -110,35 +108,32 @@ mod tests {
     }
 
     #[test]
-    fn dds_fold_reproduces_the_loader_fold() {
-        // diamond: app -> {a, b} -> base. The DDS fold must equal the loader's fold_field.
+    fn dds_fold_is_the_provider_fold() {
+        // diamond: app -> {a, b} -> base. This is THE loader fold now (C2c) — assert its semantics.
         let ts = vec![
             at("base", &[], &["base.h"], &["base.jar"]),
             at("a", &["base"], &["a.h"], &["a.jar"]),
             at("b", &["base"], &["b.h"], &["b.jar"]),
             at("app", &["a", "b"], &["app.h"], &["app.jar"]),
         ];
-        let results: BTreeMap<String, AnalyzedTarget> =
-            ts.iter().map(|t| (t.name.clone(), t.clone())).collect();
         let dds = to_dds(&ts, InstanceId::SINGLE).unwrap();
         let key = target_key(InstanceId::SINGLE, "app").unwrap();
 
-        // Set (cc headers): both deduped over the diamond (base.h once); compare as sorted sets.
-        let mut dds_h = strs(dds.fold_set(&key, &ProviderTypeId::new("CcInfo"), &FieldId::new("hdrs")).into_iter().collect());
-        dds_h.sort();
-        let mut loader_h = fold_headers(&results, "app");
-        loader_h.sort();
-        assert_eq!(dds_h, loader_h, "DDS fold_set must reproduce the loader's header fold");
+        // Set (cc headers): diamond deduped (base.h once), order-independent → sorted.
+        let mut h = strs(
+            dds.fold_set(&key, &ProviderTypeId::new("CcInfo"), &FieldId::new("hdrs")).into_iter().collect(),
+        );
+        h.sort();
+        assert_eq!(h, ["a.h", "app.h", "b.h", "base.h"]);
 
-        // OrderedDepset (java compile jars): preorder + first-occurrence dedup.
-        let dds_cj = strs(dds.fold_depset(&key, &ProviderTypeId::new("JavaInfo"), &FieldId::new("compile_jars")));
-        assert_eq!(dds_cj, fold_compile_jars(&results, "app"), "DDS fold_depset must reproduce the loader's compile-jar fold");
+        // OrderedDepset (java compile jars): preorder (app, a's closure, b), base deduped first-win.
+        let cj = strs(dds.fold_depset(&key, &ProviderTypeId::new("JavaInfo"), &FieldId::new("compile_jars")));
+        assert_eq!(cj, ["app.jar", "a.jar", "base.jar", "b.jar"]);
     }
 
     #[test]
-    fn dds_pruned_fold_reproduces_the_loader_runtime_fold() {
-        use crate::providers::fold_runtime_jars;
-        // app -> api(neverlink) -> hidden: the runtime closure prunes api + its subtree (C2b).
+    fn dds_pruned_fold_drops_the_neverlink_subtree() {
+        // app -> api(neverlink) -> hidden: the runtime closure prunes api + its hidden subtree (C2b).
         let mk = |name: &str, deps: &[&str], rj: &[&str], never: bool| AnalyzedTarget {
             name: name.into(),
             deps: deps.iter().map(|s| s.to_string()).collect(),
@@ -151,20 +146,14 @@ mod tests {
             mk("api", &["hidden"], &["api.jar"], true),
             mk("app", &["api"], &["app.jar"], false),
         ];
-        let results: BTreeMap<String, AnalyzedTarget> =
-            ts.iter().map(|t| (t.name.clone(), t.clone())).collect();
         let dds = to_dds(&ts, InstanceId::SINGLE).unwrap();
         let key = target_key(InstanceId::SINGLE, "app").unwrap();
-        let dds_rj = strs(dds.fold_depset_pruned(
+        let rj = strs(dds.fold_depset_pruned(
             &key,
             &ProviderTypeId::new("JavaInfo"),
             &FieldId::new("runtime_jars"),
             &FieldId::new("neverlink"),
         ));
-        assert_eq!(
-            dds_rj,
-            fold_runtime_jars(&results, "app"),
-            "DDS pruned fold must reproduce the loader's neverlink-pruned runtime fold"
-        );
+        assert_eq!(rj, ["app.jar"], "neverlink api + its hidden subtree pruned from runtime");
     }
 }

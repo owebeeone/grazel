@@ -10,7 +10,6 @@
 
 pub mod rules;
 pub mod state; // C0 decomposition: per-analysis state + core types + the host-cc tool layer
-mod providers; // C0: the transitive provider-field fold
 mod values;
 mod dialect;
 mod glob;

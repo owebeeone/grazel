@@ -3,8 +3,8 @@
 use crate::state::{AnalyzedTarget, canon_label, qualify, session, with_current};
 use crate::values::{Actions, Depset, File, extract_files, file_path, unpack};
 use crate::glob::do_glob;
-use crate::providers::{fold_compile_jars, fold_headers, fold_runtime_jars};
 use crate::deps::record_target;
+use razel_dds::{DdsRead, FieldId, InstanceId, ProviderTypeId, Scalar};
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
@@ -116,6 +116,24 @@ where
                     let mut providers: Vec<Value<'v>> = Vec::new();
                     if let Some(list) = ListRef::from_value(*v) {
                         let results = sess.results.borrow();
+                        // C2c: transitive provider closures come from the ONE razel-dds fold
+                        // (`DdsRead` over a fact store built from the analyzed-so-far targets) — the
+                        // parallel loader traversal is gone. cc `.headers` = `Set` fold; java
+                        // `.compile_jars` = `OrderedDepset`; `.runtime_jars` = the same, neverlink-
+                        // subtree-pruned (the prune the `neverlink` Scalar drives).
+                        let dds = crate::dds::to_dds(
+                            &results.values().cloned().collect::<Vec<_>>(),
+                            InstanceId::SINGLE,
+                        )
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                        let to_strs = |xs: Vec<Scalar>| -> Vec<String> {
+                            xs.into_iter().filter_map(|s| match s {
+                                Scalar::Str(x) => Some(x),
+                                _ => None,
+                            }).collect()
+                        };
+                        let (cc, java) =
+                            (ProviderTypeId::new("CcInfo"), ProviderTypeId::new("JavaInfo"));
                         for item in list.iter() {
                             let label = item.unpack_str().unwrap_or_default();
                             // Key by canonical label — bare in single-package mode,
@@ -128,15 +146,19 @@ where
                                 )
                                 .into());
                             };
-                            // `.files` = the dep's DefaultInfo; `.headers` = its transitive CcInfo
-                            // exported headers (A2a — the provides fold, so the rule() path sees deps).
                             let files = dep_target.default_info.clone();
-                            let headers = fold_headers(&results, &dep);
-                            // `.compile_jars` = the dep's transitive JavaInfo compile jars, ORDERED
-                            // (B3); `.runtime_jars` = the SEPARATE runtime closure, neverlink-pruned
-                            // (B4). No cross-merge — two independent ordered folds.
-                            let compile_jars = fold_compile_jars(&results, &dep);
-                            let runtime_jars = fold_runtime_jars(&results, &dep);
+                            let key = crate::dds::target_key(InstanceId::SINGLE, &dep)
+                                .map_err(|e| anyhow::anyhow!(e))?;
+                            let headers =
+                                to_strs(dds.fold_set(&key, &cc, &FieldId::new("hdrs")).into_iter().collect());
+                            let compile_jars =
+                                to_strs(dds.fold_depset(&key, &java, &FieldId::new("compile_jars")));
+                            let runtime_jars = to_strs(dds.fold_depset_pruned(
+                                &key,
+                                &java,
+                                &FieldId::new("runtime_jars"),
+                                &FieldId::new("neverlink"),
+                            ));
                             dep_labels.push(dep);
                             providers.push(heap.alloc(AllocStruct([
                                 ("files".to_string(), files),
