@@ -116,6 +116,132 @@ fn normalize_rust_hash(s: &str) -> String {
     result
 }
 
+// ── Graph-parity runner (RazelStarlarkBoundaryPlan §10 A0) ───────────────────────────
+//
+// Compare razel's declared action GRAPH (a *set* of actions) to the golden — not cherry-picked
+// single actions, which is what let a missing action (e.g. `CppModuleMap`) go uncaught. `diff`
+// takes an explicit `omit` allowlist of mnemonics razel intentionally does not model; they are
+// recorded in `Report::omitted`, never silently dropped.
+
+/// One declared action in comparable form. `argv` is order-significant; `inputs`/`outputs` are
+/// compared as sorted sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Action {
+    pub mnemonic: String,
+    pub argv: Vec<String>,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
+impl Action {
+    /// Set-pairing identity: mnemonic + outputs (stable once razel's path model matches Bazel's).
+    pub fn key(&self) -> String {
+        format!("{} -> {:?}", self.mnemonic, self.outputs)
+    }
+}
+
+/// Parse a **normalized** `bazel aquery` golden into its full action set (every `action '…'` block).
+pub fn parse_golden(golden: &str) -> Vec<Action> {
+    golden.split("action '").skip(1).map(parse_action_block).collect()
+}
+
+fn parse_action_block(block: &str) -> Action {
+    Action {
+        mnemonic: line_value(block, "Mnemonic:").unwrap_or_default(),
+        argv: parse_command_line(block),
+        inputs: parse_bracket_list(block, "Inputs: ["),
+        outputs: parse_bracket_list(block, "Outputs: ["),
+    }
+}
+
+/// Text after `key` on its line, trimmed (`  Mnemonic: CppCompile` → `CppCompile`).
+fn line_value(block: &str, key: &str) -> Option<String> {
+    block.lines().find_map(|l| l.trim_start().strip_prefix(key).map(|v| v.trim().to_string()))
+}
+
+/// A sorted `key[a, b, c]` list (`Inputs: [...]` / `Outputs: [...]`).
+fn parse_bracket_list(block: &str, key: &str) -> Vec<String> {
+    let Some(start) = block.find(key) else { return Vec::new() };
+    let rest = &block[start + key.len()..];
+    let end = rest.find(']').unwrap_or(rest.len());
+    let mut v: Vec<String> =
+        rest[..end].split(", ").filter(|s| !s.is_empty()).map(str::to_string).collect();
+    v.sort();
+    v
+}
+
+/// The `Command Line: (exec … )` argv (drop `\` continuations; strip Bazel's single-quotes).
+fn parse_command_line(block: &str) -> Vec<String> {
+    const K: &str = "Command Line: (exec ";
+    let Some(start) = block.find(K) else { return Vec::new() };
+    let rest = &block[start + K.len()..];
+    let end = rest.find(')').unwrap_or(rest.len());
+    rest[..end]
+        .split_whitespace()
+        .filter(|t| *t != "\\")
+        .map(|t| t.trim_matches('\'').to_string())
+        .collect()
+}
+
+/// A discrepancy on a paired action (same `key`, differing argv/inputs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    pub key: String,
+    pub argv_differs: bool,
+    pub inputs_differ: bool,
+}
+
+/// A graph diff. `is_match()` ⇔ nothing mismatched/missing/extra (allowlisted `omitted` is fine).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Report {
+    pub matched: Vec<String>,
+    pub mismatched: Vec<Mismatch>,
+    pub missing: Vec<String>, // in golden (not omitted), absent from razel
+    pub extra: Vec<String>,   // in razel, absent from golden
+    pub omitted: Vec<String>, // golden actions dropped by the allowlist (logged, not a failure)
+}
+
+impl Report {
+    pub fn is_match(&self) -> bool {
+        self.mismatched.is_empty() && self.missing.is_empty() && self.extra.is_empty()
+    }
+}
+
+/// Diff razel's declared action set against the golden's. `omit` = mnemonics razel intentionally
+/// does not model (e.g. `CppModuleMap`); recorded in `Report::omitted`, never silently ignored.
+pub fn diff(razel: &[Action], golden: &[Action], omit: &[&str]) -> Report {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut report = Report::default();
+    let razel_by: BTreeMap<String, &Action> = razel.iter().map(|a| (a.key(), a)).collect();
+    let mut golden_keys = BTreeSet::new();
+
+    for g in golden {
+        if omit.contains(&g.mnemonic.as_str()) {
+            report.omitted.push(g.key());
+            continue;
+        }
+        golden_keys.insert(g.key());
+        match razel_by.get(&g.key()) {
+            None => report.missing.push(g.key()),
+            Some(r) => {
+                let argv_differs = r.argv != g.argv;
+                let inputs_differ = r.inputs != g.inputs;
+                if argv_differs || inputs_differ {
+                    report.mismatched.push(Mismatch { key: g.key(), argv_differs, inputs_differ });
+                } else {
+                    report.matched.push(g.key());
+                }
+            }
+        }
+    }
+    for r in razel {
+        if !omit.contains(&r.mnemonic.as_str()) && !golden_keys.contains(&r.key()) {
+            report.extra.push(r.key());
+        }
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +306,62 @@ mod tests {
         let raw = "  Outputs: [bazel-out/c/bin/libx-12716653.rlib]\n  Inputs: [external/r/y]\n  '-mmacosx-version-min=26.4'\n    '--codegen=metadata=-791554189'";
         let once = normalize(raw);
         assert_eq!(normalize(&once), once, "normalization must be idempotent");
+    }
+
+    #[test]
+    fn parse_golden_reads_the_action_set() {
+        let g = "preamble\n\
+            action 'Compiling x'\n  Mnemonic: CppCompile\n  Inputs: [b.h, a.cc]\n  Outputs: [a.o]\n  \
+            Command Line: (exec cc \\\n    -c \\\n    a.cc)\n\n\
+            action 'Linking lib'\n  Mnemonic: CppArchive\n  Inputs: [a.o]\n  Outputs: [lib.a]\n  \
+            Command Line: (exec ar rcs lib.a a.o)\n";
+        let acts = parse_golden(g);
+        assert_eq!(acts.len(), 2);
+        assert_eq!(acts[0].mnemonic, "CppCompile");
+        assert_eq!(acts[0].inputs, ["a.cc", "b.h"]); // sorted
+        assert_eq!(acts[0].outputs, ["a.o"]);
+        assert_eq!(acts[0].argv, ["cc", "-c", "a.cc"]); // `\` continuations dropped
+        assert_eq!(acts[1].mnemonic, "CppArchive");
+    }
+
+    fn act(m: &str, argv: &[&str], out: &str) -> Action {
+        Action {
+            mnemonic: m.into(),
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            inputs: vec![],
+            outputs: vec![out.into()],
+        }
+    }
+
+    #[test]
+    fn diff_classifies_match_mismatch_missing_extra_omitted() {
+        let golden = vec![
+            act("CppCompile", &["cc", "-c", "x"], "x.o"),
+            act("CppModuleMap", &["mm"], "x.cppmap"),
+            act("CppArchive", &["ar"], "lib.a"),
+        ];
+        // razel: compile matches; archive argv differs; no cppmap; plus an extra link.
+        let razel = vec![
+            act("CppCompile", &["cc", "-c", "x"], "x.o"),
+            act("CppArchive", &["libtool"], "lib.a"),
+            act("CppLink", &["ld"], "bin"),
+        ];
+        let r = diff(&razel, &golden, &["CppModuleMap"]);
+        assert_eq!(r.matched, ["CppCompile -> [\"x.o\"]"]);
+        assert_eq!(r.mismatched.len(), 1);
+        assert!(r.mismatched[0].argv_differs);
+        assert_eq!(r.omitted, ["CppModuleMap -> [\"x.cppmap\"]"]); // logged, not missing
+        assert!(r.missing.is_empty());
+        assert_eq!(r.extra, ["CppLink -> [\"bin\"]"]);
+        assert!(!r.is_match());
+    }
+
+    #[test]
+    fn diff_matches_identical_sets_modulo_omit() {
+        let golden = vec![act("CppCompile", &["t"], "x.o"), act("CppModuleMap", &["mm"], "x.cppmap")];
+        let razel = vec![act("CppCompile", &["t"], "x.o")];
+        let r = diff(&razel, &golden, &["CppModuleMap"]);
+        assert!(r.is_match());
+        assert_eq!(r.omitted.len(), 1);
     }
 }

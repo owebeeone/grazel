@@ -16,3 +16,4 @@ starlark = "0.14.2"
 # (The reusable bridge belongs in razel-adapter-bazel — L4; this is the demonstration.)
 [dev-dependencies]
 razel-cc-toolchain = { version = "0.1.0", path = "../razel-cc-toolchain" }
+razel-parity = { version = "0.1.0", path = "../razel-parity" }
