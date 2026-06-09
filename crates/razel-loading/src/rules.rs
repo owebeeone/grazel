@@ -158,11 +158,15 @@ pub struct GlobalFlags {
 /// The parity context wants faithful (AdoptBazel); the build context wants runnable (Native).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CcToolchainMode {
-    /// Resolve + run the host compiler — an executable graph (razel-build's path).
+    /// Resolve + run the host compiler — an executable graph (razel-build's path). **NOT Bazel-parity-
+    /// tested** and never will be without toolchain materialization: this is razel's runnable lowering
+    /// (host cc + simple flags), distinct from Bazel's declared graph. Only `AdoptBazel` is golden-
+    /// tested; the characterization pins Native's *own* output, not Bazel parity (F18). Converging the
+    /// two — running the declared graph as the executed graph — is Phase C/D (RazelGaps).
     #[default]
     Native,
     /// Bazel's faithful declared graph (`cc_wrapper.sh` + `bazel-out`) over razel's `cc:defs.bzl`;
-    /// the graph-parity runner's path (declares + diffs, never executes).
+    /// the graph-parity runner's path (declares + diffs, never executes). The ONLY golden-tested mode.
     AdoptBazel,
 }
 

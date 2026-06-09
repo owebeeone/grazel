@@ -151,3 +151,20 @@ duplication collapses — F24/F29) is the **Phase-C provider-map** epic: the sam
   one-host `cc_configure` transcription. The generated config is explicitly A5b/Phase D. Flagged-
   acceptable; an optional drift-catching characterization test (fixture vs a fresh host `cc_configure`)
   can land with A5b.
+
+## Native cc path parity / executed==declared convergence (Phase C/D; review F18)
+
+razel has two cc backends (§7): **Native** (`#[default]` — PATH-resolved host `cc` + simple flags;
+what razel-build EXECUTES) and **Adopt-Bazel** (razel's `cc:defs.bzl` over the engine → Bazel's
+faithful DECLARED graph; what the graph-parity runner checks). **Gap:** only Adopt-Bazel is golden-
+tested; the executed Native path is razel's runnable lowering and is **not** Bazel-parity (it can't be
+without materializing Bazel's toolchain — `cc_wrapper.sh` + the `bazel-out` execroot). So green
+characterization is NOT evidence the executed cc output is Bazel-faithful — it pins Native's *own*
+output (a regression guard), per the characterization header.
+
+- **Don't fake it:** there is no "Native parity" golden to write — Native ≠ Bazel's declared graph by
+  construction. The honest state (now documented in §7 exit + `CcToolchainMode::Native`): Adopt-Bazel
+  is parity-proven; Native is executable + characterized-but-not-parity.
+- **Convergence (Phase C/D):** make the executed graph BE the declared graph — materialize Bazel's
+  toolchain so razel-build runs Adopt-Bazel's `cc_wrapper.sh` + `bazel-out` graph (the §7 "adopt the
+  toolchain" end state). Then executed == parity-tested. Until then the gap is real and named.

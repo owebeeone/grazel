@@ -295,7 +295,13 @@ Each step is a green, committed, tagged (`razel-v2/…`) roll-build with an expl
   *shims* — evaluating them + a `cc_common` builtin + the BUILD's ~20 host attrs **is** the run-it
   path. Folded into Phase D (run real ruleset Starlark), not a Phase-A bolt-on.
 
-*Exit: a real BUILD's cc graph is produced by the engine, through razel's bundled `.bzl`, parity-proven on the live path, config in the real cc_common API (the actual generated config → Phase D).*
+*Exit: a real BUILD's cc **declared** graph (Adopt-Bazel mode) is produced by the engine through
+razel's bundled `.bzl`, **parity-proven against the golden**; config in the real cc_common API. NOTE
+(F18): the **executed** path is **Native** mode (the PATH-resolved host compiler + simple flags) —
+razel's runnable lowering, NOT the Bazel-faithful declared graph and NOT golden-tested (only the
+Adopt-Bazel declared graph is). Converging them — running the engine's declared graph as the executed
+graph (toolchain materialization) — is Phase C/D (RazelGaps "Native cc path parity"). The actual
+generated config is likewise Phase D.*
 
 ### Phase B — java compile spike (validate the abstraction)
 *The second data point — before any generic API is frozen.*
