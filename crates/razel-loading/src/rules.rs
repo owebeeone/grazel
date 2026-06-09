@@ -10,7 +10,9 @@
 
 
 use crate::state::{AnalyzedTarget, CcToolchainMode, GlobalFlags, Session, canon_label, pkg_of};
-use crate::engine::{attr_members, native_members, razel_build_members};
+use crate::engine::{
+    attr_members, config_members, native_members, platform_common_members, razel_build_members,
+};
 use crate::shims::{auto_config_module, rules_cc_module, rules_java_module, rules_skylib_module};
 use crate::dialect::rule_globals;
 use starlark::environment::{
@@ -39,6 +41,9 @@ pub(crate) fn build_globals() -> Globals {
         b.namespace("native", native_members);
         b.namespace("attr", attr_members);
         b.namespace("razel_build", razel_build_members);
+        // D4: Bazel builtin-namespace stubs so real upstream .bzl load (skylib/rules_rust).
+        b.namespace("config", config_members);
+        b.namespace("platform_common", platform_common_members);
     })
     .build()
 }

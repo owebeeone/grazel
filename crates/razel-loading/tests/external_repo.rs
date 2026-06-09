@@ -68,3 +68,29 @@ fn loads_real_bazel_skylib_paths() {
     let targets = res.expect("workspace analysis with a real skylib load");
     assert!(targets.iter().any(|t| t.name.ends_with("leaf.o")));
 }
+
+/// D4.3: real bazel_skylib `common_settings.bzl` loads — it needs `provider()`, the `config.*` /
+/// `platform_common` builtin stubs, and `rule()` absorbing extra kwargs (`build_setting`, `doc`).
+#[test]
+fn loads_real_bazel_skylib_common_settings() {
+    let tp = third_party();
+    assert!(
+        tp.join("bazel-skylib/rules/common_settings.bzl").exists(),
+        "vendored bazel_skylib common_settings expected at {}",
+        tp.display()
+    );
+    let root = std::env::temp_dir().join(format!("razel-d4-cs-{}", std::process::id()));
+    let pkg = root.join("app");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("BUILD"),
+        "load(\"@bazel_skylib//rules:common_settings.bzl\", \"BuildSettingInfo\")\n\
+         filegroup(name = \"x\", srcs = [])\n",
+    )
+    .unwrap();
+    let flags = GlobalFlags { external_base: Some(tp), ..Default::default() };
+    let res = analyze_workspace_with(&root, "//app:x", flags);
+    let _ = std::fs::remove_dir_all(&root);
+    let targets = res.expect("real common_settings.bzl loads");
+    assert!(targets.iter().any(|t| t.name.ends_with("x")));
+}

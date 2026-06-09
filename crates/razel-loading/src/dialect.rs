@@ -309,6 +309,9 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     fn rule<'v>(
         #[starlark(require = named)] implementation: Value<'v>,
         #[starlark(require = named)] attrs: Option<Value<'v>>,
+        // D4: absorb the other rule() kwargs upstream rules pass (build_setting, doc, cfg, toolchains,
+        // provides, executable, test, …). Not yet honored — enough to define the rule.
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
         // D1: keep the declared schema (was discarded) — instantiation consults it for defaults +

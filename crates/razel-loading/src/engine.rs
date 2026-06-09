@@ -35,6 +35,38 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
 }
 
 
+/// Bazel's `config.*` build-setting constructors (D4 upstream compat). Stubs: razel doesn't model
+/// build settings yet, but real rules call `config.int(...)`/etc. at load (skylib `common_settings`).
+#[starlark::starlark_module]
+pub(crate) fn config_members(b: &mut GlobalsBuilder) {
+    fn int<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn bool<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn string<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn string_list<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+}
+
+/// Bazel's `platform_common.*` namespace (D4 upstream compat). Stub: real rules reference
+/// `platform_common.TemplateVariableInfo` etc.; razel resolves the global so the `.bzl` loads (the
+/// member calls are deferred to instantiation, not yet exercised).
+#[allow(non_snake_case)]
+#[starlark::starlark_module]
+pub(crate) fn platform_common_members(b: &mut GlobalsBuilder) {
+    fn TemplateVariableInfo<'v>(
+        #[starlark(require = pos)] _fields: Option<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+}
+
 /// The Bazel `attr.*` namespace: declares a rule's attribute schema. razel's `rule()`
 /// resolves attribute *values* directly from the call kwargs (it doesn't enforce the
 /// schema), so each `attr.<kind>(...)` is a placeholder descriptor — present so rule
