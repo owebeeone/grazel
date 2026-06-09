@@ -11,8 +11,9 @@ use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::{Arguments, Evaluator};
-use starlark::starlark_complex_value;
+use starlark::{starlark_complex_value, starlark_simple_value};
 use starlark::values::list::{ListRef, UnpackList};
+use starlark::values::tuple::UnpackTuple;
 use starlark::values::none::NoneType;
 use starlark::values::structs::AllocStruct;
 use starlark::values::{
@@ -266,6 +267,41 @@ where
 }
 
 
+/// A `provider()` value (D4.2): a callable that constructs a provider instance. Calling it with
+/// kwargs (`MyInfo(msg = "hi")`) yields a `struct` of those fields — the instance, read locally
+/// (`info.msg`) or, later, captured from a rule's return + read off a dep (`dep[MyInfo]`, D4.3+).
+/// Holds only field names (Bazel `provider(fields=…)`), so it freezes trivially and survives a `.bzl`
+/// `load()` (`BuildSettingInfo = provider(...)`).
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
+pub(crate) struct ProviderCallable {
+    fields: Vec<String>,
+}
+starlark_simple_value!(ProviderCallable);
+
+impl fmt::Display for ProviderCallable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<provider>")
+    }
+}
+
+#[starlark_value(type = "provider")]
+impl<'v> StarlarkValue<'v> for ProviderCallable {
+    /// `MyInfo(field = value, …)` → a `struct` carrying those fields (the provider instance).
+    fn invoke(
+        &self,
+        _me: Value<'v>,
+        args: &Arguments<'v, '_>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let _ = &self.fields; // declared field names (validation not yet enforced)
+        let named = args.names_map()?;
+        let fields: Vec<(String, Value<'v>)> =
+            named.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect();
+        Ok(eval.heap().alloc(AllocStruct(fields)))
+    }
+}
+
+
 #[allow(non_snake_case)]
 #[starlark::starlark_module]
 pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
@@ -279,6 +315,16 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // mandatory. alloc (freezable) so the rule survives module.freeze() (defined in a .bzl + load()ed).
         let attrs = attrs.unwrap_or_else(Value::new_none);
         Ok(eval.heap().alloc(RuleObjGen { implementation, attrs }))
+    }
+
+    /// `provider(doc=?, fields=?, ...)` → a callable provider constructor (D4.2). Args are absorbed
+    /// (fields validation not yet enforced); calling the result builds the instance struct.
+    fn provider<'v>(
+        #[starlark(args)] _args: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(eval.heap().alloc(ProviderCallable { fields: Vec::new() }))
     }
 
     /// `Label("//pkg:name")` — a minimal Label exposing `.package`/`.name`/
