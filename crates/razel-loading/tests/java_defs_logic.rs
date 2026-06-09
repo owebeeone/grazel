@@ -38,3 +38,36 @@ fn java_library_produces_three_actions_and_ordered_header_jar_classpath() {
     // JavaInfo captured util's OWN header jar (the OrderedDepset element dependents fold).
     assert_eq!(util.compile_jars, ["bazel-out/darwin_arm64-fastbuild/bin/libutil-hjar.jar"]);
 }
+
+#[test]
+fn java_info_dual_depsets_dont_cross_merge_and_neverlink_excludes_runtime() {
+    // B4: app deps a normal lib (base) + a neverlink lib (api). The compile classpath sees BOTH
+    // (neverlink is compile-time); the runtime classpath sees base's jar but NOT api's (neverlink
+    // excluded). And compile carries HEADER jars, runtime carries FULL jars — no cross-merge.
+    let src = format!(
+        "{JAVA_DEFS}\n\
+         java_library(name = \"base\", srcs = [\"Base.java\"])\n\
+         java_library(name = \"api\", srcs = [\"Api.java\"], neverlink = True)\n\
+         java_library(name = \"app\", srcs = [\"App.java\"], deps = [\":base\", \":api\"])\n"
+    );
+    let targets = analyze_starlark("BUILD", &src).unwrap();
+    let app = targets.iter().find(|t| t.name.ends_with("app")).unwrap();
+    let javac = app.actions.iter().find(|a| a.mnemonic == "Javac").unwrap();
+
+    let argv = &javac.argv;
+    let at = |flag: &str| argv.iter().position(|a| a == flag).unwrap();
+    let compile_cp = &argv[at("--classpath") + 1..at("--runtime_classpath")];
+    let runtime_cp = &argv[at("--runtime_classpath") + 1..at("--sources")];
+    let p = |s: &str| format!("bazel-out/darwin_arm64-fastbuild/bin/{s}");
+
+    // Compile classpath: BOTH deps' header jars (neverlink api included at compile time).
+    assert!(compile_cp.contains(&p("libbase-hjar.jar")), "compile: {compile_cp:?}");
+    assert!(compile_cp.contains(&p("libapi-hjar.jar")), "compile: {compile_cp:?}");
+    // Runtime classpath: base's FULL jar; api EXCLUDED (neverlink). No cross-merge (no hjars here).
+    assert_eq!(runtime_cp, [p("libbase.jar")], "runtime: {runtime_cp:?}");
+
+    // api carries a compile jar but no runtime jar, and is flagged neverlink.
+    let api = targets.iter().find(|t| t.name.ends_with("api")).unwrap();
+    assert_eq!(api.compile_jars, [p("libapi-hjar.jar")]);
+    assert!(api.runtime_jars.is_empty() && api.neverlink);
+}

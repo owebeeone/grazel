@@ -127,6 +127,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             hdrs: Vec::new(),
             cflags: Vec::new(),
             compile_jars: Vec::new(),
+            runtime_jars: Vec::new(),
+            neverlink: false,
         });
         Ok(NoneType)
     }
@@ -178,6 +180,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             hdrs: Vec::new(),
             cflags: Vec::new(),
             compile_jars: Vec::new(),
+            runtime_jars: Vec::new(),
+            neverlink: false,
         });
         Ok(NoneType)
     }

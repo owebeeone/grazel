@@ -59,6 +59,13 @@ pub struct AnalyzedTarget {
     /// **Ordered** (the dependents' classpath order is load-bearing): a dependent folds these
     /// preorder via [`fold_compile_jars`] (the OrderedDepset analog, B2/B3). Empty for non-java.
     pub compile_jars: Vec<String>,
+    /// `JavaInfo(runtime_jars=…)` — this target's OWN runtime jar (the full jar). A SEPARATE ordered
+    /// depset from `compile_jars` that does NOT cross-merge (B4): the runtime classpath folds via
+    /// [`fold_runtime_jars`], independent of the compile classpath.
+    pub runtime_jars: Vec<String>,
+    /// `JavaInfo(neverlink=True)` — compile-only: on dependents' COMPILE classpath but EXCLUDED from
+    /// their runtime closure ([`fold_runtime_jars`] skips a neverlink node + its subtree). B4.
+    pub neverlink: bool,
 }
 
 #[derive(Default)]
@@ -496,6 +503,36 @@ fn fold_compile_jars(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> 
     acc
 }
 
+/// Transitive RUNTIME classpath of `root` (B4) — the OrderedDepset fold over `runtime_jars`,
+/// **separate** from the compile fold (no cross-merge), with the `neverlink` conditional: a
+/// neverlink node is excluded from the runtime closure AND prunes its subtree (compile-only deps
+/// don't reach runtime). Preorder, dedup first-occurrence, cycle-safe.
+fn fold_runtime_jars(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> Vec<String> {
+    let mut acc = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![root.to_string()];
+    while let Some(t) = stack.pop() {
+        if !visited.insert(t.clone()) {
+            continue;
+        }
+        if let Some(tgt) = results.get(&t) {
+            if tgt.neverlink {
+                continue; // compile-only — excluded from runtime, and prunes its subtree
+            }
+            for j in &tgt.runtime_jars {
+                if seen.insert(j.clone()) {
+                    acc.push(j.clone());
+                }
+            }
+            for d in tgt.deps.iter().rev() {
+                stack.push(d.clone());
+            }
+        }
+    }
+    acc
+}
+
 // ---- ctx ------------------------------------------------------------------------
 
 /// The analysis `ctx`. All fields are heap `Value`s so it traces cleanly, no freezing.
@@ -600,13 +637,16 @@ where
                             let files = dep_target.default_info.clone();
                             let headers = fold_headers(&results, &dep);
                             // `.compile_jars` = the dep's transitive JavaInfo compile jars, ORDERED
-                            // (B3 — the classpath the rule() java path folds preorder).
+                            // (B3); `.runtime_jars` = the SEPARATE runtime closure, neverlink-pruned
+                            // (B4). No cross-merge — two independent ordered folds.
                             let compile_jars = fold_compile_jars(&results, &dep);
+                            let runtime_jars = fold_runtime_jars(&results, &dep);
                             dep_labels.push(dep);
                             providers.push(heap.alloc(AllocStruct([
                                 ("files".to_string(), files),
                                 ("headers".to_string(), headers),
                                 ("compile_jars".to_string(), compile_jars),
+                                ("runtime_jars".to_string(), runtime_jars),
                             ])));
                         }
                     }
@@ -836,13 +876,24 @@ fn rule_globals(b: &mut GlobalsBuilder) {
     #[allow(non_snake_case)]
     fn JavaInfo<'v>(
         #[starlark(require = named)] compile_jars: Option<Value<'v>>,
+        #[starlark(require = named)] runtime_jars: Option<Value<'v>>,
+        #[starlark(require = named)] neverlink: Option<bool>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        if let Some(j) = compile_jars {
-            let paths = extract_files(j);
-            with_current(session(eval), |c| c.compile_jars = paths);
-        }
+        // Two SEPARATE ordered depsets (compile vs runtime) + the neverlink conditional (B4).
+        let compile = compile_jars.map(extract_files);
+        let runtime = runtime_jars.map(extract_files);
+        let nl = neverlink.unwrap_or(false);
+        with_current(session(eval), |c| {
+            if let Some(j) = compile {
+                c.compile_jars = j;
+            }
+            if let Some(j) = runtime {
+                c.runtime_jars = j;
+            }
+            c.neverlink = nl;
+        });
         Ok(NoneType)
     }
 
@@ -1162,6 +1213,8 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             hdrs: export_hdrs,
             cflags: export_cflags,
             compile_jars: Vec::new(),
+            runtime_jars: Vec::new(),
+            neverlink: false,
         });
         Ok(NoneType)
     }
@@ -1219,6 +1272,8 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             hdrs: Vec::new(),
             cflags: Vec::new(),
             compile_jars: Vec::new(),
+            runtime_jars: Vec::new(),
+            neverlink: false,
         });
         Ok(NoneType)
     }

@@ -54,6 +54,8 @@ fn analyze_sh(
         hdrs: Vec::new(),
         cflags: Vec::new(),
         compile_jars: Vec::new(),
+        runtime_jars: Vec::new(),
+        neverlink: false,
     });
     Ok(NoneType)
 }

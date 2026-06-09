@@ -24,10 +24,15 @@ def _java_library_impl(ctx):
     srcjar = "%s/lib%s-src.jar" % (prefix, name)
     srcs = [src_prefix + s for s in getattr(ctx.attr, "srcs", [])]
 
-    # Ordered transitive compile classpath: deps' compile_jars (their header jars) — OrderedDepset.
+    neverlink = getattr(ctx.attr, "neverlink", False)
+
+    # Two ORDERED, non-cross-merging classpaths (B4): compile = deps' header jars; runtime = deps'
+    # full jars (neverlink deps pruned from runtime). Folded independently (OrderedDepset).
     classpath = []
+    runtime_cp = []
     for d in getattr(ctx.attr, "deps", []):
         classpath = classpath + d.compile_jars
+        runtime_cp = runtime_cp + d.runtime_jars
 
     # Turbine — the header/interface jar (fast; enables compile-avoidance for dependents).
     ctx.actions.run(
@@ -47,7 +52,7 @@ def _java_library_impl(ctx):
             "--output",
             jar,
             "--classpath",
-        ] + classpath + ["--sources"] + srcs,
+        ] + classpath + ["--runtime_classpath"] + runtime_cp + ["--sources"] + srcs,
         inputs = srcs + classpath,
         outputs = [jar],
         mnemonic = "Javac",
@@ -61,7 +66,15 @@ def _java_library_impl(ctx):
         mnemonic = "JavaSourceJar",
     )
 
-    # JavaInfo: compile_jars = the OWN header jar (the ordered classpath element dependents fold).
-    return [JavaInfo(compile_jars = [hjar]), DefaultInfo(files = [jar])]
+    # JavaInfo: compile_jars = OWN header jar (always); runtime_jars = OWN full jar UNLESS neverlink
+    # (compile-only → excluded from dependents' runtime). The two depsets don't cross-merge (B4).
+    return [
+        JavaInfo(
+            compile_jars = [hjar],
+            runtime_jars = [] if neverlink else [jar],
+            neverlink = neverlink,
+        ),
+        DefaultInfo(files = [jar]),
+    ]
 
 java_library = rule(implementation = _java_library_impl, attrs = {})
