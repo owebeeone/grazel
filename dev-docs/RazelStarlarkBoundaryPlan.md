@@ -61,6 +61,12 @@ fact**:
 - **The action *shape* differs.** javac compiles a whole module in **one** action (classpath as a
   flag); cc is **per-source** compile + archive. `razel_build.action` must not bake in cc's
   one-action-per-source assumption.
+- **The "uniform" move 1 (toolchain) is the least-built seam.** `rule()` *discards* `attrs`
+  (`rules.rs:600`; "the schema is not consulted") and has **no `toolchains`**; deps resolve only to
+  `DefaultInfo.files`, not arbitrary providers. So move 1 + dep→provider have no real live mechanism.
+  Resolution — depth per track (the **"middle" lean**): *shallow* for razel's authored rules (Phase A:
+  a thin `razel_build.toolchain` accessor + dep→`CcInfo` + attr-*kinds*); *full* for run-it (Phase D:
+  real schema/coercion/`cfg`/multi-label + `ctx.toolchains`/registration/platforms).
 
 Honest read: the abstraction is probably right, but it must be **extracted from two instances**
 (§9/§10), not extrapolated from cc.
@@ -148,9 +154,10 @@ def _cc_library_impl(ctx):
 "We already built cc" is true of the **engine**: `Constrain` + the `derive` + the path model
 reproduce the golden, and the parity runner proves it. It is **not** true of the path the CLI runs:
 `analyze_bazel`'s cc lowering is a *second, hardcoded* backend (the `/usr/bin/c++ -iquote …` argv in
-`razel-loading/src/rules.rs`) that **bypasses `Constrain` entirely**. Phase A's whole point is to
-make the **live** path go through the engine + the bundled `.bzl`, so the runner checks the real
-output, not a sidecar.
+`razel-loading/src/rules.rs`) that **bypasses `Constrain` entirely** — and rust is symmetric: a
+separate live `/usr/bin/rustc` backend (`rust_rules.rs`) distinct from `rust.rs`'s template. Phase A
+makes the **live cc** path go through the engine + the bundled `.bzl` (Phase D does the same for
+rust), so the runner checks the real output, not a sidecar.
 
 ## 7. Where the `.bzl` live — the bundling decision
 
@@ -165,10 +172,14 @@ version atomically — the `.bzl` is a *contract with the binary's builtin API*.
   `MODULE.bazel` (third-party, project-versioned). razel runs them over the bundled Rust builtins.
 - **Rust builtins** → always in the binary (they *are* razel).
 
-So: bundle what razel *authors*; fetch what razel *runs*. (Execution note: the builtins emit the
-**declared** graph with Bazel-faithful argv; what razel actually *runs* is the executor's concern —
-either razel adopts the bazel toolchain, or the declared/executable split is made explicit. Not yet
-specced; flagged.)
+So: bundle what razel *authors*; fetch what razel *runs*.
+
+**Declared-vs-executable — decided: razel adopts the bazel toolchain.** The builtins emit the
+**declared** graph with Bazel-faithful argv (`cc_wrapper.sh` + `bazel-out` paths); razel
+**materializes that toolchain** (`local_config_cc` etc. — "fetch what you run") and executes it, so
+*declared == executable* — one argv, no split. Most bazel-faithful (run the same toolchain bazel
+does), and it collapses the parity runner's comparison to a single command line. (An explicit
+declared/executable split is the fallback if a toolchain proves unmaterializable — not the default.)
 
 ## 8. The extension-hook tail (honesty: not a fixed %)
 
@@ -180,20 +191,27 @@ ledger (B5), and that's the real number. Each hook must be a bounded extension f
 surface, not a parallel implementation — but how much hook java needs is an output of the spike, not
 an assumption.
 
+**`CppModuleMap` — decided: scoped out, but asserted not silent.** razel does not model C++ modules
+(layering-check / `.cppmap`). The graph-parity runner (§10 A0) asserts razel's action *set* equals
+the golden's **minus an explicit allowlist `{CppModuleMap}`**, and **logs** the omission — a recorded
+scope line, not a silently-missing action (the per-action-vs-per-graph gap Review49 caught). Modules
+become a later feature behind that allowlist.
+
 ## 9. Build sequence (reordered — prove, then generalize)
 
 The review's key correction: **don't freeze `razel_build` from one example.** Reordered so the
 abstraction is extracted from *two* instances and the live path uses the engine first:
 
-- **A — cc end-to-end on the real mechanism.** `razel_cc` (concrete), bundled `cc:defs.bzl`, the
-  **live** path through the engine, config evaluated. Proves the eval/bundle/builtin machinery + the
-  parity on the path the CLI runs.
+- **A — cc end-to-end on the real mechanism.** Starts with **A0, a *failing* graph-parity acceptance
+  test** (AGENTS.md Rule 0); then `razel_cc` (concrete), bundled `cc:defs.bzl`, the **live** path
+  through the engine, config evaluated — driving A0 green on the path the CLI runs.
 - **B — java compile spike.** A genuinely different shape (whole-module javac, `JavaInfo`'s ordered
   non-merging depsets); lands `OrderedDepset`; produces the generic-vs-bespoke ledger. **The second
   data point that validates the abstraction.**
 - **C — extract `razel_build`.** *Now* freeze the generic API, refactoring cc + java onto it.
-- **D — run-it path.** Close the generic-Starlark-API gaps (`Args` fidelity, toolchains) → run the
-  **real** `rules_rust`, retiring the `rust.rs` template.
+- **D — run-it path.** Build **generic-`rule()` fidelity** (real `attrs` schema/coercion/`cfg`,
+  `ctx.toolchains`/registration, `Args`, `depset`) → run the **real** `rules_rust`, retiring *both*
+  rust backends (`rust.rs` template + the live `rust_rules.rs`).
 - **E — breadth.** proto (also resolves §1's provisional verdict), python, link/classpath coverage.
 
 ## 10. Detailed roll-buildable plan
@@ -202,21 +220,33 @@ Each step is a green, committed, tagged (`razel-v2/…`) roll-build with an expl
 
 ### Phase A — cc end-to-end on the real mechanism
 *No new abstraction (`razel_cc` concrete); de-risk the machinery + close the live-path gap (§6a).*
+- **A0 — graph-parity runner (the failing acceptance test).** In `razel-parity` (kept pure): add
+  `Action { mnemonic, argv, inputs, outputs }`, `parse_golden(normalized) -> [Action]` reading the
+  **whole action set** (generalizes today's cherry-pick `golden_argv`), and `diff(razel, golden, omit)
+  -> Report` — a **set** diff asserting `razel == golden − omit`, per-action argv (ordered) +
+  inputs/outputs (sorted) equal, **logging** the `omit = {CppModuleMap}` allowlist (§8). A harness
+  (test / `xtask parity`) wires `analyze_bazel` → render → diff. *Green:* the **runner** is
+  unit-tested on synthetic actions (match/mismatch/missing/extra); **cc/transitive is a tracked RED
+  baseline** (the gap A1–A4 close). Built first, red — AGENTS.md Rule 0. This is the A4 gate.
 - **A1 — builtin scaffold.** Register a `razel_cc` Starlark global namespace; one method
   (`command_line`) wrapping `Constrain`. *Green:* a `rule()` impl via `analyze_starlark` calls it and
   gets the golden argv tokens.
-- **A2 — compile/archive builtins.** `razel_cc.compile`/`archive` registering the declared
-  `CppCompile`/`CppArchive` actions over the proven `derive` + path model; return objects/library +
-  the provider inputs. *Green:* a test rule reproduces the golden argv + outputs through the builtins.
-- **A3 — bundle `cc:defs.bzl`.** Author razel's `cc:defs.bzl` (`cc_library` `_impl` over the
-  builtins); `include_str!` into the binary; `BzlLoader` serves it for `@rules_cc//cc:defs.bzl`.
-  *Green:* the bundled defs load + a BUILD using `cc_library` analyzes.
-- **A4 — switch the live path.** `analyze_bazel`'s `cc_library` flows through the bundled `.bzl` +
-  builtins; the hardcoded `/usr/bin/c++` backend is retired/relegated to the executable side.
-  *Green:* **the live `analyze_bazel` cc DECLARED graph parity-checks against the golden** (runner on
-  the live path, not a sidecar); characterization updated.
+- **A2 — compile/archive builtins + dep→provider.** `razel_cc.compile`/`archive` registering the
+  declared `CppCompile`/`CppArchive` actions over the proven `derive` + path model; **and** resolve
+  deps to full **`CcInfo`** (not just `DefaultInfo.files`) via the producer/`fold_set`, honoring attr
+  *kinds* (label_list deps, file/string lists) — the "middle" lean. *Green:* a test rule reproduces
+  the golden argv + outputs **and** the transitive headers through the builtins.
+- **A3 — bundle `cc:defs.bzl` + thin toolchain accessor.** Author razel's `cc:defs.bzl` (`cc_library`
+  `_impl` over the builtins) with a thin `razel_build.toolchain(ctx, "cc")` accessor (razel's known cc
+  toolchain — *no* `ctx.toolchains` machinery yet); `include_str!` into the binary; `BzlLoader` serves
+  it for `@rules_cc//cc:defs.bzl`. *Green:* the bundled defs load + a BUILD using `cc_library` analyzes.
+- **A4 — switch the live path + render via the path model.** `analyze_bazel`'s `cc_library` flows
+  through the bundled `.bzl` + builtins (retiring the hardcoded `/usr/bin/c++` backend — declared ==
+  executable, §7); render razel's actions through `bazel_compile_inputs` so paths match
+  `bazel-out/_objs`. *Green:* **A0's runner goes GREEN on cc/transitive** (the live graph, modulo the
+  `{CppModuleMap}` allowlist); characterization updated.
 - **A5 — config eval.** `razel_cc.toolchain` evaluates the real `cc_toolchain_config_lib.bzl` +
-  `local_config_cc`; retire `cc_macos_core.bzl`. *Green:* parity holds with the evaluated config.
+  `local_config_cc`; retire `cc_macos_core.bzl`. *Green:* A0 stays green with the evaluated config.
 
 *Exit: a real BUILD's cc graph is produced by the engine, through razel's bundled `.bzl`, parity-proven on the live path, config from source.*
 
@@ -252,16 +282,21 @@ Each step is a green, committed, tagged (`razel-v2/…`) roll-build with an expl
 *Exit: a generic engine with two instances + a clean hook seam.*
 
 ### Phase D — run-it path (real upstream rules)
-- **D1 — `Args` fidelity.** `ctx.actions.args` gains `before_each`/`format_each`/`map_each` +
-  param-file (`@argfile`) support. *Green:* `Args` unit tests; the current rust template's argv
-  reproduced via real `Args`.
-- **D2 — rust toolchain + interop.** `razel_build.toolchain` resolves the rust toolchain provider
-  (rustc/sysroot); `CcInfo` consumed for cc-interop. *Green:* a rule reads the rust toolchain + a cc
-  dep's `CcInfo`.
-- **D3 — run real `rules_rust`.** `BzlLoader` loads the **real** fetched `rules_rust` `.bzl` (drop the
-  shim) for `@rules_rust//`; it runs over `razel_build`. *Green:* **the live rust analyze
-  parity-checks against the rust golden via the REAL `rules_rust`** — retiring
-  `derive_rust_library_action`.
+*The real price of run-it = generic-`rule()` fidelity (the §2a/§6a least-built seam, now in full).*
+- **D1 — real `attrs` schema.** Honor the declared schema beyond A2's attr-*kinds*: types, defaults,
+  `mandatory`, **multiple** label attrs (`deps`/`proc_macro_deps`/`crate`), `providers=`,
+  `cfg=exec|target`, coercion. *Green:* a rule with a real schema resolves all label attrs to
+  providers + applies defaults/coercion.
+- **D2 — `ctx.toolchains` + resolution.** `rule(toolchains=…)` + registered toolchains + platform
+  resolution → `ctx.toolchains[type]` (beyond A3's thin accessor); `CcInfo` consumed for cc-interop.
+  *Green:* a rule reads its toolchain via `ctx.toolchains` + a cc dep's `CcInfo`.
+- **D3 — `Args` fidelity.** `ctx.actions.args` gains `before_each`/`format_each`/`map_each` +
+  param-file (`@argfile`). *Green:* `Args` unit tests; the rust template's argv reproduced via real
+  `Args`. (`map_each` only bites here, per Review48/49 — the D1/D3 split sequences around it.)
+- **D4 — run real `rules_rust`.** `BzlLoader` loads the **real** fetched `rules_rust` `.bzl` (drop the
+  shim) for `@rules_rust//`; it runs over `razel_build` + the generic `rule()`. *Green:* **A0's runner
+  (rust corpus) goes GREEN via the REAL `rules_rust`** — retiring *both* rust backends (`rust.rs`
+  template + the live `rust_rules.rs`).
 
 *Exit: a pure-Starlark ruleset runs unmodified over the engine.*
 

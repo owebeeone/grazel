@@ -1202,6 +1202,8 @@ dependencies = [
 name = "razel-cc-toolchain"
 version = "0.1.0"
 dependencies = [
+ "razel-core",
+ "razel-dds",
  "razel-rulepack",
  "starlark",
 ]
@@ -1284,6 +1286,7 @@ version = "0.1.0"
 dependencies = [
  "allocative",
  "anyhow",
+ "razel-cc-toolchain",
  "razel-core",
  "razel-ir",
  "starlark",
