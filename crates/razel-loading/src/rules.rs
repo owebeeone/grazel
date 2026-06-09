@@ -279,6 +279,7 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
     .with(rule_globals)
     .with(|b| {
         b.namespace("razel_build", razel_build_members);
+        b.namespace("attr", attr_members); // D1: inline rule defs need the attr.* schema descriptors
     })
     .build();
     let res: Result<(), String> = Module::with_temp_heap(|module| {

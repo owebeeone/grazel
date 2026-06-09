@@ -41,55 +41,61 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
 /// definitions evaluate.
 #[starlark::starlark_module]
 pub(crate) fn attr_members(b: &mut GlobalsBuilder) {
-    fn string<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    // D1: each `attr.<kind>(...)` returns a DESCRIPTOR struct carrying its kind + `default` +
+    // `mandatory` (was a discarded `None`). `rule()` stores the schema; `invoke` consults it (defaults,
+    // mandatory, coercion). The descriptor is a plain struct so it freezes with the rule + reads back
+    // via `get_attr` in the loader.
+    fn string<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("string", &kw, eval))
     }
-    fn int<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn int<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("int", &kw, eval))
     }
-    fn bool<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn bool<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("bool", &kw, eval))
     }
-    fn label<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn label<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("label", &kw, eval))
     }
-    fn label_list<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn label_list<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("label_list", &kw, eval))
     }
-    fn label_keyed_string_dict<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn label_keyed_string_dict<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("label_keyed_string_dict", &kw, eval))
     }
-    fn string_list<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn string_list<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("string_list", &kw, eval))
     }
-    fn string_dict<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn string_dict<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("string_dict", &kw, eval))
     }
-    fn string_list_dict<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn string_list_dict<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("string_list_dict", &kw, eval))
     }
-    fn output<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn output<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("output", &kw, eval))
     }
-    fn output_list<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+    fn output_list<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("output_list", &kw, eval))
     }
+}
+
+/// Build an attribute descriptor (D1): a struct `{kind, default, mandatory}` the loader reads when
+/// instantiating a rule. `default` is `None` when unset (distinct from a `None` default value, which
+/// rules don't use); `mandatory` defaults to false.
+fn attr_descriptor<'v>(
+    kind: &str,
+    kw: &SmallMap<String, Value<'v>>,
+    eval: &mut Evaluator<'v, '_, '_>,
+) -> Value<'v> {
+    let heap = eval.heap();
+    let default = kw.get("default").copied().unwrap_or_else(Value::new_none);
+    let mandatory = kw.get("mandatory").and_then(|v| v.unpack_bool()).unwrap_or(false);
+    heap.alloc(starlark::values::structs::AllocStruct([
+        ("kind".to_string(), heap.alloc(kind)),
+        ("default".to_string(), default),
+        ("mandatory".to_string(), heap.alloc(mandatory)),
+    ]))
 }
 
 

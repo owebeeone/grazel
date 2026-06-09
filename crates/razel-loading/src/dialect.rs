@@ -75,6 +75,9 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
 #[repr(C)]
 pub(crate) struct RuleObjGen<V: ValueLifetimeless> {
     implementation: V,
+    /// The declared `attrs` schema (name → attr descriptor), frozen with the rule and consulted at
+    /// instantiation for defaults / `mandatory` (D1). `None` when no schema was declared.
+    attrs: V,
 }
 starlark_complex_value!(RuleObj);
 
@@ -156,6 +159,29 @@ where
             }
         }
 
+        // D1: consult the declared attrs schema — fill omitted attrs from their `default`, error on a
+        // missing `mandatory` one. (A2 discarded the schema; the real upstream rules require it.)
+        if let Some(schema) = starlark::values::dict::DictRef::from_value(self.attrs.to_value()) {
+            let passed: std::collections::BTreeSet<&str> =
+                named.keys().map(|k| k.as_str()).collect();
+            for (aname, descriptor) in schema.iter() {
+                let Some(an) = aname.unpack_str() else { continue };
+                if an == "name" || passed.contains(an) {
+                    continue;
+                }
+                let default = descriptor.get_attr("default", heap)?.unwrap_or_else(Value::new_none);
+                if !default.is_none() {
+                    fields.push((an.to_string(), default));
+                } else if descriptor
+                    .get_attr("mandatory", heap)?
+                    .and_then(|m| m.unpack_bool())
+                    .unwrap_or(false)
+                {
+                    return Err(anyhow::anyhow!("mandatory attribute `{an}` not provided").into());
+                }
+            }
+        }
+
         sess.state.borrow_mut().current = Some(AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_labels,
@@ -224,10 +250,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] attrs: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let _ = attrs;
-        // alloc (freezable) — the rule survives module.freeze(), so it can be
-        // defined in a .bzl and load()ed, not just used inline.
-        Ok(eval.heap().alloc(RuleObjGen { implementation }))
+        // D1: keep the declared schema (was discarded) — instantiation consults it for defaults +
+        // mandatory. alloc (freezable) so the rule survives module.freeze() (defined in a .bzl + load()ed).
+        let attrs = attrs.unwrap_or_else(Value::new_none);
+        Ok(eval.heap().alloc(RuleObjGen { implementation, attrs }))
     }
 
     /// `Label("//pkg:name")` — a minimal Label exposing `.package`/`.name`/
