@@ -55,6 +55,10 @@ pub struct AnalyzedTarget {
     /// Compile flags this target exports to dependents — its `defines` (`-D…`) and
     /// `includes` (`-I…`), transitively. (Local `copts` are NOT exported.)
     pub cflags: Vec<String>,
+    /// `JavaInfo(compile_jars=…)` — this target's OWN exported compile jar (java's header/ijar).
+    /// **Ordered** (the dependents' classpath order is load-bearing): a dependent folds these
+    /// preorder via [`fold_compile_jars`] (the OrderedDepset analog, B2/B3). Empty for non-java.
+    pub compile_jars: Vec<String>,
 }
 
 #[derive(Default)]
@@ -463,6 +467,35 @@ fn fold_headers(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> Vec<S
     acc.into_iter().collect()
 }
 
+/// Transitive compile classpath of `root`: its OWN `compile_jars` ∪ those of every transitive dep,
+/// **order-preserving** — a preorder walk (own jars, then each dep's closure in dep order),
+/// dedup first-occurrence-wins. The ordered analog of [`fold_headers`] (cf. `DdsRead::fold_depset`,
+/// B2) — java's classpath order is load-bearing. Cycle-safe. (The cc Set-fold + this ordered fold
+/// living side-by-side is the B5 ledger signal: Phase C unifies them via the DDS field-kind fold.)
+fn fold_compile_jars(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> Vec<String> {
+    let mut acc = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![root.to_string()];
+    while let Some(t) = stack.pop() {
+        if !visited.insert(t.clone()) {
+            continue;
+        }
+        if let Some(tgt) = results.get(&t) {
+            for j in &tgt.compile_jars {
+                if seen.insert(j.clone()) {
+                    acc.push(j.clone());
+                }
+            }
+            // Reversed so dep[0] is processed next — preorder, dep order preserved.
+            for d in tgt.deps.iter().rev() {
+                stack.push(d.clone());
+            }
+        }
+    }
+    acc
+}
+
 // ---- ctx ------------------------------------------------------------------------
 
 /// The analysis `ctx`. All fields are heap `Value`s so it traces cleanly, no freezing.
@@ -566,10 +599,14 @@ where
                             // exported headers (A2a — the provides fold, so the rule() path sees deps).
                             let files = dep_target.default_info.clone();
                             let headers = fold_headers(&results, &dep);
+                            // `.compile_jars` = the dep's transitive JavaInfo compile jars, ORDERED
+                            // (B3 — the classpath the rule() java path folds preorder).
+                            let compile_jars = fold_compile_jars(&results, &dep);
                             dep_labels.push(dep);
                             providers.push(heap.alloc(AllocStruct([
                                 ("files".to_string(), files),
                                 ("headers".to_string(), headers),
+                                ("compile_jars".to_string(), compile_jars),
                             ])));
                         }
                     }
@@ -787,6 +824,24 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         if let Some(h) = headers {
             let paths = extract_files(h);
             with_current(session(eval), |c| c.hdrs = paths);
+        }
+        Ok(NoneType)
+    }
+
+    /// `JavaInfo(compile_jars=…)` — the java provider (B3 spike). razel captures the target's OWN
+    /// exported compile jar(s) (the header/ijar) into `compile_jars`, **ordered**; a dependent's
+    /// classpath is the preorder fold over deps ([`fold_compile_jars`] — the OrderedDepset analog).
+    /// Other kwargs (runtime_jars, …) absorbed. Mirrors `CcInfo`, the SECOND hardcoded provider — the
+    /// B5 ledger signal that Phase C should generalize provider-capture to a schema-driven map.
+    #[allow(non_snake_case)]
+    fn JavaInfo<'v>(
+        #[starlark(require = named)] compile_jars: Option<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        if let Some(j) = compile_jars {
+            let paths = extract_files(j);
+            with_current(session(eval), |c| c.compile_jars = paths);
         }
         Ok(NoneType)
     }
@@ -1106,6 +1161,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             default_info: vec![lib],
             hdrs: export_hdrs,
             cflags: export_cflags,
+            compile_jars: Vec::new(),
         });
         Ok(NoneType)
     }
@@ -1162,6 +1218,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             default_info: vec![out],
             hdrs: Vec::new(),
             cflags: Vec::new(),
+            compile_jars: Vec::new(),
         });
         Ok(NoneType)
     }

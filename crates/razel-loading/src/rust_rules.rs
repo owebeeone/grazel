@@ -126,6 +126,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             default_info: vec![rlib],
             hdrs: Vec::new(),
             cflags: Vec::new(),
+            compile_jars: Vec::new(),
         });
         Ok(NoneType)
     }
@@ -176,6 +177,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             default_info: vec![out],
             hdrs: Vec::new(),
             cflags: Vec::new(),
+            compile_jars: Vec::new(),
         });
         Ok(NoneType)
     }

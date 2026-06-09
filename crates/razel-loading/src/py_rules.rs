@@ -84,6 +84,7 @@ fn py_rules(b: &mut GlobalsBuilder) {
             default_info: g.srcs,
             hdrs: exported,
             cflags: Vec::new(),
+            compile_jars: Vec::new(),
         });
         Ok(NoneType)
     }
@@ -176,6 +177,7 @@ fn py_executable(
         default_info: vec![out],
         hdrs: Vec::new(),
         cflags: Vec::new(),
+        compile_jars: Vec::new(),
     });
     Ok(NoneType)
 }
