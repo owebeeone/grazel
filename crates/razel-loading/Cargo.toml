@@ -10,10 +10,11 @@ allocative = "0.3.6"
 anyhow = "1.0.102"
 razel-core = { version = "0.1.0", path = "../razel-core" }
 razel-ir = { version = "0.1.0", path = "../razel-ir" }
+# The cc engine the `razel_cc` builtin wraps (Constrain + the config). Layering wart (loader →
+# engine) — temporary; the registration seam moves to razel-adapter-bazel at Phase C3.
+razel-cc-toolchain = { version = "0.1.0", path = "../razel-cc-toolchain" }
+razel-rulepack = { version = "0.1.0", path = "../razel-rulepack" }
 starlark = "0.14.2"
 
-# Test-only: prove razel's real analyzed cc data drives the §8c faithful argv end-to-end.
-# (The reusable bridge belongs in razel-adapter-bazel — L4; this is the demonstration.)
 [dev-dependencies]
-razel-cc-toolchain = { version = "0.1.0", path = "../razel-cc-toolchain" }
 razel-parity = { version = "0.1.0", path = "../razel-parity" }

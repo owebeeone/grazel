@@ -1334,6 +1334,36 @@ fn attr_members(b: &mut GlobalsBuilder) {
     }
 }
 
+/// The `razel_cc` builtin namespace (RazelStarlarkBoundaryPlan §10 A1): the tight cc engine
+/// exposed to Starlark. A1 ships one method — `command_line` — wrapping `Constrain` over the macOS
+/// cc config. Engine-tier bare global (like `attr`/`struct`/`depset`); the registration seam moves
+/// to razel-adapter-bazel at Phase C3.
+#[starlark::starlark_module]
+fn razel_cc_members(b: &mut GlobalsBuilder) {
+    /// `razel_cc.command_line(action, variables)` → the §8c argv for `action`: `Constrain` selects
+    /// the cc config's default features and expands them with `variables` (a dict of `str | [str]`).
+    /// A1 selects defaults only; explicit `features` + a resolved toolchain land in later phases.
+    fn command_line<'v>(
+        action: &str,
+        variables: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        use razel_rulepack::constrain::{VarValue, Vars};
+        let config = razel_cc_toolchain::macos_core_config().map_err(|e| anyhow::anyhow!(e))?;
+        let mut vars = Vars::new();
+        for (k, v) in &variables {
+            if let Some(s) = v.unpack_str() {
+                vars.insert(k.clone(), VarValue::Scalar(s.to_string()));
+            } else if let Some(list) = ListRef::from_value(*v) {
+                let items = list.iter().filter_map(|x| x.unpack_str().map(String::from)).collect();
+                vars.insert(k.clone(), VarValue::Sequence(items));
+            }
+        }
+        let enabled = config.select(&[]);
+        Ok(eval.heap().alloc(config.full_command_line(&enabled, action, &vars)))
+    }
+}
+
 fn build_globals() -> Globals {
     GlobalsBuilder::extended_by(&[
         LibraryExtension::StructType,
@@ -1348,6 +1378,7 @@ fn build_globals() -> Globals {
     .with(|b| {
         b.namespace("native", native_members);
         b.namespace("attr", attr_members);
+        b.namespace("razel_cc", razel_cc_members);
     })
     .build()
 }
@@ -1570,6 +1601,9 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
         LibraryExtension::Partial,
     ])
     .with(rule_globals)
+    .with(|b| {
+        b.namespace("razel_cc", razel_cc_members);
+    })
     .build();
     let res: Result<(), String> = Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
