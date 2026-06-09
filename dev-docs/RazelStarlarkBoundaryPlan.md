@@ -250,17 +250,22 @@ Each step is a green, committed, tagged (`razel-v2/…`) roll-build with an expl
   `CppCompile`/`CppArchive` over `derive` + path model, drawing transitive headers from `dep[CcInfo]`
   (A2a). *Green:* a test rule emits the actions with the golden argv + outputs + source-level inputs
   (incl. transitive `base.h`).
-- **A3 — bundle `cc:defs.bzl` + thin toolchain accessor.** Author razel's `cc:defs.bzl` (`cc_library`
-  `_impl` over the builtins) with a thin `razel_build.toolchain(ctx, "cc")` accessor (razel's known cc
-  toolchain — *no* `ctx.toolchains` machinery yet); `include_str!` into the binary; `BzlLoader` serves
-  it for `@rules_cc//cc:defs.bzl`. *Green:* the bundled defs load + a BUILD using `cc_library` analyzes.
-- **A4 — switch the live path + render via the path model.** `analyze_bazel`'s `cc_library` flows
-  through the bundled `.bzl` + builtins (retiring `/usr/bin/c++` — declared == executable, §7);
-  render outputs through `bazel_compile_inputs`; inputs compared source-level (A0b). **Open: razel
-  has no live `cfg`** — `bazel-out/<cfg>` is a parity placeholder; A4 picks the live value (default:
-  a fixed segment that `normalize()` maps to `<cfg>`, consistent with §7's adopt-the-toolchain).
-  *Green:* **A0's runner goes GREEN on cc/transitive** (modulo the `{CppModuleMap}` allowlist);
-  characterization rewritten.
+- **A3+A4 — `cc:defs.bzl` + live switch (one integration).** Serving the bundled `.bzl` for
+  `@rules_cc//cc:defs.bzl` *is* the live switch (it replaces native `cc_library`), so these aren't
+  separable — a "bundle without switch" A3 is a dead artifact. Two internal greens keep it de-risked,
+  not big-bang:
+  - **·i (isolated logic).** Author `cc:defs.bzl` (`cc_library` `_impl` over `razel_cc.command_line`
+    + the path model + `dep.headers` (A2a) + `ctx.actions.run(mnemonic=…)` (A3-prep)); test via
+    `analyze_starlark` (package `""`). *Green:* the produced actions have the right **structure** —
+    mnemonic `CppCompile`/`CppArchive`, argv[0] `cc_wrapper.sh`, the feature flags, the
+    `_objs/<target>/<stem>.{o,d}` path *shape*, transitive headers in inputs. No live switch; can't
+    golden-match (no package).
+  - **·ii (live switch).** `include_str!` the `.bzl` into the binary; `BzlLoader` serves it for
+    `@rules_cc//cc:defs.bzl` (retiring native `cc_library` — declared == executable, §7);
+    `analyze_workspace` on the corpus gives the real package; render via `bazel_compile_inputs`;
+    inputs source-level (A0b). **Open: live `cfg`** — `bazel-out/<cfg>` is a placeholder; pick a fixed
+    segment `normalize()` maps to `<cfg>`. *Green:* **A0's runner goes GREEN on cc/transitive**
+    (modulo `{CppModuleMap}`); cc characterization rewritten.
 - **A5 — config eval.** `razel_cc.toolchain` evaluates the real `cc_toolchain_config_lib.bzl` +
   `local_config_cc`; retire `cc_macos_core.bzl`. *Green:* A0 stays green with the evaluated config.
 

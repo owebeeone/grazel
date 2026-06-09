@@ -594,7 +594,15 @@ where
         let ctx = heap.alloc_complex_no_freeze(Ctx {
             attr: heap.alloc(AllocStruct(fields)),
             actions: heap.alloc_complex_no_freeze(Actions),
-            label: heap.alloc(canon_label(sess, &name)),
+            // `ctx.label` is a Label struct (`.package`/`.name`) — razel's cc:defs.bzl reads them
+            // for the path model. package is the current pkg (empty in single-package mode).
+            label: {
+                let pkg = sess.current_pkg.borrow().clone().unwrap_or_default();
+                heap.alloc(AllocStruct([
+                    ("package".to_string(), heap.alloc(pkg)),
+                    ("name".to_string(), heap.alloc(name.clone())),
+                ]))
+            },
             outputs: heap.alloc(AllocStruct(outputs_fields)),
             files: heap.alloc(AllocStruct(files_fields)),
             executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
