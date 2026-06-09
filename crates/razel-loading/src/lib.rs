@@ -18,6 +18,7 @@ mod deps;
 mod native_cc;
 mod shims;
 mod engine;
+pub mod dds; // C2: loader -> DDS provider bridge
 // Per-language native rulesets — each maps a `@rules_*//` load to native rules, registered in
 // `rules::ruleset_modules`. (Independent modules so language support lands without touching the
 // shared cc/analysis core.)
