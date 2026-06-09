@@ -71,3 +71,21 @@ fn java_info_dual_depsets_dont_cross_merge_and_neverlink_excludes_runtime() {
     assert_eq!(api.compile_jars, [p("libapi-hjar.jar")]);
     assert!(api.runtime_jars.is_empty() && api.neverlink);
 }
+
+#[test]
+fn java_diamond_dedups_the_shared_transitive_jar() {
+    // F1 regression: app -> [x, y] -> base. base's header jar reaches app via BOTH x and y; the
+    // per-dep fold + the .bzl's dedup() must list it ONCE in app's compile classpath.
+    let src = format!(
+        "{JAVA_DEFS}\n\
+         java_library(name = \"base\", srcs = [\"Base.java\"])\n\
+         java_library(name = \"x\", srcs = [\"X.java\"], deps = [\":base\"])\n\
+         java_library(name = \"y\", srcs = [\"Y.java\"], deps = [\":base\"])\n\
+         java_library(name = \"app\", srcs = [\"App.java\"], deps = [\":x\", \":y\"])\n"
+    );
+    let targets = analyze_starlark("BUILD", &src).unwrap();
+    let app = targets.iter().find(|t| t.name.ends_with("app")).unwrap();
+    let javac = app.actions.iter().find(|a| a.mnemonic == "Javac").unwrap();
+    let n = javac.argv.iter().filter(|a| a.ends_with("libbase-hjar.jar")).count();
+    assert_eq!(n, 1, "diamond must dedup base's hjar (got {n}): {:?}", javac.argv);
+}

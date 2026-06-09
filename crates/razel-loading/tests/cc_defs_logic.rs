@@ -40,3 +40,21 @@ fn cc_library_rule_logic_produces_structurally_faithful_actions() {
     assert_eq!(archive.argv[0], "/usr/bin/libtool");
     assert_eq!(archive.outputs, ["bazel-out/darwin_arm64-fastbuild/bin/libutil.a"]);
 }
+
+#[test]
+fn cc_diamond_dedups_the_shared_transitive_header() {
+    // F1 regression: app -> [x, y] -> base. base.h reaches app via BOTH x and y; the per-dep fold +
+    // the .bzl's dedup() must list it ONCE in app's compile inputs, not twice.
+    let src = format!(
+        "{CC_DEFS}\n\
+         cc_library(name = \"base\", srcs = [\"base.cc\"], hdrs = [\"base.h\"], deps = [])\n\
+         cc_library(name = \"x\", srcs = [\"x.cc\"], hdrs = [\"x.h\"], deps = [\":base\"])\n\
+         cc_library(name = \"y\", srcs = [\"y.cc\"], hdrs = [\"y.h\"], deps = [\":base\"])\n\
+         cc_library(name = \"app\", srcs = [\"app.cc\"], hdrs = [\"app.h\"], deps = [\":x\", \":y\"])\n"
+    );
+    let targets = analyze_starlark("BUILD", &src).unwrap();
+    let app = targets.iter().find(|t| t.name.ends_with("app")).unwrap();
+    let compile = app.actions.iter().find(|a| a.mnemonic == "CppCompile").unwrap();
+    let n = compile.inputs.iter().filter(|i| i.ends_with("base.h")).count();
+    assert_eq!(n, 1, "diamond must dedup base.h (got {n}): {:?}", compile.inputs);
+}

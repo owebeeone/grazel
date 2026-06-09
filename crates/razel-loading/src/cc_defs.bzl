@@ -21,6 +21,7 @@ def _cc_library_impl(ctx):
     headers = own_headers
     for d in getattr(ctx.attr, "deps", []):
         headers = headers + d.headers
+    headers = dedup(headers)  # F1: cross-sibling dedup (a diamond must not list base.h twice)
 
     objects = []
     for src in getattr(ctx.attr, "srcs", []):

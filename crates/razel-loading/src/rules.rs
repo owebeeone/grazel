@@ -455,9 +455,10 @@ fn extract_files(v: Value) -> Vec<String> {
     vec![file_path(v)]
 }
 
-/// Transitive exported headers of `root`: its OWN `hdrs` ∪ those of every transitive dep — the
-/// `CcInfo` `provides` fold (§8b), mirrored in the rule() invoke so a dependent reads the closure.
-/// Cycle-safe; sorted + deduped.
+/// Transitive exported headers of **one** `root` (a single dep): its OWN `hdrs` ∪ those of every
+/// transitive dep — the `CcInfo` `provides` fold (§8b). Cycle-safe; sorted + deduped *within this
+/// root's closure*. NOTE: a rule with multiple deps assembles per-dep closures and must dedup ACROSS
+/// siblings via the `.bzl`'s `dedup()` — this fn does not see siblings (F1/F2).
 fn fold_headers(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> Vec<String> {
     let mut acc = BTreeSet::new();
     let mut visited = BTreeSet::new();
@@ -474,11 +475,12 @@ fn fold_headers(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> Vec<S
     acc.into_iter().collect()
 }
 
-/// Transitive compile classpath of `root`: its OWN `compile_jars` ∪ those of every transitive dep,
-/// **order-preserving** — a preorder walk (own jars, then each dep's closure in dep order),
-/// dedup first-occurrence-wins. The ordered analog of [`fold_headers`] (cf. `DdsRead::fold_depset`,
-/// B2) — java's classpath order is load-bearing. Cycle-safe. (The cc Set-fold + this ordered fold
-/// living side-by-side is the B5 ledger signal: Phase C unifies them via the DDS field-kind fold.)
+/// Transitive compile classpath of **one** `root` (a single dep): its OWN `compile_jars` ∪ every
+/// transitive dep, **order-preserving** — a preorder walk (own jars, then each dep's closure in dep
+/// order), dedup first-occurrence-wins *within this root's closure*. The ordered analog of
+/// [`fold_headers`]. NOTE: a rule with multiple deps assembles per-dep closures and must dedup ACROSS
+/// siblings via the `.bzl`'s `dedup()` — this fn does not see siblings (F1/F2). (The cc Set-fold +
+/// this ordered fold side-by-side is the B5 ledger signal: Phase C unifies them via the DDS fold.)
 fn fold_compile_jars(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> Vec<String> {
     let mut acc = Vec::new();
     let mut seen = BTreeSet::new();
@@ -506,7 +508,8 @@ fn fold_compile_jars(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> 
 /// Transitive RUNTIME classpath of `root` (B4) — the OrderedDepset fold over `runtime_jars`,
 /// **separate** from the compile fold (no cross-merge), with the `neverlink` conditional: a
 /// neverlink node is excluded from the runtime closure AND prunes its subtree (compile-only deps
-/// don't reach runtime). Preorder, dedup first-occurrence, cycle-safe.
+/// don't reach runtime). Preorder, dedup first-occurrence, cycle-safe — *within this one root's
+/// closure*; cross-sibling dedup of the assembled classpath is the `.bzl`'s `dedup()` (F1/F2).
 fn fold_runtime_jars(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> Vec<String> {
     let mut acc = Vec::new();
     let mut seen = BTreeSet::new();
@@ -895,6 +898,21 @@ fn rule_globals(b: &mut GlobalsBuilder) {
             c.neverlink = nl;
         });
         Ok(NoneType)
+    }
+
+    /// `dedup(list)` — the list with duplicate strings removed, **preserving first occurrence**. The
+    /// cross-sibling dedup the rule()-path classpath/header assembly needs: a target's transitive
+    /// closure folds *per-dep*, so a diamond (`app -> [x,y] -> base`) would otherwise list base's
+    /// jar/header twice. `dedup()` makes the merge the engine's job, not silent duplication (F1).
+    fn dedup(#[starlark(require = pos)] list: UnpackList<String>) -> anyhow::Result<Vec<String>> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for s in list.items {
+            if seen.insert(s.clone()) {
+                out.push(s);
+            }
+        }
+        Ok(out)
     }
 
     /// `depset(direct=[], transitive=[depsets], order=…)` — Bazel's transitive set.

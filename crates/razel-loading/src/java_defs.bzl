@@ -33,6 +33,8 @@ def _java_library_impl(ctx):
     for d in getattr(ctx.attr, "deps", []):
         classpath = classpath + d.compile_jars
         runtime_cp = runtime_cp + d.runtime_jars
+    classpath = dedup(classpath)  # F1: cross-sibling dedup (a diamond must not list base's jar twice)
+    runtime_cp = dedup(runtime_cp)
 
     # Turbine — the header/interface jar (fast; enables compile-avoidance for dependents).
     ctx.actions.run(
