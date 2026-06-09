@@ -40,14 +40,15 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
             dep_names.push(dep.canon);
         }
 
-        // Exported flags (propagate to dependents): own defines/includes + dep cflags.
-        let mut export_cflags = define_flags(defines);
-        export_cflags.extend(include_flags(sess, includes));
-        export_cflags.extend(dep_cflags);
-        // This lib's own compiles see global flags first, then local copts, then exports.
+        // OWN exported flags (defines/includes); the transitive set is the DDS fold for dependents
+        // (C2d — store own, fold transitive). dep_cflags is already that transitive closure.
+        let mut own_cflags = define_flags(defines);
+        own_cflags.extend(include_flags(sess, includes));
+        // This lib's own compiles see global flags first, then local copts, then own + dep exports.
         let mut compile_flags = sess.global.copts.clone();
         compile_flags.extend(copts);
-        compile_flags.extend(export_cflags.iter().cloned());
+        compile_flags.extend(own_cflags.iter().cloned());
+        compile_flags.extend(dep_cflags.iter().cloned());
 
         let mut avail_hdrs = hdrs.clone();
         avail_hdrs.extend(dep_hdrs.iter().cloned());
@@ -70,18 +71,13 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
             outputs: vec![lib.clone()],
         });
 
-        let mut export_hdrs = hdrs;
-        export_hdrs.extend(dep_hdrs);
+        // Store OWN providers (C2d); dependents recover the transitive closure via the DDS fold.
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_names,
             actions,
             default_info: vec![lib],
-            hdrs: export_hdrs,
-            cflags: export_cflags,
-            compile_jars: Vec::new(),
-            runtime_jars: Vec::new(),
-            neverlink: false,
+            providers: crate::state::cc_provider_map(hdrs, own_cflags),
         });
         Ok(NoneType)
     }
@@ -136,11 +132,7 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
             deps: dep_names,
             actions,
             default_info: vec![out],
-            hdrs: Vec::new(),
-            cflags: Vec::new(),
-            compile_jars: Vec::new(),
-            runtime_jars: Vec::new(),
-            neverlink: false,
+            providers: Default::default(),
         });
         Ok(NoneType)
     }

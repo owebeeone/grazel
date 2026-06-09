@@ -2,6 +2,7 @@
 //! The foundation every other loader module imports. AD2: state is a fresh `Session` per
 //! analyze_*, threaded explicitly — no ambient globals.
 
+use razel_dds::{FieldId, FieldValue, ProviderTypeId, Scalar};
 use starlark::any::ProvidesStaticType;
 use starlark::eval::Evaluator;
 use std::cell::RefCell;
@@ -27,23 +28,59 @@ pub struct AnalyzedTarget {
     pub actions: Vec<AnalyzedAction>,
     /// `DefaultInfo(files=…)`.
     pub default_info: Vec<String>,
-    /// Headers this target exports to dependents (cc_library `hdrs`, transitively).
-    /// Bazel makes these explicit, so they double as the dependents' sandbox inputs.
-    pub hdrs: Vec<String>,
-    /// Compile flags this target exports to dependents — its `defines` (`-D…`) and
-    /// `includes` (`-I…`), transitively. (Local `copts` are NOT exported.)
-    pub cflags: Vec<String>,
-    /// `JavaInfo(compile_jars=…)` — this target's OWN exported compile jar (java's header/ijar).
-    /// **Ordered** (the dependents' classpath order is load-bearing): a dependent folds these
-    /// preorder via `fold_compile_jars` (the OrderedDepset analog, B2/B3). Empty for non-java.
-    pub compile_jars: Vec<String>,
-    /// `JavaInfo(runtime_jars=…)` — this target's OWN runtime jar (the full jar). A SEPARATE ordered
-    /// depset from `compile_jars` that does NOT cross-merge (B4): the runtime classpath folds via
-    /// `fold_runtime_jars`, independent of the compile classpath.
-    pub runtime_jars: Vec<String>,
-    /// `JavaInfo(neverlink=True)` — compile-only: on dependents' COMPILE classpath but EXCLUDED from
-    /// their runtime closure (`fold_runtime_jars` skips a neverlink node + its subtree). B4.
-    pub neverlink: bool,
+    /// The target's OWN providers (C2d) — the razel-dds value algebra IS the storage: `CcInfo.hdrs`/
+    /// `.cflags` are `Set`, `JavaInfo.compile_jars`/`.runtime_jars` are `OrderedDepset`, `.neverlink`
+    /// is `Scalar`. The TRANSITIVE closure a dependent sees is a `DdsRead` fold over [`crate::dds`].
+    /// (Replaces the former five flat fields — one representation, no hand-reflection.)
+    pub providers: BTreeMap<(ProviderTypeId, FieldId), FieldValue>,
+}
+
+fn scalar_str(s: &Scalar) -> Option<String> {
+    if let Scalar::Str(x) = s { Some(x.clone()) } else { None }
+}
+
+impl AnalyzedTarget {
+    /// A provider field's string elements (`Set` or `OrderedDepset`), empty if the field is absent.
+    fn field_strs(&self, ty: &str, field: &str) -> Vec<String> {
+        match self.providers.get(&(ProviderTypeId::new(ty), FieldId::new(field))) {
+            Some(FieldValue::Set(s)) => s.iter().filter_map(scalar_str).collect(),
+            Some(FieldValue::OrderedDepset(v)) => v.iter().filter_map(scalar_str).collect(),
+            _ => Vec::new(),
+        }
+    }
+    pub fn hdrs(&self) -> Vec<String> {
+        self.field_strs("CcInfo", "hdrs")
+    }
+    pub fn cflags(&self) -> Vec<String> {
+        self.field_strs("CcInfo", "cflags")
+    }
+    pub fn compile_jars(&self) -> Vec<String> {
+        self.field_strs("JavaInfo", "compile_jars")
+    }
+    pub fn runtime_jars(&self) -> Vec<String> {
+        self.field_strs("JavaInfo", "runtime_jars")
+    }
+    pub fn neverlink(&self) -> bool {
+        matches!(
+            self.providers.get(&(ProviderTypeId::new("JavaInfo"), FieldId::new("neverlink"))),
+            Some(FieldValue::Scalar(Scalar::Bool(true)))
+        )
+    }
+    /// Set a provider field (the capture write — `CcInfo`/`JavaInfo` builtins + the native rules).
+    pub fn set_provider(&mut self, ty: &str, field: &str, value: FieldValue) {
+        self.providers.insert((ProviderTypeId::new(ty), FieldId::new(field)), value);
+    }
+}
+
+/// The `CcInfo` provider map a native cc rule exports (`hdrs`/`cflags` as `Set`).
+pub fn cc_provider_map(
+    hdrs: Vec<String>,
+    cflags: Vec<String>,
+) -> BTreeMap<(ProviderTypeId, FieldId), FieldValue> {
+    let mut t = AnalyzedTarget::default();
+    t.set_provider("CcInfo", "hdrs", FieldValue::Set(hdrs.into_iter().map(Scalar::Str).collect()));
+    t.set_provider("CcInfo", "cflags", FieldValue::Set(cflags.into_iter().map(Scalar::Str).collect()));
+    t.providers
 }
 
 #[derive(Default)]

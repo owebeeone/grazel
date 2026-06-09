@@ -36,35 +36,38 @@ pub(crate) struct DepInfo {
 /// whose package isn't loaded yet is loaded on demand; otherwise a forward/cross
 /// reference errors clearly.
 pub(crate) fn resolve_dep(sess: &Session, label: &str) -> anyhow::Result<DepInfo> {
+    use razel_dds::{DdsRead, FieldId, InstanceId, ProviderTypeId, Scalar};
     let canon = canon_label(sess, label);
-    let get = || {
-        sess.results
-            .borrow()
-            .get(&canon)
-            .map(|t| (t.default_info.clone(), t.hdrs.clone(), t.cflags.clone()))
-    };
-    let hit = get().or_else(|| {
-        // Workspace mode: pull in the dep's package, then retry. The `get()` borrow is
-        // dropped before `load_package` recurses into a nested eval (the [R1] discipline —
-        // a `results` borrow held across the nested eval would double-borrow-panic).
-        if sess.workspace.is_some()
-            && let Some(pkg) = pkg_of(&canon)
-        {
-            let _ = load_package(sess, &pkg);
-        }
-        get()
-    });
-    let Some((libs, hdrs, cflags)) = hit else {
+    // Workspace mode: lazy-load the dep's package if absent. The borrow in the condition is dropped
+    // before `load_package` recurses into a nested eval (the [R1] discipline — a held `results`
+    // borrow across the nested eval would double-borrow-panic).
+    if sess.results.borrow().get(&canon).is_none()
+        && sess.workspace.is_some()
+        && let Some(pkg) = pkg_of(&canon)
+    {
+        let _ = load_package(sess, &pkg);
+    }
+    let results = sess.results.borrow();
+    let Some(t) = results.get(&canon) else {
         return Err(anyhow::anyhow!(
             "dep `{label}` not analyzed — declare it before its users (cyclic or missing package)"
         ));
     };
-    Ok(DepInfo {
-        libs,
-        hdrs,
-        cflags,
-        canon,
-    })
+    let libs = t.default_info.clone();
+    // hdrs/cflags = the TRANSITIVE CcInfo closure via the DDS fold (C2d): targets store OWN, the
+    // dependent's view is `fold_set` over the dep graph — the same fold the rule() path uses.
+    let all: Vec<AnalyzedTarget> = results.values().cloned().collect();
+    drop(results);
+    let dds = crate::dds::to_dds(&all, InstanceId::SINGLE).map_err(|e| anyhow::anyhow!(e))?;
+    let key = crate::dds::target_key(InstanceId::SINGLE, &canon).map_err(|e| anyhow::anyhow!(e))?;
+    let cc = ProviderTypeId::new("CcInfo");
+    let fold = |field: &str| -> Vec<String> {
+        dds.fold_set(&key, &cc, &FieldId::new(field))
+            .into_iter()
+            .filter_map(|s| if let Scalar::Str(x) = s { Some(x) } else { None })
+            .collect()
+    };
+    Ok(DepInfo { libs, hdrs: fold("hdrs"), cflags: fold("cflags"), canon })
 }
 
 

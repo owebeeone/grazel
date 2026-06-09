@@ -10,6 +10,7 @@
 
 use crate::state::AnalyzedTarget;
 use razel_core::Label;
+use std::collections::BTreeMap;
 use razel_dds::{
     Dds, FieldId, FieldKind, FieldValue, InstanceId, Provider, ProviderSchema, ProviderTypeId,
     Scalar, TargetKey,
@@ -25,9 +26,6 @@ pub fn target_key(instance: InstanceId, name: &str) -> Result<TargetKey, String>
 
 fn set(xs: &[String]) -> FieldValue {
     FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.clone())).collect())
-}
-fn ordered(xs: &[String]) -> FieldValue {
-    FieldValue::OrderedDepset(xs.iter().map(|s| Scalar::Str(s.clone())).collect())
 }
 
 /// Build a [`Dds`] fact store from the analyzed targets: register the cc/java provider schemas, then
@@ -62,26 +60,15 @@ pub fn to_dds(targets: &[AnalyzedTarget], instance: InstanceId) -> Result<Dds, S
             Provider::new().with(FieldId::new("files"), set(&t.default_info)),
         )
         .map_err(e)?;
-        if !t.hdrs.is_empty() || !t.cflags.is_empty() {
-            dds.assert(
-                key.clone(),
-                ProviderTypeId::new("CcInfo"),
-                Provider::new()
-                    .with(FieldId::new("hdrs"), set(&t.hdrs))
-                    .with(FieldId::new("cflags"), set(&t.cflags)),
-            )
-            .map_err(e)?;
+        // C2d: the providers are already DDS values — group the target's OWN map by provider type
+        // and assert each. No flat-field reflection; the storage IS the algebra.
+        let mut by_ty: BTreeMap<ProviderTypeId, Vec<(FieldId, FieldValue)>> = BTreeMap::new();
+        for ((ty, fid), val) in &t.providers {
+            by_ty.entry(ty.clone()).or_default().push((fid.clone(), val.clone()));
         }
-        if !t.compile_jars.is_empty() || !t.runtime_jars.is_empty() || t.neverlink {
-            dds.assert(
-                key.clone(),
-                ProviderTypeId::new("JavaInfo"),
-                Provider::new()
-                    .with(FieldId::new("compile_jars"), ordered(&t.compile_jars))
-                    .with(FieldId::new("runtime_jars"), ordered(&t.runtime_jars))
-                    .with(FieldId::new("neverlink"), FieldValue::Scalar(Scalar::Bool(t.neverlink))),
-            )
-            .map_err(e)?;
+        for (ty, fields) in by_ty {
+            let p = fields.into_iter().fold(Provider::new(), |p, (f, v)| p.with(f, v));
+            dds.assert(key.clone(), ty, p).map_err(e)?;
         }
         let deps = t.deps.iter().map(|d| target_key(instance, d)).collect::<Result<Vec<_>, _>>()?;
         dds.assert_deps(key, deps);
@@ -94,14 +81,21 @@ mod tests {
     use super::*;
     use razel_dds::DdsRead;
 
+    fn sset(xs: &[&str]) -> FieldValue {
+        FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+    }
+    fn odep(xs: &[&str]) -> FieldValue {
+        FieldValue::OrderedDepset(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+    }
     fn at(name: &str, deps: &[&str], hdrs: &[&str], cj: &[&str]) -> AnalyzedTarget {
-        AnalyzedTarget {
+        let mut t = AnalyzedTarget {
             name: name.into(),
             deps: deps.iter().map(|s| s.to_string()).collect(),
-            hdrs: hdrs.iter().map(|s| s.to_string()).collect(),
-            compile_jars: cj.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
-        }
+        };
+        t.set_provider("CcInfo", "hdrs", sset(hdrs));
+        t.set_provider("JavaInfo", "compile_jars", odep(cj));
+        t
     }
     fn strs(xs: Vec<Scalar>) -> Vec<String> {
         xs.into_iter().map(|s| if let Scalar::Str(x) = s { x } else { unreachable!() }).collect()
@@ -134,12 +128,15 @@ mod tests {
     #[test]
     fn dds_pruned_fold_drops_the_neverlink_subtree() {
         // app -> api(neverlink) -> hidden: the runtime closure prunes api + its hidden subtree (C2b).
-        let mk = |name: &str, deps: &[&str], rj: &[&str], never: bool| AnalyzedTarget {
-            name: name.into(),
-            deps: deps.iter().map(|s| s.to_string()).collect(),
-            runtime_jars: rj.iter().map(|s| s.to_string()).collect(),
-            neverlink: never,
-            ..Default::default()
+        let mk = |name: &str, deps: &[&str], rj: &[&str], never: bool| {
+            let mut t = AnalyzedTarget {
+                name: name.into(),
+                deps: deps.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            };
+            t.set_provider("JavaInfo", "runtime_jars", odep(rj));
+            t.set_provider("JavaInfo", "neverlink", FieldValue::Scalar(Scalar::Bool(never)));
+            t
         };
         let ts = vec![
             mk("hidden", &[], &["hidden.jar"], false),

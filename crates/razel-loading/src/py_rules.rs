@@ -81,11 +81,7 @@ fn py_rules(b: &mut GlobalsBuilder) {
             deps: g.dep_names,
             actions: Vec::new(),
             default_info: g.srcs,
-            hdrs: exported,
-            cflags: Vec::new(),
-            compile_jars: Vec::new(),
-            runtime_jars: Vec::new(),
-            neverlink: false,
+            providers: crate::state::cc_provider_map(exported, Vec::new()),
         });
         Ok(NoneType)
     }
@@ -176,11 +172,7 @@ fn py_executable(
         deps: g.dep_names,
         actions: vec![action],
         default_info: vec![out],
-        hdrs: Vec::new(),
-        cflags: Vec::new(),
-        compile_jars: Vec::new(),
-        runtime_jars: Vec::new(),
-        neverlink: false,
+        providers: Default::default(),
     });
     Ok(NoneType)
 }

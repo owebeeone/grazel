@@ -4,13 +4,9 @@
 //! consumed by `razel-build`. (Phase 1 removed the dead parallel `analyze`/`TargetDecl`/
 //! `Depset<T>` pipeline — it had no live callers; the live path never used it.)
 
-use razel_core::{ActionId, Digest, FileId, Label, NodeRef, TargetId};
-use razel_dds::{
-    Dds, FieldId, FieldKind, FieldValue, InstanceId, Provider, ProviderSchema, ProviderTypeId,
-    Scalar, TargetKey,
-};
+use razel_core::{ActionId, Digest, FileId, NodeRef, TargetId};
+use razel_dds::{Dds, InstanceId};
 use razel_ir::{ActionNode, FileKind, FileNode, Graph, TargetKind, TargetNode};
-use std::collections::{BTreeMap, BTreeSet};
 
 /// Infer a coarse target kind from the target name's suffix (the dialect convention:
 /// `*_test` → Test, `*_binary` → Binary, else Library). Analysis doesn't carry kind for
@@ -80,95 +76,19 @@ pub fn wire_to_dds(
     targets: &[razel_loading::AnalyzedTarget],
     instance: InstanceId,
 ) -> Result<Dds, String> {
-    let mut dds = Dds::new();
-    // Declare the provider schemas this assembler produces (the rule-pack's §2 declaration).
-    dds.register_schema(
-        ProviderTypeId::new("DefaultInfo"),
-        ProviderSchema::new().field(FieldId::new("files"), FieldKind::Set),
-    );
-    dds.register_schema(
-        ProviderTypeId::new("CcInfo"),
-        ProviderSchema::new()
-            .field(FieldId::new("hdrs"), FieldKind::Set)
-            .field(FieldId::new("cflags"), FieldKind::Set),
-    );
-    // The loader's pre-propagated (transitive) hdrs/cflags by target name — used to derive each
-    // target's OWN (non-transitive) set, so propagation moves OFF the loader and ONTO the DDS
-    // fold: CcInfo stores OWN; the transitive set is recovered by `Dds::fold_set` over deps.
-    let trans: BTreeMap<&str, (&Vec<String>, &Vec<String>)> = targets
-        .iter()
-        .map(|t| (t.name.as_str(), (&t.hdrs, &t.cflags)))
-        .collect();
-
-    for t in targets {
-        let key = target_key(instance, &t.name)?;
-
-        dds.assert(
-            key.clone(),
-            ProviderTypeId::new("DefaultInfo"),
-            Provider::new().with(FieldId::new("files"), str_set(&t.default_info)),
-        )
-        .map_err(|e| format!("{e:?}"))?;
-
-        if !t.hdrs.is_empty() || !t.cflags.is_empty() {
-            // own = transitive − ∪(deps' transitive); fold_set recovers the closure. (A header
-            // shared between own and a dep is attributed to the dep — the closure is unaffected.)
-            let dep_hdrs: BTreeSet<&str> = t
-                .deps
-                .iter()
-                .filter_map(|d| trans.get(d.as_str()))
-                .flat_map(|(h, _)| h.iter())
-                .map(String::as_str)
-                .collect();
-            let dep_cflags: BTreeSet<&str> = t
-                .deps
-                .iter()
-                .filter_map(|d| trans.get(d.as_str()))
-                .flat_map(|(_, c)| c.iter())
-                .map(String::as_str)
-                .collect();
-            let own_hdrs: Vec<String> =
-                t.hdrs.iter().filter(|h| !dep_hdrs.contains(h.as_str())).cloned().collect();
-            let own_cflags: Vec<String> =
-                t.cflags.iter().filter(|c| !dep_cflags.contains(c.as_str())).cloned().collect();
-            dds.assert(
-                key.clone(),
-                ProviderTypeId::new("CcInfo"),
-                Provider::new()
-                    .with(FieldId::new("hdrs"), str_set(&own_hdrs))
-                    .with(FieldId::new("cflags"), str_set(&own_cflags)),
-            )
-            .map_err(|e| format!("{e:?}"))?;
-        }
-
-        // Dep edges — the graph `fold_set` traverses to recompute the transitive closure.
-        let dep_keys = t
-            .deps
-            .iter()
-            .map(|d| target_key(instance, d))
-            .collect::<Result<Vec<_>, _>>()?;
-        dds.assert_deps(key, dep_keys);
-    }
-    Ok(dds)
-}
-
-/// Canonicalize a target name into a [`TargetKey`] (single-package bare names → `//:name`).
-fn target_key(instance: InstanceId, name: &str) -> Result<TargetKey, String> {
-    Label::parse_canonical(name)
-        .or_else(|_| Label::parse_canonical(&format!("//:{name}")))
-        .map(|label| TargetKey::new(instance, label))
-        .map_err(|e| format!("{e}"))
-}
-
-/// A `Set`-valued field of string scalars (the V1 set-valued provider field).
-fn str_set(xs: &[String]) -> FieldValue {
-    FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.clone())).collect())
+    // C2d: the loader's providers ARE razel-dds facts now, so the assembler is the loader's own
+    // `dds::to_dds` — own providers + dep edges, the transitive closure recovered by a `DdsRead`
+    // fold. The former subtract-deps reconstruction (storage was flat + pre-propagated) is gone.
+    razel_loading::dds::to_dds(targets, instance)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use razel_core::Label;
+    use razel_dds::{FieldId, FieldValue, ProviderTypeId, Scalar, TargetKey};
     use razel_loading::analyze_starlark;
+    use std::collections::BTreeSet;
 
     #[test]
     fn starlark_analysis_wires_into_ir_and_impact_query_works() {

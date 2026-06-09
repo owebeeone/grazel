@@ -51,11 +51,7 @@ fn analyze_sh(
         deps: Vec::new(),
         actions: vec![install_action(&src, &out)],
         default_info: vec![out],
-        hdrs: Vec::new(),
-        cflags: Vec::new(),
-        compile_jars: Vec::new(),
-        runtime_jars: Vec::new(),
-        neverlink: false,
+        providers: Default::default(),
     });
     Ok(NoneType)
 }

@@ -4,7 +4,7 @@ use crate::state::{AnalyzedTarget, canon_label, qualify, session, with_current};
 use crate::values::{Actions, Depset, File, extract_files, file_path, unpack};
 use crate::glob::do_glob;
 use crate::deps::record_target;
-use razel_dds::{DdsRead, FieldId, InstanceId, ProviderTypeId, Scalar};
+use razel_dds::{DdsRead, FieldId, FieldValue, InstanceId, ProviderTypeId, Scalar};
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
@@ -349,7 +349,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             default_info: files.clone(),
-            hdrs: files,
+            providers: crate::state::cc_provider_map(files, Vec::new()),
             ..Default::default()
         });
         Ok(NoneType)
@@ -380,7 +380,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         if let Some(h) = headers {
             let paths = extract_files(h);
-            with_current(session(eval), |c| c.hdrs = paths);
+            with_current(session(eval), |c| {
+                c.set_provider(
+                    "CcInfo",
+                    "hdrs",
+                    FieldValue::Set(paths.into_iter().map(Scalar::Str).collect()),
+                );
+            });
         }
         Ok(NoneType)
     }
@@ -401,14 +407,15 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let compile = compile_jars.map(extract_files);
         let runtime = runtime_jars.map(extract_files);
         let nl = neverlink.unwrap_or(false);
+        let odep = |j: Vec<String>| FieldValue::OrderedDepset(j.into_iter().map(Scalar::Str).collect());
         with_current(session(eval), |c| {
             if let Some(j) = compile {
-                c.compile_jars = j;
+                c.set_provider("JavaInfo", "compile_jars", odep(j));
             }
             if let Some(j) = runtime {
-                c.runtime_jars = j;
+                c.set_provider("JavaInfo", "runtime_jars", odep(j));
             }
-            c.neverlink = nl;
+            c.set_provider("JavaInfo", "neverlink", FieldValue::Scalar(Scalar::Bool(nl)));
         });
         Ok(NoneType)
     }

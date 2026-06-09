@@ -123,11 +123,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 outputs: vec![rlib.clone()],
             }],
             default_info: vec![rlib],
-            hdrs: Vec::new(),
-            cflags: Vec::new(),
-            compile_jars: Vec::new(),
-            runtime_jars: Vec::new(),
-            neverlink: false,
+            providers: Default::default(),
         });
         Ok(NoneType)
     }
@@ -176,11 +172,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 outputs: vec![out.clone()],
             }],
             default_info: vec![out],
-            hdrs: Vec::new(),
-            cflags: Vec::new(),
-            compile_jars: Vec::new(),
-            runtime_jars: Vec::new(),
-            neverlink: false,
+            providers: Default::default(),
         });
         Ok(NoneType)
     }
