@@ -40,29 +40,19 @@ fn scalar_str(s: &Scalar) -> Option<String> {
 }
 
 impl AnalyzedTarget {
-    /// A provider field's string elements (`Set` or `OrderedDepset`), empty if the field is absent.
-    fn field_strs(&self, ty: &str, field: &str) -> Vec<String> {
+    /// A provider field's string elements (`Set` or `OrderedDepset`), empty if absent. Generic — the
+    /// caller names the provider/field (language modules + tests); `state` stays language-free (C3a.5b).
+    pub fn field_strs(&self, ty: &str, field: &str) -> Vec<String> {
         match self.providers.get(&(ProviderTypeId::new(ty), FieldId::new(field))) {
             Some(FieldValue::Set(s)) => s.iter().filter_map(scalar_str).collect(),
             Some(FieldValue::OrderedDepset(v)) => v.iter().filter_map(scalar_str).collect(),
             _ => Vec::new(),
         }
     }
-    pub fn hdrs(&self) -> Vec<String> {
-        self.field_strs("CcInfo", "hdrs")
-    }
-    pub fn cflags(&self) -> Vec<String> {
-        self.field_strs("CcInfo", "cflags")
-    }
-    pub fn compile_jars(&self) -> Vec<String> {
-        self.field_strs("JavaInfo", "compile_jars")
-    }
-    pub fn runtime_jars(&self) -> Vec<String> {
-        self.field_strs("JavaInfo", "runtime_jars")
-    }
-    pub fn neverlink(&self) -> bool {
+    /// A `Scalar(Bool)` provider field (e.g. java `neverlink`), false if absent. Generic.
+    pub fn scalar_bool(&self, ty: &str, field: &str) -> bool {
         matches!(
-            self.providers.get(&(ProviderTypeId::new("JavaInfo"), FieldId::new("neverlink"))),
+            self.providers.get(&(ProviderTypeId::new(ty), FieldId::new(field))),
             Some(FieldValue::Scalar(Scalar::Bool(true)))
         )
     }
@@ -75,17 +65,6 @@ impl AnalyzedTarget {
     pub(crate) fn set_set(&mut self, ty: &str, field: &str, values: Vec<String>) {
         self.set_provider(ty, field, FieldValue::Set(values.into_iter().map(Scalar::Str).collect()));
     }
-}
-
-/// The `CcInfo` provider map a native cc rule exports (`hdrs`/`cflags` as `Set`).
-pub fn cc_provider_map(
-    hdrs: Vec<String>,
-    cflags: Vec<String>,
-) -> BTreeMap<(ProviderTypeId, FieldId), FieldValue> {
-    let mut t = AnalyzedTarget::default();
-    t.set_provider("CcInfo", "hdrs", FieldValue::Set(hdrs.into_iter().map(Scalar::Str).collect()));
-    t.set_provider("CcInfo", "cflags", FieldValue::Set(cflags.into_iter().map(Scalar::Str).collect()));
-    t.providers
 }
 
 #[derive(Default)]

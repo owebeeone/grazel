@@ -27,9 +27,9 @@ fn cc_info_captures_own_headers_and_folds_transitive_to_dependents() {
     let find = |n: &str| targets.iter().find(|t| t.name.ends_with(n)).unwrap();
 
     // CcInfo captured each target's OWN exported headers.
-    assert_eq!(find("core").hdrs(), ["core.h"]);
-    assert_eq!(find("base").hdrs(), ["base.h"]);
-    assert_eq!(find("util").hdrs(), ["util.h"]);
+    assert_eq!(find("core").field_strs("CcInfo", "hdrs"), ["core.h"]);
+    assert_eq!(find("base").field_strs("CcInfo", "hdrs"), ["base.h"]);
+    assert_eq!(find("util").field_strs("CcInfo", "hdrs"), ["util.h"]);
 
     // dep.headers is the TRANSITIVE fold: util's dep (base) exposes {base.h, core.h} — util sees
     // core.h through base. Folded into the action arguments (sorted, deduped).

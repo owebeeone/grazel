@@ -72,13 +72,16 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
         });
 
         // Store OWN providers (C2d); dependents recover the transitive closure via the DDS fold.
-        record_target(sess, AnalyzedTarget {
+        let mut t = AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_names,
             actions,
             default_info: vec![lib],
-            providers: crate::state::cc_provider_map(hdrs, own_cflags),
-        });
+            ..Default::default()
+        };
+        t.set_set("CcInfo", "hdrs", hdrs);
+        t.set_set("CcInfo", "cflags", own_cflags);
+        record_target(sess, t);
         Ok(NoneType)
     }
 

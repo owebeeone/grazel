@@ -1,6 +1,6 @@
 //! B3 — the java spike. razel's `java:defs.bzl` produces java's THREE-action structure (Turbine
 //! header-jar + Javac + JavaSourceJar) over the existing machinery, with the ORDERED compile
-//! classpath (`dep.compile_jars()` — the OrderedDepset fold, B2). Proven structurally via
+//! classpath (`dep.field_strs("JavaInfo", "compile_jars")` — the OrderedDepset fold, B2). Proven structurally via
 //! `analyze_starlark` (package ""): the abstraction stretches to java (multi-action kinds, a
 //! template command, an ordered header-jar classpath). Byte-parity vs the golden is the B-A0 step.
 
@@ -29,14 +29,14 @@ fn java_library_produces_three_actions_and_ordered_header_jar_classpath() {
     assert_eq!(javac.argv[0], "external/<repo>/bin/java");
     assert!(javac.argv.iter().any(|a| a.ends_with("JavaBuilder_deploy.jar")));
     // ORDERED classpath: util compiles against base's HEADER jar (compile-avoidance; the
-    // dep.compile_jars() OrderedDepset fold — B2), not base's full jar.
+    // dep.field_strs("JavaInfo", "compile_jars") OrderedDepset fold — B2), not base's full jar.
     let base_hjar = "bazel-out/darwin_arm64-fastbuild/bin/libbase-hjar.jar";
     assert!(javac.argv.contains(&base_hjar.to_string()), "classpath missing base hjar: {:?}", javac.argv);
     assert!(javac.inputs.contains(&base_hjar.to_string()));
     assert_eq!(javac.outputs, ["bazel-out/darwin_arm64-fastbuild/bin/libutil.jar"]);
 
     // JavaInfo captured util's OWN header jar (the OrderedDepset element dependents fold).
-    assert_eq!(util.compile_jars(), ["bazel-out/darwin_arm64-fastbuild/bin/libutil-hjar.jar"]);
+    assert_eq!(util.field_strs("JavaInfo", "compile_jars"), ["bazel-out/darwin_arm64-fastbuild/bin/libutil-hjar.jar"]);
 }
 
 #[test]
@@ -68,8 +68,8 @@ fn java_info_dual_depsets_dont_cross_merge_and_neverlink_excludes_runtime() {
 
     // api carries a compile jar but no runtime jar, and is flagged neverlink.
     let api = targets.iter().find(|t| t.name.ends_with("api")).unwrap();
-    assert_eq!(api.compile_jars(), [p("libapi-hjar.jar")]);
-    assert!(api.runtime_jars().is_empty() && api.neverlink());
+    assert_eq!(api.field_strs("JavaInfo", "compile_jars"), [p("libapi-hjar.jar")]);
+    assert!(api.field_strs("JavaInfo", "runtime_jars").is_empty() && api.scalar_bool("JavaInfo", "neverlink"));
 }
 
 #[test]
