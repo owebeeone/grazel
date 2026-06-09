@@ -220,15 +220,64 @@ fn dds_boundary_violations(cargo_toml: &str) -> Vec<String> {
     out
 }
 
+// ── Phase 2.1c: no language name leaks into the engine core (RazelHookSeam C3c) ─────────────
+// The generic loader engine must not hardcode a language/provider — adding a language is a
+// registration (provider registry / toolchain registry / ruleset table), not a core edit. We ban
+// DISTINCTIVE tokens (not bare `cc`/`java`, which false-positive on `macos`/paths/prose), scanning
+// only the engine-core modules; the per-language rules + the registries + the ruleset registration
+// site legitimately name languages and are allowlisted.
+const LANG_BANNED: &[&str] = &["CcInfo", "JavaInfo", "PyInfo", "macos_core_config", "cc_provider_map"];
+const LANG_ALLOWLIST: &[&str] = &[
+    "crates/razel-loading/src/native_cc.rs",
+    "crates/razel-loading/src/rust_rules.rs",
+    "crates/razel-loading/src/py_rules.rs",
+    "crates/razel-loading/src/sh_rules.rs",
+    "crates/razel-loading/src/shims.rs",
+    "crates/razel-loading/src/registry.rs",
+    "crates/razel-loading/src/toolchains.rs",
+    "crates/razel-loading/src/rules.rs", // the loader + `ruleset_modules` registration table
+];
+
+/// A language/provider name hardcoded in a generic engine-core module (C3c). Scans only
+/// `razel-loading/src` (the loader engine); skips comments + the per-file `#[cfg(test)]` fixtures.
+fn language_leak_violations(rel_path: &str, content: &str) -> Vec<GateViolation> {
+    if !rel_path.starts_with("crates/razel-loading/src/") || LANG_ALLOWLIST.contains(&rel_path) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (n, line) in content.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            continue; // a comment naming a provider is not a use
+        }
+        if t.starts_with("#[cfg(test)]") {
+            break; // test fixtures may name providers; the core is the non-test code above
+        }
+        for pattern in LANG_BANNED {
+            if line.contains(pattern) {
+                out.push(GateViolation {
+                    path: rel_path.into(),
+                    line: n + 1,
+                    pattern,
+                    reason: "language/provider name in the engine core — register it (provider/toolchain registry), don't hardcode it (C3c)",
+                });
+            }
+        }
+    }
+    out
+}
+
 fn gates() -> ExitCode {
     let root = workspace_root();
     let mut files = Vec::new();
     collect_rs(&root.join("crates"), &mut files);
     let mut violations = Vec::new();
+    let mut lang = Vec::new();
     for f in &files {
         let rel = f.strip_prefix(&root).unwrap_or(f).to_string_lossy().replace('\\', "/");
         if let Ok(content) = std::fs::read_to_string(f) {
             violations.extend(gate_violations(&rel, &content));
+            lang.extend(language_leak_violations(&rel, &content));
         }
     }
     // DDS dependency-boundary (2.1b): razel-dds may depend only on core+wire.
@@ -236,21 +285,25 @@ fn gates() -> ExitCode {
         .map(|c| dds_boundary_violations(&c))
         .unwrap_or_default();
 
-    if violations.is_empty() && boundary.is_empty() {
+    if violations.is_empty() && boundary.is_empty() && lang.is_empty() {
         eprintln!(
-            "xtask gates: OK — no ambient state anywhere in crates/ (AD2); razel-dds boundary intact (core+wire only)"
+            "xtask gates: OK — no ambient state anywhere in crates/ (AD2); razel-dds boundary intact (core+wire only); no language name in the engine core (C3c)"
         );
         return ExitCode::SUCCESS;
     }
     for v in &violations {
         eprintln!("  BANNED {}:{}  `{}` — {}", v.path, v.line, v.pattern, v.reason);
     }
+    for v in &lang {
+        eprintln!("  LANGUAGE-IN-CORE {}:{}  `{}` — {}", v.path, v.line, v.pattern, v.reason);
+    }
     for b in &boundary {
         eprintln!("  BOUNDARY razel-dds must not depend on `{b}` — the DDS spine is core+wire only");
     }
     eprintln!(
-        "\nxtask gates: FAIL — {} ambient-state + {} boundary violation(s).",
+        "\nxtask gates: FAIL — {} ambient-state + {} language-in-core + {} boundary violation(s).",
         violations.len(),
+        lang.len(),
         boundary.len()
     );
     ExitCode::from(1)
@@ -259,6 +312,20 @@ fn gates() -> ExitCode {
 #[cfg(test)]
 mod gate_tests {
     use super::*;
+
+    #[test]
+    fn language_leak_gate_catches_core_hardcodes_but_allows_registration() {
+        // C3c negative: a provider literal in a core module is caught.
+        let core = "crates/razel-loading/src/dialect.rs";
+        assert_eq!(language_leak_violations(core, "    set_provider(\"CcInfo\", \"hdrs\", v);").len(), 1);
+        assert_eq!(language_leak_violations(core, "    macos_core_config()").len(), 1);
+        // …but the registration modules + the loader's ruleset table legitimately name languages.
+        assert!(language_leak_violations("crates/razel-loading/src/registry.rs", "r.register(\"CcInfo\", ..)").is_empty());
+        assert!(language_leak_violations("crates/razel-loading/src/toolchains.rs", "macos_core_config()").is_empty());
+        // …a comment naming a provider is not a use, and test fixtures (after #[cfg(test)]) are skipped.
+        assert!(language_leak_violations(core, "    // CcInfo captures headers").is_empty());
+        assert!(language_leak_violations(core, "#[cfg(test)]\nmod t { let x = \"CcInfo\"; }").is_empty());
+    }
 
     #[test]
     fn flags_new_ambient_state() {
