@@ -108,14 +108,30 @@ where
         let mut fields: Vec<(String, Value<'v>)> = Vec::new();
         for (k, v) in &named {
             let key = k.as_str().to_string();
+            // D1b: an attr resolves to provider structs if it's the legacy `deps` OR the schema
+            // declares it `attr.label_list` — the schema kind drives label resolution, not the name.
+            let is_label = key == "deps" || {
+                let mut yes = false;
+                if let Some(d) = starlark::values::dict::DictRef::from_value(self.attrs.to_value()) {
+                    for (kk, desc) in d.iter() {
+                        if kk.unpack_str() == Some(key.as_str()) {
+                            if let Ok(Some(kind)) = desc.get_attr("kind", heap) {
+                                yes = kind.unpack_str() == Some("label_list");
+                            }
+                            break;
+                        }
+                    }
+                }
+                yes
+            };
             match key.as_str() {
                 "name" => {
                     name = v.unpack_str().unwrap_or_default().to_string();
                     fields.push((key, *v));
                 }
-                // Two-phase provider flow: resolve each dep label to its analyzed
-                // DefaultInfo (from the results registry) as a `struct(files = [...])`.
-                "deps" => {
+                // A label attr (legacy `deps` or any `attr.label_list`): resolve each label to its
+                // analyzed providers as a `struct(files=…, <folded fields>…)`.
+                _ if is_label => {
                     let mut providers: Vec<Value<'v>> = Vec::new();
                     if let Some(list) = ListRef::from_value(*v) {
                         let results = sess.results.borrow();

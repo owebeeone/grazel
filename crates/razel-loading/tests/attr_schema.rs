@@ -19,6 +19,26 @@ greeter(name = "g")  # greeting omitted -> must default to "hi"
     assert!(argv.contains(&"hi".to_string()), "declared default must be applied: {argv:?}");
 }
 
+/// D1b: ANY `attr.label_list` (not just the hardcoded `deps`) resolves its labels to provider
+/// structs — the schema kind drives resolution.
+#[test]
+fn rule_resolves_label_list_attr_to_providers() {
+    let src = r#"
+def _impl(ctx):
+    fs = []
+    for d in ctx.attr.libs:
+        fs = fs + d.files
+    ctx.actions.run(executable = "link", outputs = [], inputs = [], arguments = fs)
+
+linker = rule(implementation = _impl, attrs = {"libs": attr.label_list()})
+filegroup(name = "a", srcs = ["a.o"])
+linker(name = "t", libs = [":a"])
+"#;
+    let targets = analyze_starlark("BUILD", src).unwrap();
+    let t = targets.iter().find(|t| t.name.ends_with("t")).unwrap();
+    assert!(t.actions[0].argv.contains(&"a.o".to_string()), "label_list resolved to dep files: {:?}", t.actions[0].argv);
+}
+
 /// D1a: a `mandatory` attr that's omitted is a clear analysis error (not a silent `None`).
 #[test]
 fn rule_errors_on_missing_mandatory_attr() {
