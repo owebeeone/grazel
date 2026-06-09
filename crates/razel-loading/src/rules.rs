@@ -198,6 +198,7 @@ fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(require = named)] outputs: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] inputs: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] arguments: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] mnemonic: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
@@ -214,7 +215,7 @@ fn actions_methods(b: &mut MethodsBuilder) {
         };
         with_current(sess, |c| {
             c.actions.push(AnalyzedAction {
-                mnemonic: exe,
+                mnemonic: mnemonic.unwrap_or(exe),
                 argv,
                 inputs: paths(inputs),
                 outputs: paths(outputs),
