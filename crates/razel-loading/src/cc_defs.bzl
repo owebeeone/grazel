@@ -34,7 +34,7 @@ def _cc_library_impl(ctx):
             "minimum_os_version": _SDK,
             "quote_include_paths": [".", bin],
         })
-        ctx.actions.run(
+        razel_build.action(
             executable = cl[0],
             arguments = cl[1:],
             inputs = [src_prefix + src] + headers,
@@ -48,7 +48,7 @@ def _cc_library_impl(ctx):
         "output_execpath": lib,
         "libraries_to_link": objects,
     })
-    ctx.actions.run(
+    razel_build.action(
         executable = al[0],
         arguments = al[1:],
         inputs = objects,

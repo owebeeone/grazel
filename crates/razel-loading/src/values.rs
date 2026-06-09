@@ -67,25 +67,7 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let sess = session(eval);
-        let exe = executable.map(file_path).unwrap_or_else(|| "run".into());
-        let mut argv = vec![exe.clone()];
-        // arguments may contain plain strings, lists, File values, and args() objects.
-        for a in arguments.map(|l| l.items).unwrap_or_default() {
-            argv.extend(flatten_arg(a));
-        }
-        let paths = |l: Option<UnpackList<Value<'v>>>| -> Vec<String> {
-            l.map(|l| l.items.into_iter().map(file_path).collect())
-                .unwrap_or_default()
-        };
-        with_current(sess, |c| {
-            c.actions.push(AnalyzedAction {
-                mnemonic: mnemonic.unwrap_or(exe),
-                argv,
-                inputs: paths(inputs),
-                outputs: paths(outputs),
-            })
-        });
+        push_run_action(eval, executable, outputs, inputs, arguments, mnemonic);
         Ok(NoneType)
     }
     /// `ctx.actions.args()` — a mutable argument accumulator (`add`/`add_all`),
@@ -185,6 +167,37 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
 
 
 /// Flatten a `run(arguments=…)` element into argv strings: an [`Args`] yields its
+/// Register an action on the current target (inputs/outputs/argv). The shared core behind BOTH
+/// `ctx.actions.run` (the Bazel-dialect API) and `razel_build.action` (the engine's named move, C1b) —
+/// so the two surfaces are byte-identical by construction.
+pub(crate) fn push_run_action<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    executable: Option<Value<'v>>,
+    outputs: Option<UnpackList<Value<'v>>>,
+    inputs: Option<UnpackList<Value<'v>>>,
+    arguments: Option<UnpackList<Value<'v>>>,
+    mnemonic: Option<String>,
+) {
+    let sess = session(eval);
+    let exe = executable.map(file_path).unwrap_or_else(|| "run".into());
+    let mut argv = vec![exe.clone()];
+    // arguments may contain plain strings, lists, File values, and args() objects.
+    for a in arguments.map(|l| l.items).unwrap_or_default() {
+        argv.extend(flatten_arg(a));
+    }
+    let paths = |l: Option<UnpackList<Value<'v>>>| -> Vec<String> {
+        l.map(|l| l.items.into_iter().map(file_path).collect()).unwrap_or_default()
+    };
+    with_current(sess, |c| {
+        c.actions.push(AnalyzedAction {
+            mnemonic: mnemonic.unwrap_or(exe),
+            argv,
+            inputs: paths(inputs),
+            outputs: paths(outputs),
+        })
+    });
+}
+
 /// accumulated items, a list recurses, a [`File`] yields its path, anything else
 /// stringifies.
 pub(crate) fn flatten_arg(v: Value) -> Vec<String> {

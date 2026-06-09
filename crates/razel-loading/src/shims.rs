@@ -84,7 +84,13 @@ pub(crate) fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
 /// native backend in razel, so there's no toolchain mode; this is the only java impl. Byte-parity vs
 /// the golden is Phase D (the structural diff pins the action SHAPE — see tests/java_graph_parity.rs).
 pub(crate) fn rules_java_module() -> Result<FrozenModule, String> {
-    let globals = GlobalsBuilder::standard().with(rule_globals).build();
+    // the razel_build namespace so java_defs.bzl can use razel_build.action (C1b — engine surface).
+    let globals = GlobalsBuilder::standard()
+        .with(rule_globals)
+        .with(|b| {
+            b.namespace("razel_build", razel_build_members);
+        })
+        .build();
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse("@rules_java", include_str!("java_defs.bzl").to_owned(), &Dialect::Extended)
             .map_err(|e| format!("{e}"))?;

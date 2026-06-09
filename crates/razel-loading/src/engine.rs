@@ -131,5 +131,22 @@ pub(crate) fn razel_build_members(b: &mut GlobalsBuilder) {
         let enabled = config.select(&[]);
         Ok(eval.heap().alloc(config.full_command_line(&enabled, action, &vars)))
     }
+
+    /// `razel_build.action(executable, arguments, inputs, outputs, mnemonic)` → register an action on
+    /// the current target — the four-move API's ACTION move (C1b). Identical to `ctx.actions.run`
+    /// (both call `values::push_run_action`), but the engine's named surface: razel's bundled `.bzl`
+    /// register through `razel_build`, so cc + java ride one engine surface.
+    fn action<'v>(
+        #[starlark(require = named)] executable: Option<Value<'v>>,
+        #[starlark(require = named)] outputs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] inputs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] arguments: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] mnemonic: Option<String>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        crate::values::push_run_action(eval, executable, outputs, inputs, arguments, mnemonic);
+        Ok(NoneType)
+    }
 }
 

@@ -37,7 +37,7 @@ def _java_library_impl(ctx):
     runtime_cp = dedup(runtime_cp)
 
     # Turbine — the header/interface jar (fast; enables compile-avoidance for dependents).
-    ctx.actions.run(
+    razel_build.action(
         executable = _JAVA,
         arguments = ["-jar", "external/<repo>/java_tools/turbine_deploy.jar", "--output", hjar, "--classpath"] + classpath + ["--sources"] + srcs,
         inputs = srcs + classpath,
@@ -45,7 +45,7 @@ def _java_library_impl(ctx):
         mnemonic = "Turbine",
     )
     # Javac — the real compile, JavaBuilder run via java (the JVM-invocation command shape).
-    ctx.actions.run(
+    razel_build.action(
         executable = _JAVA,
         arguments = [
             "--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
@@ -60,7 +60,7 @@ def _java_library_impl(ctx):
         mnemonic = "Javac",
     )
     # JavaSourceJar — the source jar.
-    ctx.actions.run(
+    razel_build.action(
         executable = _JAVA,
         arguments = ["-jar", "external/<repo>/java_tools/SourceJar_deploy.jar", "--output", srcjar] + srcs,
         inputs = srcs,
