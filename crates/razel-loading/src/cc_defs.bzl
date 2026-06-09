@@ -9,18 +9,21 @@ _SDK = "<sdk>"                    # macOS SDK placeholder (host param).
 def _cc_library_impl(ctx):
     pkg = ctx.label.package
     name = ctx.label.name
-    prefix = "bazel-out/%s/bin/%s" % (_CFG, pkg) if pkg else "bazel-out/%s/bin" % _CFG
+    bin = "bazel-out/%s/bin" % _CFG
+    prefix = "%s/%s" % (bin, pkg) if pkg else bin
     objs = "%s/_objs/%s" % (prefix, name)
     src_prefix = pkg + "/" if pkg else ""
 
     # OWN exported headers (qualified) + deps' transitive (dep.headers — A2a's provides fold).
-    own_headers = [src_prefix + h for h in ctx.attr.hdrs]
+    # getattr defaults: razel has no attr-schema defaults yet (A2/D), and real BUILDs omit optional
+    # attrs (a dep-less cc_library has no `deps`).
+    own_headers = [src_prefix + h for h in getattr(ctx.attr, "hdrs", [])]
     headers = own_headers
-    for d in ctx.attr.deps:
+    for d in getattr(ctx.attr, "deps", []):
         headers = headers + d.headers
 
     objects = []
-    for src in ctx.attr.srcs:
+    for src in getattr(ctx.attr, "srcs", []):
         stem = src.rsplit(".", 1)[0]
         obj = "%s/%s.o" % (objs, stem)
         cl = razel_cc.command_line("c++-compile", {
@@ -28,7 +31,7 @@ def _cc_library_impl(ctx):
             "output_file": obj,
             "dependency_file": "%s/%s.d" % (objs, stem),
             "minimum_os_version": _SDK,
-            "quote_include_paths": [".", prefix],
+            "quote_include_paths": [".", bin],
         })
         ctx.actions.run(
             executable = cl[0],

@@ -178,12 +178,24 @@ version atomically — the `.bzl` is a *contract with the binary's builtin API*.
 
 So: bundle what razel *authors*; fetch what razel *runs*.
 
-**Declared-vs-executable — decided: razel adopts the bazel toolchain.** The builtins emit the
-**declared** graph with Bazel-faithful argv (`cc_wrapper.sh` + `bazel-out` paths); razel
-**materializes that toolchain** (`local_config_cc` etc. — "fetch what you run") and executes it, so
-*declared == executable* — one argv, no split. Most bazel-faithful (run the same toolchain bazel
-does), and it collapses the parity runner's comparison to a single command line. (An explicit
-declared/executable split is the fallback if a toolchain proves unmaterializable — not the default.)
+**Declared-vs-executable — resolved by a per-language toolchain MODE** (revised after the ·ii spike
+proved "just adopt the toolchain" breaks execution: a single faithful argv isn't runnable without a
+materialized toolchain, and razel-build *runs* the graph). razel's cc rule is mode-parameterized:
+
+- **Native** (default): resolve the host compiler by walking `PATH` (`cc`/`c++`/`clang++`), **log +
+  digest** which tool was chosen, and run it directly with real paths → an **executable** graph. This
+  is what razel-build runs. It's also exactly what Bazel's `cc_configure` does (probe the host), so
+  razel-native ≈ Bazel-native for host-derived languages (cc, py). The tool's digest becomes a keyed
+  action input (the host tool can change underneath you — RazelGaps "toolchain-change cache").
+- **Adopt-Bazel**: the faithful **declared** graph (`cc_wrapper.sh` + `bazel-out`, the Constrain
+  flags) over razel's `cc:defs.bzl`. Consumed by the graph-parity runner — which only *declares +
+  diffs*, never executes — and, once the toolchain is materialized, hermetic builds.
+
+The MODE *is* the resolution: the **parity** context wants faithful (Adopt-Bazel); the **build**
+context wants runnable (Native); selected per-language, eventually `.razelrc`-driven (RazelGaps).
+No forced one-argv split, no blocked build. (Materializing Bazel's toolchain so Adopt-Bazel executes
+too — true `declared == executable` — stays the end goal, now a follow-on, not a prerequisite.) The
+native resolution (PATH-walk + digest/log) is **in scope here**, not deferred.
 
 ## 8. The extension-hook tail (honesty: not a fixed %)
 
@@ -260,12 +272,19 @@ Each step is a green, committed, tagged (`razel-v2/…`) roll-build with an expl
     mnemonic `CppCompile`/`CppArchive`, argv[0] `cc_wrapper.sh`, the feature flags, the
     `_objs/<target>/<stem>.{o,d}` path *shape*, transitive headers in inputs. No live switch; can't
     golden-match (no package).
-  - **·ii (live switch).** `include_str!` the `.bzl` into the binary; `BzlLoader` serves it for
-    `@rules_cc//cc:defs.bzl` (retiring native `cc_library` — declared == executable, §7);
-    `analyze_workspace` on the corpus gives the real package; render via `bazel_compile_inputs`;
-    inputs source-level (A0b). **Open: live `cfg`** — `bazel-out/<cfg>` is a placeholder; pick a fixed
-    segment `normalize()` maps to `<cfg>`. *Green:* **A0's runner goes GREEN on cc/transitive**
-    (modulo `{CppModuleMap}`); cc characterization rewritten.
+  - **·ii (live switch via toolchain MODE — §7).** `include_str!` the `.bzl`; `BzlLoader` serves it
+    for `@rules_cc//cc:defs.bzl` **only in Adopt-Bazel mode**; **Native** (default) keeps the existing
+    native `cc_library` (executable). The graph-parity runner (A0) runs `analyze_workspace` in
+    Adopt-Bazel → faithful → matches the golden; razel-build runs Native → unchanged. **Open: live
+    `cfg`** — `bazel-out/<cfg>` is a placeholder; pick a fixed segment `normalize()` maps to `<cfg>`.
+    *Green:* **A0's runner goes GREEN on cc/transitive** (modulo `{CppModuleMap}`); razel-build +
+    characterization stay green (Native untouched). *(This is the ·ii that the first spike got wrong —
+    it replaced native globally and broke execution; the mode fixes that.)*
+  - **·iii (native toolchain resolution — folded in, §7, not deferred).** Resolve the Native-mode cc
+    tool by walking `PATH` (`cc`/`c++`/`clang++`), **log + digest** the chosen tool; retire the
+    hardcoded `/usr/bin/c++`. *Green:* a resolver unit test (controlled candidates → first existing +
+    its digest); Native cc uses the resolved tool; characterization asserts a real resolved compiler.
+    (The digest → action-key fold is the follow-on, RazelGaps "toolchain-change cache".)
 - **A5 — config eval.** `razel_cc.toolchain` evaluates the real `cc_toolchain_config_lib.bzl` +
   `local_config_cc`; retire `cc_macos_core.bzl`. *Green:* A0 stays green with the evaluated config.
 

@@ -562,6 +562,7 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
         let flags = GlobalFlags {
             copts: vec!["-DANSWER=42".into()],
             linkopts: vec![],
+            ..Default::default()
         };
         build_bazel_with(&build_src, "prog", root.path(), &cache, flags).unwrap();
 

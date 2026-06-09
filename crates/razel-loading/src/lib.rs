@@ -16,7 +16,7 @@ mod py_rules;
 mod rust_rules;
 mod sh_rules;
 pub use rules::{
-    AnalyzedAction, AnalyzedTarget, GlobalFlags, analyze_bazel, analyze_bazel_with,
+    AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags, analyze_bazel, analyze_bazel_with,
     analyze_starlark, analyze_workspace, analyze_workspace_with,
 };
 

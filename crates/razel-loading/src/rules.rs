@@ -118,6 +118,21 @@ pub(crate) fn session<'a>(eval: &Evaluator<'_, 'a, '_>) -> &'a Session {
 pub struct GlobalFlags {
     pub copts: Vec<String>,
     pub linkopts: Vec<String>,
+    /// Which cc toolchain to use (§7): Native (host compiler, executable — default) or AdoptBazel
+    /// (Bazel's faithful declared graph, for the parity runner).
+    pub cc_toolchain: CcToolchainMode,
+}
+
+/// The cc toolchain mode (RazelStarlarkBoundaryPlan §7) — the resolution to declared-vs-executable.
+/// The parity context wants faithful (AdoptBazel); the build context wants runnable (Native).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CcToolchainMode {
+    /// Resolve + run the host compiler — an executable graph (razel-build's path).
+    #[default]
+    Native,
+    /// Bazel's faithful declared graph (`cc_wrapper.sh` + `bazel-out`) over razel's `cc:defs.bzl`;
+    /// the graph-parity runner's path (declares + diffs, never executes).
+    AdoptBazel,
 }
 
 /// Canonicalize a target name/label against the current package. Single-package
@@ -1128,9 +1143,18 @@ fn compile_action(src: &str, obj: &str, flags: &[String], inputs: Vec<String>) -
     }
 }
 
-/// The synthetic `@rules_cc` module: re-exports the native rules under the names
-/// real BUILD files `load()` (`cc_binary`, `cc_library`).
-fn rules_cc_module() -> Result<FrozenModule, String> {
+/// The synthetic `@rules_cc` module, by toolchain mode (§7). **Native** re-exports razel's native
+/// rules (host compiler, executable — razel-build's path). **AdoptBazel** serves razel's `cc:defs.bzl`
+/// over the engine (Bazel-faithful declared graph — the parity runner's path).
+fn rules_cc_module(mode: CcToolchainMode) -> Result<FrozenModule, String> {
+    match mode {
+        CcToolchainMode::Native => rules_cc_module_native(),
+        CcToolchainMode::AdoptBazel => rules_cc_module_adopt_bazel(),
+    }
+}
+
+/// Native: `cc_binary`/`cc_library` are razel's native rules (executable, host compiler).
+fn rules_cc_module_native() -> Result<FrozenModule, String> {
     let globals = GlobalsBuilder::standard().with(cc_rules).build();
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse(
@@ -1141,8 +1165,31 @@ fn rules_cc_module() -> Result<FrozenModule, String> {
         .map_err(|e| format!("{e}"))?;
         {
             let mut eval = Evaluator::new(&module);
-            eval.eval_module(ast, &globals)
-                .map_err(|e| format!("{e}"))?;
+            eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
+        }
+        module.freeze().map_err(|e| format!("{e:?}"))
+    })
+}
+
+/// AdoptBazel: `cc_library` is razel's OWN rule — the bundled `cc:defs.bzl` evaluated over the
+/// `razel_cc` engine (the Bazel-faithful declared graph). `cc_binary` stays native until a `CppLink`
+/// golden exists (Phase E). Bundling versions razel's two cc halves (Rust builtins + this `.bzl`)
+/// atomically with the binary.
+fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
+    let globals = GlobalsBuilder::standard()
+        .with(cc_rules) // native_cc_binary (cc_binary's backend until Phase E)
+        .with(rule_globals) // rule(), CcInfo, DefaultInfo, depset, …
+        .with(|b| {
+            b.namespace("razel_cc", razel_cc_members); // the cc engine seam (Constrain)
+        })
+        .build();
+    Module::with_temp_heap(|module| {
+        let src = format!("{}\ncc_binary = native_cc_binary\n", include_str!("cc_defs.bzl"));
+        let ast =
+            AstModule::parse("@rules_cc", src, &Dialect::Extended).map_err(|e| format!("{e}"))?;
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
         }
         module.freeze().map_err(|e| format!("{e:?}"))
     })
@@ -1513,11 +1560,11 @@ impl FileLoader for BzlLoader<'_> {
 /// Every natively-provided ruleset, by `load()` prefix. New languages register a
 /// row here (the rule logic itself lives in the per-language module). Each maps a
 /// `@repo//` to a synthetic module re-exporting razel's native rules.
-fn ruleset_modules() -> Result<Vec<Ruleset>, String> {
+fn ruleset_modules(cc_toolchain: CcToolchainMode) -> Result<Vec<Ruleset>, String> {
     Ok(vec![
         Ruleset {
             prefix: "@rules_cc//",
-            module: rules_cc_module()?,
+            module: rules_cc_module(cc_toolchain)?,
         },
         Ruleset {
             prefix: "@bazel_skylib//",
@@ -1552,7 +1599,7 @@ fn ruleset_modules() -> Result<Vec<Ruleset>, String> {
 /// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
 /// cross-package load appends, never clears).
 fn eval_build_src(session: &Session, name: &str, src: &str) -> Result<(), String> {
-    let rulesets = ruleset_modules()?;
+    let rulesets = ruleset_modules(session.global.cc_toolchain)?;
     let globals = build_globals();
     let loader = BzlLoader {
         rulesets: &rulesets,

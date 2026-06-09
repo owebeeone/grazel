@@ -120,6 +120,7 @@ impl Opts {
         GlobalFlags {
             copts,
             linkopts: self.linkopts.clone(),
+            ..Default::default()
         }
     }
 }
