@@ -1,19 +1,25 @@
 # RazelHookSeam — Phase C3 design (the per-language hook seam)
 
-Companion to `RazelStarlarkBoundaryPlan.md` §10 Phase C. C0–C2 are done: the loader is decomposed,
-the four-move `razel_build` surface exists, and the provider model converged on the `razel-dds`
-value algebra (one fold, two instances — cc + java). **C3 is the last subphase**: formalize the
-per-language extension points and enforce that *no language name leaks into the engine core*, so
-adding a language is a **registration**, not an edit to shared code.
+Companion to `RazelStarlarkBoundaryPlan.md` §10 Phase C. C0–C2 landed the substance: the loader is
+decomposed, the four-move `razel_build` surface exists (`command_line` + `action`), and the provider
+model converged on the `razel-dds` value algebra — OWN providers in a `FieldValue` map, transitive
+closures recovered by one `DdsRead` fold, two instances (cc + java). **One C2 deliverable is NOT yet
+built**: the plan's generic `razel_build.info(schema, …)` constructor — capture is still the two
+hardcoded `CcInfo`/`JavaInfo` builtins (`dialect.rs`). So C3a must *build* `info`, not layer on it.
 
-This is a *design* subphase, not a mechanical one — see §4 (the toolchain-resolver hook hits a real
-abstraction gap). Read this before opening C3.
+**C3 is the last subphase**: formalize the per-language extension points and enforce that *no language
+name leaks into the engine core*, so adding a language is a **registration**, not an edit to shared
+code.
+
+This is a *design* subphase, not a mechanical one (see §4 — the toolchain hook hits a real abstraction
+gap). **Revised per the design review in `scratch/RazelHookSeam-Review48.md`**, which corrected the §2
+inventory (a missed native-path fold + a python entanglement) and the C3a scope. Read before opening C3.
 
 ---
 
 ## 1. Goal (from the plan)
 
-> **C3 — hook seam.** Formalize the extension points the B5 ledger surfaced (toolchain resolver,
+> **C3 — hook seam.** Formalize the extension points the B5 java spike surfaced (toolchain resolver,
 > action-transform for ijar/include-scan). *Green:* cc + java's bespoke bits sit behind hooks; an
 > `xtask gates`-style check that no language name leaks into the engine core.
 
@@ -31,11 +37,21 @@ Surveyed at C2d (`grep` of the core modules). These are the language/provider li
 | `state.rs` | `cc_provider_map`; `field_strs`/accessors hardcode `"CcInfo"`/`"JavaInfo"` + the 5 field names | a cc helper + cc/java accessors living in the foundation |
 | `engine.rs` | `razel_build.command_line` matches `"cc"` → `macos_core_config` | the toolchain resolver, hardcoded (§4 — the hard one) |
 | `dds.rs` (`to_dds`) | registers `DefaultInfo`/`CcInfo`/`JavaInfo` schemas + field names | provider schemas hardcoded in the bridge |
-| `dialect.rs` | `CcInfo`/`JavaInfo` capture builtins; the dep-resolution folds `CcInfo.hdrs` / `JavaInfo.{compile_jars,runtime_jars,neverlink}`; the dep struct's `headers`/`compile_jars`/`runtime_jars`; `cc_provider_map` (the filegroup-ish rule) | the rule-API layer is cc/java-shaped |
-| `rules.rs` (loader) | `"cc"` ×5 — the `@rules_cc//` prefix + `CcToolchainMode` wiring | these are the **registration site** (`ruleset_modules`), not a core leak — see §6 |
+| `dialect.rs` | `CcInfo`/`JavaInfo` capture builtins; the **Starlark-path** dep-fold (`CcInfo.hdrs` / `JavaInfo.{compile_jars,runtime_jars,neverlink}`); the dep struct's `headers`/`compile_jars`/`runtime_jars`; `cc_provider_map` (the filegroup-ish rule) | the rule-API layer is cc/java-shaped |
+| `deps.rs` | `resolve_dep` (`:63,70`) hardcodes `ProviderTypeId::new("CcInfo")` + folds `hdrs`/`cflags` | the **native-path** dep-fold — generic machinery shared by all 4 native rulesets (review-caught; the original inventory missed this) |
+| `rules.rs` (loader) | `"cc"` ×5 — the `@rules_cc//` prefix + `CcToolchainMode` wiring | the **registration site** (`ruleset_modules`), not a core leak — see §6 |
 
-The bulk (state/dds/dialect) is the **provider-schema registry** (§3). `engine.rs` is the
-**toolchain hook** (§4). `rules.rs`'s `"cc"` is the per-language *registration*, which is allowed.
+Two consequences the review surfaced, both binding on C3a:
+- **There are TWO transitive dep-folds** that hardcode the provider set — the Starlark path
+  (`dialect.rs`) AND the native path (`deps.rs::resolve_dep`). C3a must de-leak **both**, or the gate
+  is a fiction.
+- **Python piggybacks `.py` sources on the `CcInfo.hdrs` channel** (`py_rules.rs:84` calls
+  `cc_provider_map`, "carried through the `hdrs` channel by `resolve_dep`"). So `cc_provider_map`
+  **cannot simply "move to the cc module"** (the §3 sketch) — py must first get its own provider/field
+  (or the channel stay generic), else py breaks. The registry must own this, not a cc-private helper.
+
+The bulk (state/dds/dialect/deps) is the **provider-schema registry** (§3). `engine.rs` is the
+**toolchain hook** (§4). `rules.rs`'s `"cc"` is the per-language *registration*, which is allowed (§6).
 
 ## 3. C3a — the provider-schema registry (the bulk; mechanical)
 
@@ -49,24 +65,34 @@ struct ProviderRegistry { schemas: BTreeMap<ProviderTypeId, ProviderSchema>,
                           // + per-field fold policy: ordered? pruned-by(field)? }
 ```
 
-What it removes:
-- **`dds::to_dds`** — registers schemas *from the registry*, not a hardcoded list; asserts whatever
-  providers a target carries (already map-driven post-C2d — just drop the schema-name literals).
-- **`dialect` dep-resolution** — instead of three hardcoded folds (`CcInfo.hdrs`,
-  `JavaInfo.compile_jars`, …), iterate the registry: for each registered provider field, fold by its
-  kind/policy and project it onto the dep struct generically (the struct's field names come from the
-  registry, not literals).
-- **`dialect` capture** — `CcInfo`/`JavaInfo` builtins become thin registrations (or one
-  `razel_build.info(provider, fields)` constructor driven by the registry); `set_provider` already
-  writes the map generically.
-- **`state.rs`** — `cc_provider_map` moves to the cc module; the `hdrs()`/`cflags()`/… accessors
-  move to per-language helpers (or callers read the map by registered `(ty, field)`).
+The registry must carry, per provider field: the `FieldKind` + fold policy (plain / `neverlink`-pruned)
+AND a **`dep_struct_projection` name** — because the `.bzl` ABI does not match the field names. Example
+the review caught: the provider field is `hdrs` (`state.rs`, `dds.rs`), but the dep struct projects it
+as `headers` and `cc_defs.bzl:23` reads `d.headers`. So "names come from the registry" is not "drop the
+literals" — it's a `(provider_field → dep_struct_name)` map the `.bzl` interface pins. Renaming `hdrs`
+to match would break the `.bzl`; re-hardcoding the rename defeats the point. The registry owns the map.
+
+What it must do:
+- **`dds::to_dds`** — register schemas *from the registry*, not a hardcoded list; assert whatever
+  providers a target carries (already map-driven post-C2d — drop the schema-name literals).
+- **BOTH dep-folds** — `dialect.rs` (Starlark path) AND `deps.rs::resolve_dep` (native path) replace
+  their hardcoded `CcInfo`/`JavaInfo` folds with a registry iteration: for each registered field, fold
+  by kind/policy and project under its `dep_struct_projection` name. The review showed `deps.rs` is a
+  second, equally-hardcoded fold — de-leaking only `dialect.rs` leaves the gate failing.
+- **Build `razel_build.info(provider, fields)`** — the generic capture constructor *does not exist yet*
+  (C2 left two hardcoded `CcInfo`/`JavaInfo` builtins). C3a builds it, driven by the registry schema;
+  `set_provider` already writes the map, so the builtin becomes schema validation + the map write.
+- **`state.rs` / `cc_provider_map`** — relocating it is **blocked** until python is untangled from the
+  `CcInfo.hdrs` channel (§2): give py its own provider/field via the registry first, *then* the cc map
+  is cc-private. Until then `cc_provider_map` is a shared (not cc-only) helper — don't move it naively.
 
 AD2: the registry is built per-`Session` at analysis construction (populated by the active ruleset
 modules), never a process global — same discipline as `Session::host_cc` (F13).
 
-**Mechanical, low-risk** (the parity tests guard it): the storage is *already* the map; C3a moves the
-*names* from literals into data.
+**Not "mechanical" — the storage is already the map, but C3a (a) builds the missing `info` constructor,
+(b) adds a field→projection map the `.bzl` ABI pins, (c) de-leaks TWO folds, (d) untangles py from the
+cc channel.** Still parity-guarded, but scope it as a real refactor, not a rename. (Original §3 called
+this "mechanical, low-risk" — the review corrected that.)
 
 ## 4. C3b — the toolchain-resolver hook (the hard part: a real abstraction gap)
 
@@ -96,19 +122,24 @@ record (i) as the Phase-D generalization (it needs the real-toolchain second ins
 
 ## 5. C3c — the action-transform hook + the gate
 
-- **Action-transform hook** (the ledger's other extension point): cc's include-scan, java's `ijar`
-  (header-jar) are per-language *post-processors* on an action's inputs/outputs. For C3 this is a
-  **seam** (a registration point + where it'd be called), not the real transforms (those are
-  Phase-D, with the real toolchains). Define the registration shape; leave the impls stubbed +
-  documented. Don't fake the transforms.
+- **Action-transform hook** (the spike's other extension point): cc's include-scan, java's `ijar`
+  (header-jar) are per-language *post-processors* on an action's inputs/outputs. **The review flagged
+  this as a premature-abstraction risk — it has zero current users** (the very trap §4 avoids for the
+  toolchain). So **do NOT build the seam API in C3.** Move it to the Phase-D handoff (§8): design the
+  registration shape *with* the first real transform (a real ijar/include-scan), not before.
 - **The gate** (mirrors the AD2 / dds-boundary checks in `xtask`): scan the engine-core files
-  (`state.rs`, `engine.rs`, `dds.rs`, the generic parts of `dialect.rs`, the loader) for banned
-  language/provider literals (`"CcInfo"`, `"JavaInfo"`, `"cc"`, `"java"`, `macos_core_config`, the
-  field names). The per-language modules (`native_cc`, `rust_rules`, `py_rules`, `sh_rules`,
-  `shims`, the `.bzl`) + the registry are the allowlist. The gate fails if a new language name
-  appears in the core — enforcing the seam going forward.
-  - The gate is landable **only after** C3a+C3b evict the current leaks; adding it earlier just
+  (`state.rs`, `engine.rs`, `dds.rs`, the generic parts of `dialect.rs`, `deps.rs`, the loader) for
+  banned tokens. **Ban distinctive identifiers, NOT bare `"cc"`/`"java"`** — the review noted the
+  existing scanner only skips full-line `//` comments, so substrings like `cc`/`java` false-positive
+  heavily (they appear in `macos`, prose, paths). Ban: `CcInfo`, `JavaInfo`, `macos_core_config`,
+  `cc_provider_map`, and the bare provider-field literals. The per-language modules (`native_cc`,
+  `rust_rules`, `py_rules`, `sh_rules`, `shims`, the `.bzl`) + the registry are the allowlist; the gate
+  fails if a distinctive language token appears in the core.
+  - The gate is landable **only after** C3a+C3b evict the current tokens; adding it earlier just
     fails. So gate **last**.
+  - Honest cost note: at N=2 languages this gate mostly polices code that is *legitimately*
+    language-specific. Its value is forward-looking — it bites when a 3rd, non-cc-shaped language lands.
+    Worth it as a cheap forward guard, but it is not paying down a present-tense defect.
 
 ## 6. What is NOT a leak (the allowed registration surface)
 
@@ -122,17 +153,20 @@ record (i) as the Phase-D generalization (it needs the real-toolchain second ins
 
 | step | scope | risk | green |
 |---|---|---|---|
-| **C3a** | provider-schema registry; `to_dds`/dep-resolution/capture read it; move `cc_provider_map` + accessors to the cc module | mechanical (storage already map) — parity-guarded | cc + java parities + bins |
-| **C3b** | `Session` toolchain-resolver registry; `engine.rs` reads it (interim cc-coupled resolver) | small; engine goes language-free | parities; engine has no `"cc"` |
-| **C3c** | the `xtask` no-language-in-core gate + the action-transform seam (stubbed, documented) | gate authoring | gate green on the de-leaked core |
+| **C3a** | provider-schema registry (kind + fold policy + `dep_struct_projection`); **build `razel_build.info`**; both dep-folds (`dialect.rs` + `deps.rs`) read it; untangle py from the `CcInfo.hdrs` channel; then relocate `cc_provider_map` | **real refactor** (not a rename) — parity-guarded | cc + java parities + bins |
+| **C3b** | `Session` toolchain-resolver registry; `engine.rs` reads it (interim cc-coupled resolver — §4 ii) | small; engine goes language-free | parities; engine has no `"cc"` |
+| **C3c** | the `xtask` gate on **distinctive tokens** (`CcInfo`/`JavaInfo`/`macos_core_config`/`cc_provider_map`/field literals), not bare `cc`/`java` | gate authoring | gate green on the de-leaked core |
 
 *Exit (C3 / Phase C):* a generic engine with two instances behind a clean, **gate-enforced** hook
-seam.
+seam. (The action-transform hook is explicitly **out** — deferred to Phase D, §8.)
 
 ## 8. Phase-D handoff (explicitly out of C3)
 
 - The **generic `Toolchain` type** (§4 option i) — needs the real-upstream-toolchain second instance.
-- Real **action-transforms** (ijar, include-scan) — need the real toolchains.
+- The **action-transform hook** itself (the registration shape) AND its real transforms (ijar,
+  include-scan) — design the seam *with* the first real transform, not speculatively (review: zero
+  users today). C3 does not build this seam.
 - The `FeatureConfig`-in-`Session` cc-coupling (§4 ii) retires when (i) lands.
 
-These are tracked in `RazelGaps.md`; C3 builds the seam, Phase D fills it with real toolchains.
+These are tracked in `RazelGaps.md`; C3 builds the registry + the engine resolver seam, Phase D adds
+the real toolchains + the action-transform seam.
