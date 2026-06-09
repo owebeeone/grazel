@@ -26,7 +26,7 @@ use starlark::values::{
     starlark_value,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -428,6 +428,25 @@ fn extract_files(v: Value) -> Vec<String> {
     vec![file_path(v)]
 }
 
+/// Transitive exported headers of `root`: its OWN `hdrs` ∪ those of every transitive dep — the
+/// `CcInfo` `provides` fold (§8b), mirrored in the rule() invoke so a dependent reads the closure.
+/// Cycle-safe; sorted + deduped.
+fn fold_headers(results: &BTreeMap<String, AnalyzedTarget>, root: &str) -> Vec<String> {
+    let mut acc = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![root.to_string()];
+    while let Some(t) = stack.pop() {
+        if !visited.insert(t.clone()) {
+            continue;
+        }
+        if let Some(tgt) = results.get(&t) {
+            acc.extend(tgt.hdrs.iter().cloned());
+            stack.extend(tgt.deps.iter().cloned());
+        }
+    }
+    acc.into_iter().collect()
+}
+
 // ---- ctx ------------------------------------------------------------------------
 
 /// The analysis `ctx`. All fields are heap `Value`s so it traces cleanly, no freezing.
@@ -514,22 +533,28 @@ where
                 "deps" => {
                     let mut providers: Vec<Value<'v>> = Vec::new();
                     if let Some(list) = ListRef::from_value(*v) {
+                        let results = sess.results.borrow();
                         for item in list.iter() {
                             let label = item.unpack_str().unwrap_or_default();
                             // Key by canonical label — bare in single-package mode,
                             // //pkg:name in a workspace (matches the native rules).
                             let dep = canon_label(sess, label);
-                            let files =
-                                sess.results.borrow().get(&dep).map(|t| t.default_info.clone());
-                            let Some(files) = files else {
+                            let Some(dep_target) = results.get(&dep) else {
                                 return Err(anyhow::anyhow!(
                                     "dep `{dep}` not analyzed yet — declare it before its users \
                                      (forward references not yet supported)"
                                 )
                                 .into());
                             };
+                            // `.files` = the dep's DefaultInfo; `.headers` = its transitive CcInfo
+                            // exported headers (A2a — the provides fold, so the rule() path sees deps).
+                            let files = dep_target.default_info.clone();
+                            let headers = fold_headers(&results, &dep);
                             dep_labels.push(dep);
-                            providers.push(heap.alloc(AllocStruct([("files".to_string(), files)])));
+                            providers.push(heap.alloc(AllocStruct([
+                                ("files".to_string(), files),
+                                ("headers".to_string(), headers),
+                            ])));
                         }
                     }
                     fields.push((key, heap.alloc(providers)));
@@ -721,6 +746,23 @@ fn rule_globals(b: &mut GlobalsBuilder) {
         if let Some(f) = files {
             let paths = extract_files(f);
             with_current(session(eval), |c| c.default_info = paths);
+        }
+        Ok(NoneType)
+    }
+
+    /// `CcInfo(headers=…)` — the cc provider. razel captures the target's OWN exported headers into
+    /// `hdrs`; the transitive set a dependent sees is recovered by folding over deps
+    /// ([`fold_headers`]). Other kwargs absorbed. (A2a: the rule()-return providers are captured by
+    /// side-effect, mirroring `DefaultInfo`.)
+    #[allow(non_snake_case)]
+    fn CcInfo<'v>(
+        #[starlark(require = named)] headers: Option<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        if let Some(h) = headers {
+            let paths = extract_files(h);
+            with_current(session(eval), |c| c.hdrs = paths);
         }
         Ok(NoneType)
     }

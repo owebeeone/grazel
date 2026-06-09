@@ -159,6 +159,10 @@ separate live `/usr/bin/rustc` backend (`rust_rules.rs`) distinct from `rust.rs`
 makes the **live cc** path go through the engine + the bundled `.bzl` (Phase D does the same for
 rust), so the runner checks the real output, not a sidecar.
 
+Concretely, `rule()` also **discards the impl's return** (`rules.rs:576`) — providers are captured
+by side-effect, only `default_info` survives — so routing cc through the engine first needs the
+**provider-capture change (A2a)**, the eval-model dependency the live path rests on.
+
 ## 7. Where the `.bzl` live — the bundling decision
 
 razel's rule implementation is **split across a language boundary**: Rust builtins (`razel_build.*`)
@@ -228,23 +232,35 @@ Each step is a green, committed, tagged (`razel-v2/…`) roll-build with an expl
   (test / `xtask parity`) wires `analyze_bazel` → render → diff. *Green:* the **runner** is
   unit-tested on synthetic actions (match/mismatch/missing/extra); **cc/transitive is a tracked RED
   baseline** (the gap A1–A4 close). Built first, red — AGENTS.md Rule 0. This is the A4 gate.
+- **A0b — diff input-filter (A4 prerequisite).** A0's `diff` compares inputs exactly, but the
+  golden's inputs include `external/<repo>/*` toolchain files + `.cppmap`s razel never emits. Filter
+  those from inputs (both sides) before comparing, so parity needs only **source-level** inputs
+  (toolchain/sandbox inputs = the §8 tail). *Green:* the filter is unit-tested; the cc/transitive
+  baseline stays RED (argv/paths still differ).
 - **A1 — builtin scaffold.** Register a `razel_cc` Starlark global namespace; one method
   (`command_line`) wrapping `Constrain`. *Green:* a `rule()` impl via `analyze_starlark` calls it and
   gets the golden argv tokens.
-- **A2 — compile/archive builtins + dep→provider.** `razel_cc.compile`/`archive` registering the
-  declared `CppCompile`/`CppArchive` actions over the proven `derive` + path model; **and** resolve
-  deps to full **`CcInfo`** (not just `DefaultInfo.files`) via the producer/`fold_set`, honoring attr
-  *kinds* (label_list deps, file/string lists) — the "middle" lean. *Green:* a test rule reproduces
-  the golden argv + outputs **and** the transitive headers through the builtins.
+- **A2a — provider capture (eval-model change).** *Found by verifying `rules.rs:576`:* `rule()`
+  discards the impl's return value; the target is captured by side-effect and only `default_info`
+  survives. Change the eval to **capture the returned providers**, store `CcInfo` (OWN exported
+  headers) on the target, and expose `dep[CcInfo]` to dependents (transitive set via `fold_set`).
+  *Green:* a rule returning `[CcInfo(headers=…), DefaultInfo(…)]` makes `dep[CcInfo]` readable by a
+  dependent; the transitive header set folds.
+- **A2b — compile/archive builtins.** `razel_cc.compile`/`archive` register the declared
+  `CppCompile`/`CppArchive` over `derive` + path model, drawing transitive headers from `dep[CcInfo]`
+  (A2a). *Green:* a test rule emits the actions with the golden argv + outputs + source-level inputs
+  (incl. transitive `base.h`).
 - **A3 — bundle `cc:defs.bzl` + thin toolchain accessor.** Author razel's `cc:defs.bzl` (`cc_library`
   `_impl` over the builtins) with a thin `razel_build.toolchain(ctx, "cc")` accessor (razel's known cc
   toolchain — *no* `ctx.toolchains` machinery yet); `include_str!` into the binary; `BzlLoader` serves
   it for `@rules_cc//cc:defs.bzl`. *Green:* the bundled defs load + a BUILD using `cc_library` analyzes.
 - **A4 — switch the live path + render via the path model.** `analyze_bazel`'s `cc_library` flows
-  through the bundled `.bzl` + builtins (retiring the hardcoded `/usr/bin/c++` backend — declared ==
-  executable, §7); render razel's actions through `bazel_compile_inputs` so paths match
-  `bazel-out/_objs`. *Green:* **A0's runner goes GREEN on cc/transitive** (the live graph, modulo the
-  `{CppModuleMap}` allowlist); characterization updated.
+  through the bundled `.bzl` + builtins (retiring `/usr/bin/c++` — declared == executable, §7);
+  render outputs through `bazel_compile_inputs`; inputs compared source-level (A0b). **Open: razel
+  has no live `cfg`** — `bazel-out/<cfg>` is a parity placeholder; A4 picks the live value (default:
+  a fixed segment that `normalize()` maps to `<cfg>`, consistent with §7's adopt-the-toolchain).
+  *Green:* **A0's runner goes GREEN on cc/transitive** (modulo the `{CppModuleMap}` allowlist);
+  characterization rewritten.
 - **A5 — config eval.** `razel_cc.toolchain` evaluates the real `cc_toolchain_config_lib.bzl` +
   `local_config_cc`; retire `cc_macos_core.bzl`. *Green:* A0 stays green with the evaluated config.
 
