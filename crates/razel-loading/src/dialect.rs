@@ -330,6 +330,43 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc(ProviderCallable { fields: Vec::new() }))
     }
 
+    /// Bazel builtin global providers `RunEnvironmentInfo(...)` / `OutputGroupInfo(...)` (D4 compat):
+    /// construct an instance `struct` from the kwargs. Stubs so real upstream rules resolve + run; the
+    /// instances aren't yet captured/consumed (D4.3+).
+    fn RunEnvironmentInfo<'v>(
+        #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let fields: Vec<(String, Value<'v>)> =
+            kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        Ok(eval.heap().alloc(AllocStruct(fields)))
+    }
+    fn OutputGroupInfo<'v>(
+        #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let fields: Vec<(String, Value<'v>)> =
+            kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        Ok(eval.heap().alloc(AllocStruct(fields)))
+    }
+
+    /// `transition(implementation, inputs, outputs)` (D4 compat stub): real rules define config
+    /// transitions + pass them as `rule(cfg=…)`. razel doesn't apply transitions yet — absorb the args
+    /// so the rule defines; `rule()` already absorbs the `cfg` kwarg.
+    fn transition<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `configuration_field(fragment, name)` (D4 compat stub): a late-bound default razel doesn't model
+    /// — absorb the args; the attr's default becomes `None`.
+    fn configuration_field<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
     /// `Label("//pkg:name")` — a minimal Label exposing `.package`/`.name`/
     /// `.workspace_root`/`.workspace_name`. razel treats everything as the main repo,
     /// so workspace_root/workspace_name are empty (matching Bazel on the main repo).

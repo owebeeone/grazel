@@ -53,6 +53,18 @@ pub(crate) fn config_members(b: &mut GlobalsBuilder) {
     }
 }
 
+/// Bazel builtin-namespace stubs (D4 upstream compat): `config_common` / `cc_common` /
+/// `coverage_common` / `testing`. Real rules reference these globals; razel resolves them so the
+/// `.bzl` load. Members are deferred to when rules actually run (not yet exercised).
+#[starlark::starlark_module]
+pub(crate) fn config_common_members(_b: &mut GlobalsBuilder) {}
+#[starlark::starlark_module]
+pub(crate) fn cc_common_members(_b: &mut GlobalsBuilder) {}
+#[starlark::starlark_module]
+pub(crate) fn coverage_common_members(_b: &mut GlobalsBuilder) {}
+#[starlark::starlark_module]
+pub(crate) fn testing_members(_b: &mut GlobalsBuilder) {}
+
 /// Bazel's `platform_common.*` namespace (D4 upstream compat). Stub: real rules reference
 /// `platform_common.TemplateVariableInfo` etc.; razel resolves the global so the `.bzl` loads (the
 /// member calls are deferred to instantiation, not yet exercised).

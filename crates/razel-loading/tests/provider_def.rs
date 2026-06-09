@@ -22,3 +22,23 @@ r(name = "t")
     let argv = &targets[0].actions[0].argv;
     assert!(argv.contains(&"hello".to_string()), "provider instance field read: {argv:?}");
 }
+
+/// D4.4: the Bazel builtin global stubs all resolve (builtin providers, the namespace stubs,
+/// transition/configuration_field) — what lets real upstream `.bzl` compile past their free vars.
+#[test]
+fn bazel_builtin_globals_resolve() {
+    let src = r#"
+def _impl(ctx):
+    _refs = [RunEnvironmentInfo, OutputGroupInfo, configuration_field, transition,
+             config, platform_common, config_common, cc_common, coverage_common, testing]
+    ctx.actions.run(executable = "noop", outputs = [], inputs = [], arguments = [])
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "t")
+"#;
+    let targets = analyze_starlark("BUILD", src).unwrap();
+    assert!(
+        targets.iter().any(|t| t.name.ends_with("t") && !t.actions.is_empty()),
+        "all Bazel builtin globals resolved + the rule analyzed"
+    );
+}

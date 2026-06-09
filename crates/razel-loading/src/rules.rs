@@ -11,7 +11,8 @@
 
 use crate::state::{AnalyzedTarget, CcToolchainMode, GlobalFlags, Session, canon_label, pkg_of};
 use crate::engine::{
-    attr_members, config_members, native_members, platform_common_members, razel_build_members,
+    attr_members, cc_common_members, config_common_members, config_members, coverage_common_members,
+    native_members, platform_common_members, razel_build_members, testing_members,
 };
 use crate::shims::{auto_config_module, rules_cc_module, rules_java_module, rules_skylib_module};
 use crate::dialect::rule_globals;
@@ -37,15 +38,24 @@ pub(crate) fn build_globals() -> Globals {
         LibraryExtension::Partial,
     ])
     .with(rule_globals)
-    .with(|b| {
-        b.namespace("native", native_members);
-        b.namespace("attr", attr_members);
-        b.namespace("razel_build", razel_build_members);
-        // D4: Bazel builtin-namespace stubs so real upstream .bzl load (skylib/rules_rust).
-        b.namespace("config", config_members);
-        b.namespace("platform_common", platform_common_members);
-    })
+    .with(engine_namespaces)
     .build()
+}
+
+
+/// The engine's `.bzl`-facing namespaces — razel's own (`native`/`attr`/`razel_build`) plus the Bazel
+/// builtin-namespace stubs (D4) that let real upstream `.bzl` resolve. Shared by both globals builders
+/// (workspace + inline) so the surface is identical in every analysis path.
+pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
+    b.namespace("native", native_members);
+    b.namespace("attr", attr_members);
+    b.namespace("razel_build", razel_build_members);
+    b.namespace("config", config_members);
+    b.namespace("platform_common", platform_common_members);
+    b.namespace("config_common", config_common_members);
+    b.namespace("cc_common", cc_common_members);
+    b.namespace("coverage_common", coverage_common_members);
+    b.namespace("testing", testing_members);
 }
 
 
@@ -309,10 +319,7 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
         LibraryExtension::Partial,
     ])
     .with(rule_globals)
-    .with(|b| {
-        b.namespace("razel_build", razel_build_members);
-        b.namespace("attr", attr_members); // D1: inline rule defs need the attr.* schema descriptors
-    })
+    .with(engine_namespaces)
     .build();
     let res: Result<(), String> = Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
