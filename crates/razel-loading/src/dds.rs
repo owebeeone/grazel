@@ -12,7 +12,7 @@ use crate::state::AnalyzedTarget;
 use razel_core::Label;
 use std::collections::BTreeMap;
 use razel_dds::{
-    Dds, FieldId, FieldKind, FieldValue, InstanceId, Provider, ProviderSchema, ProviderTypeId,
+    Dds, FieldId, FieldValue, InstanceId, Provider, ProviderTypeId,
     Scalar, TargetKey,
 };
 
@@ -33,23 +33,14 @@ fn set(xs: &[String]) -> FieldValue {
 /// over this store (`DdsRead`), not a bespoke loader traversal.
 pub fn to_dds(targets: &[AnalyzedTarget], instance: InstanceId) -> Result<Dds, String> {
     let mut dds = Dds::new();
-    dds.register_schema(
-        ProviderTypeId::new("DefaultInfo"),
-        ProviderSchema::new().field(FieldId::new("files"), FieldKind::Set),
-    );
-    dds.register_schema(
-        ProviderTypeId::new("CcInfo"),
-        ProviderSchema::new()
-            .field(FieldId::new("hdrs"), FieldKind::Set)
-            .field(FieldId::new("cflags"), FieldKind::Set),
-    );
-    dds.register_schema(
-        ProviderTypeId::new("JavaInfo"),
-        ProviderSchema::new()
-            .field(FieldId::new("compile_jars"), FieldKind::OrderedDepset)
-            .field(FieldId::new("runtime_jars"), FieldKind::OrderedDepset)
-            .field(FieldId::new("neverlink"), FieldKind::Scalar),
-    );
+    // C3a.2: schemas come from the provider registry, not a hardcoded cc/java list — the engine no
+    // longer enumerates the languages here (the registry is the source of truth).
+    let registry = crate::registry::builtin_registry();
+    for ty in registry.provider_types() {
+        if let Some(schema) = registry.schema(ty) {
+            dds.register_schema(ty.clone(), schema);
+        }
+    }
 
     for t in targets {
         let key = target_key(instance, &t.name)?;
