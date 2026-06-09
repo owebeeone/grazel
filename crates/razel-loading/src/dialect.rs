@@ -4,7 +4,7 @@ use crate::state::{AnalyzedTarget, canon_label, qualify, session, with_current};
 use crate::values::{Actions, Depset, File, extract_files, file_path, unpack};
 use crate::glob::do_glob;
 use crate::deps::record_target;
-use razel_dds::{FieldValue, InstanceId, Scalar};
+use razel_dds::InstanceId;
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
@@ -351,56 +351,9 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    /// `CcInfo(headers=…)` — the cc provider. razel captures the target's OWN exported headers into
-    /// `hdrs`; the transitive set a dependent sees is recovered by folding over deps
-    /// ([`fold_headers`]). Other kwargs absorbed. (A2a: the rule()-return providers are captured by
-    /// side-effect, mirroring `DefaultInfo`.)
-    fn CcInfo<'v>(
-        #[starlark(require = named)] headers: Option<Value<'v>>,
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<NoneType> {
-        if let Some(h) = headers {
-            let paths = extract_files(h);
-            with_current(session(eval), |c| {
-                c.set_provider(
-                    "CcInfo",
-                    "hdrs",
-                    FieldValue::Set(paths.into_iter().map(Scalar::Str).collect()),
-                );
-            });
-        }
-        Ok(NoneType)
-    }
-
-    /// `JavaInfo(compile_jars=…)` — the java provider (B3 spike). razel captures the target's OWN
-    /// exported compile jar(s) (the header/ijar) into `compile_jars`, **ordered**; a dependent's
-    /// classpath is the preorder fold over deps ([`fold_compile_jars`] — the OrderedDepset analog).
-    /// Other kwargs (runtime_jars, …) absorbed. Mirrors `CcInfo`, the SECOND hardcoded provider — the
-    /// B5 ledger signal that Phase C should generalize provider-capture to a schema-driven map.
-    fn JavaInfo<'v>(
-        #[starlark(require = named)] compile_jars: Option<Value<'v>>,
-        #[starlark(require = named)] runtime_jars: Option<Value<'v>>,
-        #[starlark(require = named)] neverlink: Option<bool>,
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<NoneType> {
-        // Two SEPARATE ordered depsets (compile vs runtime) + the neverlink conditional (B4).
-        let compile = compile_jars.map(extract_files);
-        let runtime = runtime_jars.map(extract_files);
-        let nl = neverlink.unwrap_or(false);
-        let odep = |j: Vec<String>| FieldValue::OrderedDepset(j.into_iter().map(Scalar::Str).collect());
-        with_current(session(eval), |c| {
-            if let Some(j) = compile {
-                c.set_provider("JavaInfo", "compile_jars", odep(j));
-            }
-            if let Some(j) = runtime {
-                c.set_provider("JavaInfo", "runtime_jars", odep(j));
-            }
-            c.set_provider("JavaInfo", "neverlink", FieldValue::Scalar(Scalar::Bool(nl)));
-        });
-        Ok(NoneType)
-    }
+    // C3 (`razel_build.info`): the cc/java provider-capture builtins are gone — razel's `.bzl` rules
+    // capture providers through the ONE generic `razel_build.info(provider, fields)` constructor
+    // (engine.rs), schema-driven by the registry. No language-named capture builtin in the rule API.
 
     /// `dedup(list)` — the list with duplicate strings removed, **preserving first occurrence**. The
     /// cross-sibling dedup the rule()-path classpath/header assembly needs: a target's transitive

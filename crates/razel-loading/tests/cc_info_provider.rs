@@ -12,7 +12,8 @@ def _lib(ctx):
         flags = flags + d.headers
     out = ctx.actions.declare_file(ctx.attr.name + ".o")
     ctx.actions.run(executable = "cc", outputs = [out], inputs = [], arguments = flags)
-    return [CcInfo(headers = [ctx.attr.name + ".h"]), DefaultInfo(files = [out])]
+    razel_build.info("CcInfo", {"hdrs": [ctx.attr.name + ".h"]})  # C3: generic provider constructor
+    return [DefaultInfo(files = [out])]
 
 lib = rule(implementation = _lib, attrs = {})
 lib(name = "core", deps = [])  # explicit [] — razel has no attr-schema defaults yet (A2/D)

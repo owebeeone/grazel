@@ -56,6 +56,7 @@ def _cc_library_impl(ctx):
         mnemonic = "CppArchive",
     )
 
-    return [CcInfo(headers = own_headers), DefaultInfo(files = [lib])]
+    razel_build.info("CcInfo", {"hdrs": own_headers})  # C3: the generic provider constructor
+    return [DefaultInfo(files = [lib])]
 
 cc_library = rule(implementation = _cc_library_impl, attrs = {})

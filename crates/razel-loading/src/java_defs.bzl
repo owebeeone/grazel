@@ -70,13 +70,11 @@ def _java_library_impl(ctx):
 
     # JavaInfo: compile_jars = OWN header jar (always); runtime_jars = OWN full jar UNLESS neverlink
     # (compile-only → excluded from dependents' runtime). The two depsets don't cross-merge (B4).
-    return [
-        JavaInfo(
-            compile_jars = [hjar],
-            runtime_jars = [] if neverlink else [jar],
-            neverlink = neverlink,
-        ),
-        DefaultInfo(files = [jar]),
-    ]
+    razel_build.info("JavaInfo", {  # C3: the generic provider constructor
+        "compile_jars": [hjar],
+        "runtime_jars": [] if neverlink else [jar],
+        "neverlink": neverlink,
+    })
+    return [DefaultInfo(files = [jar])]
 
 java_library = rule(implementation = _java_library_impl, attrs = {})

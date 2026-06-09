@@ -148,5 +148,41 @@ pub(crate) fn razel_build_members(b: &mut GlobalsBuilder) {
         crate::values::push_run_action(eval, executable, outputs, inputs, arguments, mnemonic);
         Ok(NoneType)
     }
+
+    /// `razel_build.info(provider, fields)` — the generic provider constructor (C3/info). Captures a
+    /// provider onto the current target: each field's value is wrapped per the registry's `FieldKind`
+    /// (a list → `Set`/`OrderedDepset`, a bool → `Scalar`) and written to the provider map. Replaces
+    /// the hardcoded `CcInfo`/`JavaInfo` capture builtins — the engine no longer names a language to
+    /// capture providers; the schema is the registry's.
+    fn info<'v>(
+        #[starlark(require = pos)] provider: String,
+        #[starlark(require = pos)] fields: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        use razel_dds::{FieldId, FieldKind, FieldValue, ProviderTypeId, Scalar};
+        let registry = crate::registry::builtin_registry();
+        let ty = ProviderTypeId::new(provider.as_str());
+        let strs = |v: Value<'v>| -> Vec<Scalar> {
+            crate::values::extract_files(v).into_iter().map(Scalar::Str).collect()
+        };
+        let mut captured: Vec<(String, FieldValue)> = Vec::new();
+        for (field, value) in &fields {
+            let fv = match registry.kind(&ty, &FieldId::new(field.as_str())) {
+                Some(FieldKind::Set) => FieldValue::Set(strs(*value).into_iter().collect()),
+                Some(FieldKind::OrderedDepset) => FieldValue::OrderedDepset(strs(*value)),
+                Some(FieldKind::Scalar) => {
+                    FieldValue::Scalar(Scalar::Bool(value.unpack_bool().unwrap_or(false)))
+                }
+                None => continue, // not in the provider's schema — ignore (forward-compatible)
+            };
+            captured.push((field.clone(), fv));
+        }
+        crate::state::with_current(crate::state::session(eval), |c| {
+            for (f, fv) in captured {
+                c.set_provider(&provider, &f, fv);
+            }
+        });
+        Ok(NoneType)
+    }
 }
 

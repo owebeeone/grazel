@@ -52,6 +52,11 @@ impl ProviderRegistry {
     pub(crate) fn provider_types(&self) -> impl Iterator<Item = &ProviderTypeId> {
         self.providers.keys()
     }
+    /// A provider field's merge kind — for `razel_build.info` to wrap a captured value correctly
+    /// (`Set`/`OrderedDepset` ← a list, `Scalar` ← a bool). `None` ⇒ not in the schema.
+    pub(crate) fn kind(&self, provider: &ProviderTypeId, field: &FieldId) -> Option<FieldKind> {
+        self.providers.get(provider).and_then(|m| m.get(field)).map(|s| s.kind)
+    }
     /// The DDS schema (field → kind) for a provider — for `to_dds` registration.
     pub(crate) fn schema(&self, provider: &ProviderTypeId) -> Option<ProviderSchema> {
         self.providers.get(provider).map(|fields| {
