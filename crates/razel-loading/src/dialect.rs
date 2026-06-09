@@ -108,22 +108,25 @@ where
         let mut fields: Vec<(String, Value<'v>)> = Vec::new();
         for (k, v) in &named {
             let key = k.as_str().to_string();
-            // D1b: an attr resolves to provider structs if it's the legacy `deps` OR the schema
-            // declares it `attr.label_list` — the schema kind drives label resolution, not the name.
-            let is_label = key == "deps" || {
-                let mut yes = false;
+            // D1b/c: the schema kind drives label resolution. Look it up once: `label`/`label_list`
+            // resolve to provider struct(s); the legacy `deps` is an implicit `label_list`.
+            let attr_kind: Option<String> = {
+                let mut k = None;
                 if let Some(d) = starlark::values::dict::DictRef::from_value(self.attrs.to_value()) {
                     for (kk, desc) in d.iter() {
                         if kk.unpack_str() == Some(key.as_str()) {
                             if let Ok(Some(kind)) = desc.get_attr("kind", heap) {
-                                yes = kind.unpack_str() == Some("label_list");
+                                k = kind.unpack_str().map(String::from);
                             }
                             break;
                         }
                     }
                 }
-                yes
+                k
             };
+            let is_label =
+                key == "deps" || matches!(attr_kind.as_deref(), Some("label") | Some("label_list"));
+            let single_label = attr_kind.as_deref() == Some("label");
             match key.as_str() {
                 "name" => {
                     name = v.unpack_str().unwrap_or_default().to_string();
@@ -132,44 +135,50 @@ where
                 // A label attr (legacy `deps` or any `attr.label_list`): resolve each label to its
                 // analyzed providers as a `struct(files=…, <folded fields>…)`.
                 _ if is_label => {
-                    let mut providers: Vec<Value<'v>> = Vec::new();
-                    if let Some(list) = ListRef::from_value(*v) {
-                        let results = sess.results.borrow();
-                        // C2c: transitive provider closures come from the ONE razel-dds fold
-                        // (`DdsRead` over a fact store built from the analyzed-so-far targets) — the
-                        // parallel loader traversal is gone. cc `.headers` = `Set` fold; java
-                        // `.compile_jars` = `OrderedDepset`; `.runtime_jars` = the same, neverlink-
-                        // subtree-pruned (the prune the `neverlink` Scalar drives).
-                        let dds = crate::dds::to_dds(
-                            &results.values().cloned().collect::<Vec<_>>(),
-                            InstanceId::SINGLE,
-                        )
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                        for item in list.iter() {
-                            let label = item.unpack_str().unwrap_or_default();
-                            // Key by canonical label — bare in single-package mode,
-                            // //pkg:name in a workspace (matches the native rules).
-                            let dep = canon_label(sess, label);
-                            let Some(dep_target) = results.get(&dep) else {
-                                return Err(anyhow::anyhow!(
-                                    "dep `{dep}` not analyzed yet — declare it before its users \
-                                     (forward references not yet supported)"
-                                )
-                                .into());
-                            };
-                            let key = crate::dds::target_key(InstanceId::SINGLE, &dep)
-                                .map_err(|e| anyhow::anyhow!(e))?;
-                            // C3a.3: `files` is own-exposed (DefaultInfo); the transitive fields fold via
-                            // the ONE registry-driven helper (shared with the native path) — no hardcoded
-                            // cc/java here.
-                            let mut sfields: Vec<(String, Vec<String>)> =
-                                vec![("files".to_string(), dep_target.default_info.clone())];
-                            sfields.extend(crate::dds::fold_dep_fields(&dds, &key));
-                            dep_labels.push(dep);
-                            providers.push(heap.alloc(AllocStruct(sfields)));
-                        }
+                    // Collect the label string(s): a list (`label_list`/`deps`) or a single (`label`).
+                    let labels: Vec<String> = if let Some(list) = ListRef::from_value(*v) {
+                        list.iter().filter_map(|x| x.unpack_str().map(String::from)).collect()
+                    } else if let Some(s) = v.unpack_str() {
+                        vec![s.to_string()]
+                    } else {
+                        Vec::new()
+                    };
+                    let results = sess.results.borrow();
+                    // C2c: transitive provider closures come from the ONE razel-dds fold (`DdsRead` over
+                    // a fact store of the analyzed-so-far targets). cc `.headers` = `Set` fold; java
+                    // `.compile_jars` = `OrderedDepset`; `.runtime_jars` = the same, neverlink-pruned.
+                    let dds = crate::dds::to_dds(
+                        &results.values().cloned().collect::<Vec<_>>(),
+                        InstanceId::SINGLE,
+                    )
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                    let mut structs: Vec<Value<'v>> = Vec::new();
+                    for label in &labels {
+                        // Canonical label — bare in single-package mode, //pkg:name in a workspace.
+                        let dep = canon_label(sess, label);
+                        let Some(dep_target) = results.get(&dep) else {
+                            return Err(anyhow::anyhow!(
+                                "dep `{dep}` not analyzed yet — declare it before its users \
+                                 (forward references not yet supported)"
+                            )
+                            .into());
+                        };
+                        let tkey = crate::dds::target_key(InstanceId::SINGLE, &dep)
+                            .map_err(|e| anyhow::anyhow!(e))?;
+                        // `files` is own-exposed (DefaultInfo); transitive fields fold via the ONE
+                        // registry-driven helper (shared with the native path) — no hardcoded cc/java.
+                        let mut sfields: Vec<(String, Vec<String>)> =
+                            vec![("files".to_string(), dep_target.default_info.clone())];
+                        sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
+                        dep_labels.push(dep);
+                        structs.push(heap.alloc(AllocStruct(sfields)));
                     }
-                    fields.push((key, heap.alloc(providers)));
+                    // D1c: a single `attr.label` yields ONE struct; a list yields the list of structs.
+                    if single_label {
+                        fields.push((key, structs.into_iter().next().unwrap_or_else(Value::new_none)));
+                    } else {
+                        fields.push((key, heap.alloc(structs)));
+                    }
                 }
                 _ => fields.push((key, *v)),
             }

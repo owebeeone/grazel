@@ -39,6 +39,22 @@ linker(name = "t", libs = [":a"])
     assert!(t.actions[0].argv.contains(&"a.o".to_string()), "label_list resolved to dep files: {:?}", t.actions[0].argv);
 }
 
+/// D1c: a single `attr.label` resolves to ONE provider struct (not a list) — `rust.bzl` uses both.
+#[test]
+fn rule_resolves_single_label_attr_to_one_provider() {
+    let src = r#"
+def _impl(ctx):
+    ctx.actions.run(executable = "use", outputs = [], inputs = [], arguments = ctx.attr.lib.files)
+
+user = rule(implementation = _impl, attrs = {"lib": attr.label()})
+filegroup(name = "a", srcs = ["a.o"])
+user(name = "u", lib = ":a")
+"#;
+    let targets = analyze_starlark("BUILD", src).unwrap();
+    let u = targets.iter().find(|t| t.name.ends_with("u")).unwrap();
+    assert!(u.actions[0].argv.contains(&"a.o".to_string()), "single label resolved to its files: {:?}", u.actions[0].argv);
+}
+
 /// D1a: a `mandatory` attr that's omitted is a clear analysis error (not a silent `None`).
 #[test]
 fn rule_errors_on_missing_mandatory_attr() {
