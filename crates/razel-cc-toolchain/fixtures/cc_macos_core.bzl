@@ -8,25 +8,12 @@
 # (`%{output_file}`, `%{minimum_os_version}`) supplied per host, not detected here
 # (BazelCcCommandLine.md §"externalize").
 
-def flag_group(flags = [], iterate_over = None, expand_if_available = None):
-    return struct(flags = flags, iterate_over = iterate_over, expand_if_available = expand_if_available)
-
-def flag_set(actions = [], flag_groups = []):
-    return struct(actions = actions, with_features = [], flag_groups = flag_groups)
-
-def feature(name, enabled = False, flag_sets = []):
-    return struct(name = name, enabled = enabled, flag_sets = flag_sets, implies = [], requires = [], provides = [])
-
-def action_config(action_name, tools = []):
-    return struct(action_name = action_name, tools = tools)
-
-def tool(path):
-    return struct(path = path, with_features = [])
-
+# Constructors + cc_common come from razel's prepended cc_toolchain_config_lib (the real cc-config
+# API — A5a). This file is now just the host flag VALUES written against that API.
 CC = ["c++-compile"]
 ARCHIVE = ["c++-link-static-library"]
 
-CONFIG = struct(
+CONFIG = cc_common.create_cc_toolchain_config_info(
     features = [
         feature(name = "default_compile_flags", enabled = True, flag_sets = [
             flag_set(actions = CC, flag_groups = [flag_group(flags = ["-U_FORTIFY_SOURCE"])]),

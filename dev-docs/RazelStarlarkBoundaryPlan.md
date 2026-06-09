@@ -285,10 +285,17 @@ Each step is a green, committed, tagged (`razel-v2/…`) roll-build with an expl
     hardcoded `/usr/bin/c++`. *Green:* a resolver unit test (controlled candidates → first existing +
     its digest); Native cc uses the resolved tool; characterization asserts a real resolved compiler.
     (The digest → action-key fold is the follow-on, RazelGaps "toolchain-change cache".)
-- **A5 — config eval.** `razel_cc.toolchain` evaluates the real `cc_toolchain_config_lib.bzl` +
-  `local_config_cc`; retire `cc_macos_core.bzl`. *Green:* A0 stays green with the evaluated config.
+- **A5a — real config API (foundation).** razel bundles `cc_toolchain_config_lib` (the real
+  constructors + `cc_common.create_cc_toolchain_config_info`), prepended in `parse_feature_config`;
+  configs are written in the real API (`CONFIG = cc_common.create_cc_toolchain_config_info(features=…,
+  action_configs=…)`). *Green:* the macOS config evaluates via the real API + A0 stays green.
+- **A5b → Phase D — eat the ACTUAL generated config.** *Found by verifying the generated
+  `cc_toolchain_config.bzl`:* it `load()`s real @rules_cc library modules (`cc_common`,
+  `cc_toolchain_config_lib`, `feature_injection`, `cc_toolchain_config_info`) that razel currently
+  *shims* — evaluating them + a `cc_common` builtin + the BUILD's ~20 host attrs **is** the run-it
+  path. Folded into Phase D (run real ruleset Starlark), not a Phase-A bolt-on.
 
-*Exit: a real BUILD's cc graph is produced by the engine, through razel's bundled `.bzl`, parity-proven on the live path, config from source.*
+*Exit: a real BUILD's cc graph is produced by the engine, through razel's bundled `.bzl`, parity-proven on the live path, config in the real cc_common API (the actual generated config → Phase D).*
 
 ### Phase B — java compile spike (validate the abstraction)
 *The second data point — before any generic API is frozen.*

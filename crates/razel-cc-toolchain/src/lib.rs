@@ -23,12 +23,18 @@ pub mod rust;
 pub use derive::{DeclaredAction, derive_cc_library_actions};
 pub use rust::derive_rust_library_action;
 
-/// Evaluate a Starlark cc toolchain config into a [`FeatureConfig`]. The source must define a
-/// top-level `CONFIG = struct(features = [...], action_configs = [...])`, with each feature /
-/// flag_set / flag_group / with_feature_set / action_config / tool a `struct(...)` carrying the
-/// fields below.
+/// Evaluate a Starlark cc toolchain config into a [`FeatureConfig`], in the REAL Bazel cc-config API
+/// (A5a): razel's `cc_toolchain_config_lib` (feature/flag_set/flag_group/action_config/tool +
+/// `cc_common.create_cc_toolchain_config_info`) is prepended, and the source must bind
+/// `CONFIG = cc_common.create_cc_toolchain_config_info(features = [...], action_configs = [...])`.
+/// (A5b → Phase D evaluates the ACTUAL @rules_cc lib over the host-generated config instead.)
 pub fn parse_feature_config(src: &str) -> Result<FeatureConfig, String> {
-    let ast = AstModule::parse("cc_config.bzl", src.to_owned(), &Dialect::Extended)
+    // Prepend razel's cc_toolchain_config_lib so the config is written in the REAL Bazel cc-config
+    // API (feature/flag_set/… + cc_common.create_cc_toolchain_config_info) — A5a. The config must NOT
+    // re-define those names (Starlark forbids reassigning a global).
+    let lib = include_str!("../fixtures/cc_toolchain_config_lib.bzl");
+    let full = format!("{lib}\n{src}");
+    let ast = AstModule::parse("cc_config.bzl", full, &Dialect::Extended)
         .map_err(|e| format!("{e}"))?;
     let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType]).build();
     Module::with_temp_heap(|module| {
@@ -221,19 +227,10 @@ pub fn macos_core_config() -> Result<FeatureConfig, String> {
 mod tests {
     use super::*;
 
+    // Constructors + cc_common come from razel's prepended cc_toolchain_config_lib (A5a — the real
+    // cc-config API); this fixture is just content written against it.
     const CFG: &str = r#"
-def flag_group(flags = [], iterate_over = None, expand_if_available = None):
-    return struct(flags = flags, iterate_over = iterate_over, expand_if_available = expand_if_available)
-def flag_set(actions = [], with_features = [], flag_groups = []):
-    return struct(actions = actions, with_features = with_features, flag_groups = flag_groups)
-def feature(name, enabled = False, flag_sets = [], implies = [], requires = [], provides = []):
-    return struct(name = name, enabled = enabled, flag_sets = flag_sets, implies = implies, requires = requires, provides = provides)
-def action_config(action_name, tools = []):
-    return struct(action_name = action_name, tools = tools)
-def tool(path, with_features = []):
-    return struct(path = path, with_features = with_features)
-
-CONFIG = struct(
+CONFIG = cc_common.create_cc_toolchain_config_info(
     features = [
         feature(name = "default_compile_flags", enabled = True, flag_sets = [
             flag_set(actions = ["c++-compile"], flag_groups = [flag_group(flags = ["-U_FORTIFY_SOURCE", "-Wall"])]),
