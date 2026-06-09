@@ -139,10 +139,19 @@ fn filter_aquery(raw: &str) -> String {
 const BANNED: &[(&str, &str)] = &[
     ("thread_local!", "ambient state — pass the Analysis/DDS handle instead (AD2)"),
     ("static mut", "ambient mutable state (AD2)"),
+    // Runtime-init globals (F13): banned for env-derived / per-analysis state — resolve once per
+    // `Session`, not process-wide. The sin is not mutability (these end up immutable) but a value
+    // owned by no Session. A PURE, deterministic cell (compiled regex, const table — no env, no
+    // per-request meaning) may be allowlisted by adding its file to GATE_ALLOWLIST with a rationale.
+    ("OnceLock", "runtime-init global — per-Session state, not a process global (AD2/F13)"),
+    ("OnceCell", "runtime-init global — per-Session state, not a process global (AD2/F13)"),
+    ("LazyLock", "runtime-init global — per-Session state, not a process global (AD2/F13)"),
+    ("lazy_static", "runtime-init global — per-Session state, not a process global (AD2/F13)"),
 ];
-// AD2 is now FULLY ENFORCED — no ambient state anywhere in crates/. Phase 1.5 emptied this:
-// razel-loading's last 7 thread-locals (STATE/RESULTS/CONFIGS/WORKSPACE/CURRENT_PKG/LOADED/
-// GLOBAL) became fields of the passed `Session`. Nothing may ever be added here again.
+// AD2 ENFORCED — no ambient request/analysis state anywhere in crates/: the 7 thread-locals became
+// `Session` fields (Phase 1.5) and the host-cc `OnceLock` became `Session::resolved_cc` (F13). The ban
+// now spans runtime-init cells too (the gate is substring-based, so a genuinely-pure const cell is
+// allowlisted per-file here with a rationale — there are none today).
 const GATE_ALLOWLIST: &[&str] = &[];
 
 struct GateViolation {
@@ -267,6 +276,17 @@ mod gate_tests {
         let v = gate_violations("crates/k/src/x.rs", "static mut COUNTER: u64 = 0;");
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].pattern, "static mut");
+    }
+
+    #[test]
+    fn flags_runtime_init_global() {
+        // F13: a runtime-init once-cell holding analysis state is ambient — the gate must catch it
+        // (it slipped through when only thread_local!/static mut were banned).
+        let v = gate_violations(
+            "crates/razel-loading/src/rules.rs",
+            "static RESOLVED: OnceLock<String> = OnceLock::new();",
+        );
+        assert!(v.iter().any(|x| x.pattern == "OnceLock"), "OnceLock must be flagged (AD2/F13)");
     }
 
     #[test]

@@ -101,11 +101,31 @@ pub(crate) struct Session {
     workspace: Option<PathBuf>,
     /// CLI flags riding every cc action (`--copt`/`--linkopt`/`-c`). Set once.
     global: GlobalFlags,
+    /// The resolved native (host) cc compiler, walked from `PATH` **once per Session** (AD2: not a
+    /// process global — F13). `None` until first use; a different analysis (different PATH/toolchain)
+    /// re-resolves because it's a fresh `Session`.
+    resolved_cc: RefCell<Option<String>>,
 }
 
 impl Session {
     fn new(workspace: Option<PathBuf>, global: GlobalFlags) -> Self {
         Session { workspace, global, ..Default::default() }
+    }
+
+    /// The resolved native (host) cc compiler — walked from `PATH` once per Session (§7 ·iii), cached
+    /// on the Session (AD2: not a process global — F13; the pure walk is [`first_on_path`], unit-tested).
+    /// Fallback: [`CXX`].
+    fn host_cc(&self) -> String {
+        if let Some(cc) = self.resolved_cc.borrow().as_ref() {
+            return cc.clone();
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        let dirs: Vec<&str> = path.split(':').collect();
+        let cc = first_on_path(&["c++", "clang++", "g++", "cc"], &dirs, |p| p.is_file())
+            .unwrap_or_else(|| CXX.to_string());
+        eprintln!("razel: native cc toolchain → {cc} (id {})", tool_id(&cc));
+        *self.resolved_cc.borrow_mut() = Some(cc.clone());
+        cc
     }
     /// Take the accumulated targets out (consumes the in-flight `state.targets`).
     fn take_targets(&self) -> Vec<AnalyzedTarget> {
@@ -1056,22 +1076,8 @@ const AR: &str = "/usr/bin/ar";
 /// The resolved native (host) cc compiler, by walking `PATH` (§7 ·iii — the Native toolchain). This
 /// is what Bazel's `cc_configure` does (probe the host); razel does it at build time. Resolved +
 /// logged **once**; [`CXX`] is the fallback when no candidate is on `PATH`.
-fn host_cc() -> String {
-    use std::sync::OnceLock;
-    static RESOLVED: OnceLock<String> = OnceLock::new();
-    RESOLVED
-        .get_or_init(|| {
-            let path = std::env::var("PATH").unwrap_or_default();
-            let dirs: Vec<&str> = path.split(':').collect();
-            let cc = first_on_path(&["c++", "clang++", "g++", "cc"], &dirs, |p| p.is_file())
-                .unwrap_or_else(|| CXX.to_string());
-            // Log which tool + its identity (transparency; the digest → action-key fold that makes a
-            // toolchain change rebuild is the follow-on — RazelGaps "toolchain-change cache").
-            eprintln!("razel: native cc toolchain → {cc} (id {})", tool_id(&cc));
-            cc
-        })
-        .clone()
-}
+// (the host-cc resolver now lives on `Session::host_cc` — AD2: per-Session, not a process-global
+// OnceLock; F13. The pure PATH-walk is `first_on_path`, the identity is `tool_id`.)
 
 /// First `<dir>/<candidate>` for which `exists` holds — PATH-walk, candidates in preference order.
 /// Pure (dirs + probe injected) so it's testable without touching the environment.
@@ -1203,7 +1209,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             let o = format!("{s}.o");
             let mut inputs = vec![s.clone()];
             inputs.extend(avail_hdrs.iter().cloned());
-            actions.push(compile_action(s, &o, &compile_flags, inputs));
+            actions.push(compile_action(&sess.host_cc(), s, &o, &compile_flags, inputs));
             objs.push(o);
         }
         let lib = qualify(sess, &format!("lib{name}.a"));
@@ -1261,13 +1267,13 @@ fn cc_rules(b: &mut GlobalsBuilder) {
             let o = format!("{s}.o");
             let mut inputs = vec![s.clone()];
             inputs.extend(dep_hdrs.iter().cloned());
-            actions.push(compile_action(s, &o, &compile_flags, inputs));
+            actions.push(compile_action(&sess.host_cc(), s, &o, &compile_flags, inputs));
             objs.push(o);
         }
         let out = qualify(sess, &name);
         let mut link_inputs = objs.clone();
         link_inputs.extend(dep_libs.clone());
-        let mut link_argv = vec![host_cc(), "-o".into(), out.clone()];
+        let mut link_argv = vec![sess.host_cc(), "-o".into(), out.clone()];
         link_argv.extend(objs);
         link_argv.extend(dep_libs);
         link_argv.extend(sess.global.linkopts.clone());
@@ -1312,8 +1318,8 @@ fn include_flags(sess: &Session, includes: Option<UnpackList<String>>) -> Vec<St
 /// A C++ compile action. `-iquote .` makes workspace-root-relative quote-includes
 /// (`#include "pkg/x.h"`) resolve from the sandbox root (= exec root); `flags` are
 /// the target's copts + transitive defines/includes.
-fn compile_action(src: &str, obj: &str, flags: &[String], inputs: Vec<String>) -> AnalyzedAction {
-    let mut argv = vec![host_cc(), "-iquote".into(), ".".into()];
+fn compile_action(cc: &str, src: &str, obj: &str, flags: &[String], inputs: Vec<String>) -> AnalyzedAction {
+    let mut argv = vec![cc.to_string(), "-iquote".into(), ".".into()];
     argv.extend(flags.iter().cloned());
     argv.extend(["-c".into(), src.into(), "-o".into(), obj.into()]);
     AnalyzedAction {
