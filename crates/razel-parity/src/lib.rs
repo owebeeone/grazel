@@ -234,9 +234,15 @@ impl Report {
 /// (`external/<repo>/…`) and generated `.cppmap`s razel does not model — the §8 tail. (The action
 /// set's `omit` allowlist handles the *actions*; this handles their leftover *inputs*.)
 fn source_inputs(inputs: &[String]) -> Vec<String> {
+    // Drop (a) toolchain inputs — anywhere `external/<repo>/` appears, top-level OR nested under
+    // `bazel-out/.../external/<repo>/...` (java's platformclasspath.jar) — and (b) generated
+    // dep-scan artifacts razel doesn't model: cc `.cppmap`, java `.jdeps` (the §8 tail). F5: a
+    // substring (not prefix) match + the cross-language generated-artifact set, so the filter isn't
+    // cc-shaped. (When a language needs more, extend GENERATED below.)
+    const GENERATED: &[&str] = &[".cppmap", ".jdeps"];
     inputs
         .iter()
-        .filter(|i| !i.starts_with("external/<repo>/") && !i.ends_with(".cppmap"))
+        .filter(|i| !i.contains("external/<repo>/") && !GENERATED.iter().any(|e| i.ends_with(e)))
         .cloned()
         .collect()
 }

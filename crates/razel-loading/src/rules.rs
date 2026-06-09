@@ -1389,6 +1389,23 @@ fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
     })
 }
 
+/// The synthetic `@rules_java` module (F16): `java_library` is razel's OWN rule — the bundled
+/// `java:defs.bzl` over the engine (multi-action Turbine/Javac/JavaSourceJar + JavaInfo). java has no
+/// native backend in razel, so there's no toolchain mode; this is the only java impl. Byte-parity vs
+/// the golden is Phase D (the structural diff pins the action SHAPE — see tests/java_graph_parity.rs).
+fn rules_java_module() -> Result<FrozenModule, String> {
+    let globals = GlobalsBuilder::standard().with(rule_globals).build();
+    Module::with_temp_heap(|module| {
+        let ast = AstModule::parse("@rules_java", include_str!("java_defs.bzl").to_owned(), &Dialect::Extended)
+            .map_err(|e| format!("{e}"))?;
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
+        }
+        module.freeze().map_err(|e| format!("{e:?}"))
+    })
+}
+
 /// Record an analysis-visible target with no actions (a build-graph placeholder).
 fn record_named(sess: &Session, name: &str) {
     record_target(sess, AnalyzedTarget {
@@ -1758,6 +1775,10 @@ fn ruleset_modules(cc_toolchain: CcToolchainMode) -> Result<Vec<Ruleset>, String
         Ruleset {
             prefix: "@rules_cc//",
             module: rules_cc_module(cc_toolchain)?,
+        },
+        Ruleset {
+            prefix: "@rules_java//",
+            module: rules_java_module()?, // razel's java:defs.bzl (no toolchain mode — F16)
         },
         Ruleset {
             prefix: "@bazel_skylib//",
