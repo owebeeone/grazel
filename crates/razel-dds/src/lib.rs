@@ -83,6 +83,12 @@ pub enum FieldValue {
     Scalar(Scalar),
     /// Set: merge by union (dedup), order-independent.
     Set(BTreeSet<Scalar>),
+    /// OrderedDepset: this node's DIRECT ordered elements (dedup). The transitive, ordered closure is
+    /// recovered by [`DdsRead::fold_depset`] (preorder over deps, first-occurrence wins) — for
+    /// classpaths where order is load-bearing (java compile/runtime jars). Order is intrinsic, so
+    /// merge is append-dedup (assertion-ordered), not the commutative union `Set` uses. (B2 — the
+    /// first of the reserved OrderedDepset family; the 4 traversal orders are future.)
+    OrderedDepset(Vec<Scalar>),
 }
 
 /// The merge class a provider field *declares* (§2) — the asserted [`FieldValue`] must match.
@@ -90,6 +96,7 @@ pub enum FieldValue {
 pub enum FieldKind {
     Scalar,
     Set,
+    OrderedDepset,
 }
 
 /// Why an [`Dds::assert`] failed — the value algebra surfacing a violation rather than a silent
@@ -113,6 +120,7 @@ impl FieldValue {
         match self {
             FieldValue::Scalar(_) => FieldKind::Scalar,
             FieldValue::Set(_) => FieldKind::Set,
+            FieldValue::OrderedDepset(_) => FieldKind::OrderedDepset,
         }
     }
 
@@ -133,6 +141,15 @@ impl FieldValue {
             }
             (FieldValue::Set(a), FieldValue::Set(b)) => {
                 a.extend(b);
+                Ok(())
+            }
+            (FieldValue::OrderedDepset(a), FieldValue::OrderedDepset(b)) => {
+                // Append-dedup, order-preserving (a's order kept; b's new elements appended).
+                for x in b {
+                    if !a.contains(&x) {
+                        a.push(x);
+                    }
+                }
                 Ok(())
             }
             _ => Err(MergeError::KindMismatch { provider: prov.clone(), field: field.clone() }),
@@ -211,6 +228,37 @@ pub trait DdsRead {
                 acc.extend(s.iter().cloned());
             }
             stack.extend(self.deps(&t).iter().cloned());
+        }
+        acc
+    }
+
+    /// Fold an `OrderedDepset`-valued field over the transitive dep closure, **order-preserving**
+    /// (§8b, ordered): a preorder walk — the node's own direct elements, then each dep's closure in
+    /// dep order — deduped first-occurrence-wins. The ordered analog of [`fold_set`], for classpaths
+    /// where order is load-bearing (java compile/runtime jars). Cycle-safe. Declared here on the read
+    /// interface so every consumer gets it; never re-implemented per rule.
+    fn fold_depset(&self, root: &TargetKey, ty: &ProviderTypeId, field: &FieldId) -> Vec<Scalar> {
+        let mut acc = Vec::new();
+        let mut seen = BTreeSet::new(); // element dedup (first occurrence wins)
+        let mut visited = BTreeSet::new(); // node dedup + cycle guard
+        let mut stack = vec![root.clone()];
+        while let Some(t) = stack.pop() {
+            if !visited.insert(t.clone()) {
+                continue;
+            }
+            if let Some(FieldValue::OrderedDepset(xs)) =
+                self.provider(&t, ty).and_then(|p| p.get(field))
+            {
+                for x in xs {
+                    if seen.insert(x.clone()) {
+                        acc.push(x.clone());
+                    }
+                }
+            }
+            // Push deps reversed so dep[0] is processed next — preorder, dep order preserved.
+            for d in self.deps(&t).iter().rev() {
+                stack.push(d.clone());
+            }
         }
         acc
     }
@@ -459,5 +507,69 @@ mod tests {
         d.assert_deps(tk("//:a"), vec![tk("//:b")]);
         d.assert_deps(tk("//:b"), vec![tk("//:a")]); // cycle → must terminate
         assert_eq!(FieldValue::Set(d.fold_set(&tk("//:a"), &cc(), &hdrs)), set(&["a.h", "b.h"]));
+    }
+
+    // ── OrderedDepset (B2) — ordered, dedup, transitive (java classpath) ─────────────────
+    fn java() -> ProviderTypeId {
+        ProviderTypeId::new("JavaInfo")
+    }
+    fn odep(xs: &[&str]) -> FieldValue {
+        FieldValue::OrderedDepset(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+    }
+    /// A `Dds` with a `JavaInfo.compile_jars` OrderedDepset field.
+    fn java_dds() -> Dds {
+        let mut d = Dds::new();
+        d.register_schema(
+            java(),
+            ProviderSchema::new().field(FieldId::new("compile_jars"), FieldKind::OrderedDepset),
+        );
+        d
+    }
+    /// Flatten an OrderedDepset fold to the string sequence (assertion convenience).
+    fn order(d: &Dds, root: &str) -> Vec<String> {
+        d.fold_depset(&tk(root), &java(), &FieldId::new("compile_jars"))
+            .iter()
+            .map(|s| match s {
+                Scalar::Str(x) => x.clone(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fold_depset_is_preorder_dep_order_preserved() {
+        // a → [b, c]; b → d. Classpath = a's own, then b's closure (b, d), then c — preorder.
+        let mut d = java_dds();
+        let cj = FieldId::new("compile_jars");
+        for (lbl, j) in [("//:a", "a.jar"), ("//:b", "b.jar"), ("//:c", "c.jar"), ("//:d", "d.jar")] {
+            d.assert(tk(lbl), java(), Provider::new().with(cj.clone(), odep(&[j]))).unwrap();
+        }
+        d.assert_deps(tk("//:a"), vec![tk("//:b"), tk("//:c")]);
+        d.assert_deps(tk("//:b"), vec![tk("//:d")]);
+        assert_eq!(order(&d, "//:a"), ["a.jar", "b.jar", "d.jar", "c.jar"]);
+    }
+
+    #[test]
+    fn fold_depset_dedups_first_occurrence_and_is_cycle_safe() {
+        // Shared jar appears via a (first), not b; the a↔b cycle terminates.
+        let mut d = java_dds();
+        let cj = FieldId::new("compile_jars");
+        d.assert(tk("//:a"), java(), Provider::new().with(cj.clone(), odep(&["a.jar", "shared.jar"])))
+            .unwrap();
+        d.assert(tk("//:b"), java(), Provider::new().with(cj.clone(), odep(&["shared.jar", "b.jar"])))
+            .unwrap();
+        d.assert_deps(tk("//:a"), vec![tk("//:b")]);
+        d.assert_deps(tk("//:b"), vec![tk("//:a")]); // cycle
+        assert_eq!(order(&d, "//:a"), ["a.jar", "shared.jar", "b.jar"]);
+    }
+
+    #[test]
+    fn ordered_depset_merge_appends_dedups_preserving_order() {
+        // Re-asserting the same field appends new elements, dedups, keeps order (not Set's union).
+        let mut d = java_dds();
+        let cj = FieldId::new("compile_jars");
+        d.assert(tk("//:a"), java(), Provider::new().with(cj.clone(), odep(&["x", "y"]))).unwrap();
+        d.assert(tk("//:a"), java(), Provider::new().with(cj.clone(), odep(&["y", "z"]))).unwrap();
+        assert_eq!(d.provider(&tk("//:a"), &java()).unwrap().get(&cj), Some(&odep(&["x", "y", "z"])));
     }
 }
