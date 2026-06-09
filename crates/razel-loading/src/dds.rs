@@ -67,6 +67,34 @@ pub fn to_dds(targets: &[AnalyzedTarget], instance: InstanceId) -> Result<Dds, S
     Ok(dds)
 }
 
+/// The transitive dep-folded provider fields for `root`, as `(dep_struct_projection, values)` —
+/// the ONE registry-driven fold both dep-resolution paths use (the Starlark `dialect` path + the
+/// native `deps::resolve_dep` path), so neither hardcodes cc/java. Each registered dep-field folds
+/// by its kind/policy (`Set`→`fold_set`, `OrderedDepset`→`fold_depset`/`fold_depset_pruned`). C3a.3.
+pub(crate) fn fold_dep_fields(dds: &Dds, root: &TargetKey) -> Vec<(String, Vec<String>)> {
+    use crate::registry::{FoldPolicy, builtin_registry};
+    use razel_dds::{DdsRead, FieldKind};
+    let to_strs = |xs: Vec<Scalar>| -> Vec<String> {
+        xs.into_iter().filter_map(|s| if let Scalar::Str(x) = s { Some(x) } else { None }).collect()
+    };
+    let registry = builtin_registry();
+    let mut out = Vec::new();
+    for ty in registry.provider_types() {
+        for (field, kind, depfold) in registry.dep_folds(ty) {
+            let folded = match (kind, &depfold.policy) {
+                (FieldKind::Set, _) => to_strs(dds.fold_set(root, ty, field).into_iter().collect()),
+                (FieldKind::OrderedDepset, FoldPolicy::Plain) => to_strs(dds.fold_depset(root, ty, field)),
+                (FieldKind::OrderedDepset, FoldPolicy::PrunedBy(p)) => {
+                    to_strs(dds.fold_depset_pruned(root, ty, field, p))
+                }
+                (FieldKind::Scalar, _) => continue,
+            };
+            out.push((depfold.projection.to_string(), folded));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,7 @@
 
 use crate::state::{AnalyzedTarget, Session, canon_label, pkg_of};
 use crate::rules::load_package;
+use std::collections::BTreeMap;
 
 
 
@@ -22,21 +23,28 @@ pub(crate) fn record_target(sess: &Session, t: AnalyzedTarget) {
 }
 
 
-/// What a dep contributes to its users: linkable outputs, exported hdrs, exported
-/// compile flags (defines/includes), and its canonical label.
+/// What a dep contributes to its users: its linkable outputs (`libs` — own `DefaultInfo`), its
+/// canonical label, and the TRANSITIVE dep-folded provider fields keyed by dep-struct projection
+/// (`fields` — e.g. `"headers"`, `"cflags"`; C3a.3b). A native rule reads its own projections via
+/// [`DepInfo::field`] — the generic `resolve_dep` no longer hardcodes cc/java.
 pub(crate) struct DepInfo {
     pub(crate) libs: Vec<String>,
-    pub(crate) hdrs: Vec<String>,
-    pub(crate) cflags: Vec<String>,
     pub(crate) canon: String,
+    fields: BTreeMap<String, Vec<String>>,
 }
 
+impl DepInfo {
+    /// A transitive dep-folded field by projection name (empty if the dep doesn't provide it).
+    pub(crate) fn field(&self, projection: &str) -> Vec<String> {
+        self.fields.get(projection).cloned().unwrap_or_default()
+    }
+}
 
 /// Resolve a dep label to its [`DepInfo`]. In workspace mode a cross-package dep
 /// whose package isn't loaded yet is loaded on demand; otherwise a forward/cross
 /// reference errors clearly.
 pub(crate) fn resolve_dep(sess: &Session, label: &str) -> anyhow::Result<DepInfo> {
-    use razel_dds::{DdsRead, FieldId, InstanceId, ProviderTypeId, Scalar};
+    use razel_dds::InstanceId;
     let canon = canon_label(sess, label);
     // Workspace mode: lazy-load the dep's package if absent. The borrow in the condition is dropped
     // before `load_package` recurses into a nested eval (the [R1] discipline — a held `results`
@@ -54,20 +62,14 @@ pub(crate) fn resolve_dep(sess: &Session, label: &str) -> anyhow::Result<DepInfo
         ));
     };
     let libs = t.default_info.clone();
-    // hdrs/cflags = the TRANSITIVE CcInfo closure via the DDS fold (C2d): targets store OWN, the
-    // dependent's view is `fold_set` over the dep graph — the same fold the rule() path uses.
+    // The transitive provider closure via the ONE registry-driven fold (C3a.3b) — same helper the
+    // Starlark path uses; targets store OWN, the dependent's view is folded over the dep graph.
     let all: Vec<AnalyzedTarget> = results.values().cloned().collect();
     drop(results);
     let dds = crate::dds::to_dds(&all, InstanceId::SINGLE).map_err(|e| anyhow::anyhow!(e))?;
     let key = crate::dds::target_key(InstanceId::SINGLE, &canon).map_err(|e| anyhow::anyhow!(e))?;
-    let cc = ProviderTypeId::new("CcInfo");
-    let fold = |field: &str| -> Vec<String> {
-        dds.fold_set(&key, &cc, &FieldId::new(field))
-            .into_iter()
-            .filter_map(|s| if let Scalar::Str(x) = s { Some(x) } else { None })
-            .collect()
-    };
-    Ok(DepInfo { libs, hdrs: fold("hdrs"), cflags: fold("cflags"), canon })
+    let fields = crate::dds::fold_dep_fields(&dds, &key).into_iter().collect();
+    Ok(DepInfo { libs, canon, fields })
 }
 
 

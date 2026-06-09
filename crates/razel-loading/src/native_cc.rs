@@ -35,8 +35,8 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
         let (mut dep_names, mut dep_hdrs, mut dep_cflags) = (Vec::new(), Vec::new(), Vec::new());
         for d in &unpack(deps) {
             let dep = resolve_dep(sess, d)?;
-            dep_hdrs.extend(dep.hdrs);
-            dep_cflags.extend(dep.cflags);
+            dep_hdrs.extend(dep.field("headers"));
+            dep_cflags.extend(dep.field("cflags"));
             dep_names.push(dep.canon);
         }
 
@@ -96,9 +96,9 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for d in &unpack(deps) {
             let dep = resolve_dep(sess, d)?;
+            dep_hdrs.extend(dep.field("headers"));
+            dep_cflags.extend(dep.field("cflags"));
             dep_libs.extend(dep.libs);
-            dep_hdrs.extend(dep.hdrs);
-            dep_cflags.extend(dep.cflags);
             dep_names.push(dep.canon);
         }
         // Binary compiles see global flags + local copts + the deps' exported flags.

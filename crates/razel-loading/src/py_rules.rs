@@ -44,7 +44,7 @@ fn gather(
     let (mut dep_srcs, mut dep_names) = (Vec::new(), Vec::new());
     for d in &unpack(deps) {
         let dep = resolve_dep(sess, d)?;
-        dep_srcs.extend(dep.hdrs);
+        dep_srcs.extend(dep.field("headers"));
         dep_names.push(dep.canon);
     }
     Ok(PySources {
