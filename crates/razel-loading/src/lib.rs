@@ -10,6 +10,7 @@
 
 pub mod rules;
 pub mod state; // C0 decomposition: per-analysis state + core types + the host-cc tool layer
+mod providers; // C0: the transitive provider-field fold
 // Per-language native rulesets — each maps a `@rules_*//` load to native rules, registered in
 // `rules::ruleset_modules`. (Independent modules so language support lands without touching the
 // shared cc/analysis core.)
