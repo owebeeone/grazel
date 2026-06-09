@@ -4,7 +4,7 @@ use crate::state::{AnalyzedTarget, canon_label, qualify, session, with_current};
 use crate::values::{Actions, Depset, File, extract_files, file_path, unpack};
 use crate::glob::do_glob;
 use crate::deps::record_target;
-use razel_dds::{DdsRead, FieldId, FieldValue, InstanceId, ProviderTypeId, Scalar};
+use razel_dds::{DdsRead, FieldKind, FieldValue, InstanceId, Scalar};
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
@@ -132,8 +132,7 @@ where
                                 _ => None,
                             }).collect()
                         };
-                        let (cc, java) =
-                            (ProviderTypeId::new("CcInfo"), ProviderTypeId::new("JavaInfo"));
+                        let registry = crate::registry::builtin_registry();
                         for item in list.iter() {
                             let label = item.unpack_str().unwrap_or_default();
                             // Key by canonical label — bare in single-package mode,
@@ -146,26 +145,33 @@ where
                                 )
                                 .into());
                             };
-                            let files = dep_target.default_info.clone();
                             let key = crate::dds::target_key(InstanceId::SINGLE, &dep)
                                 .map_err(|e| anyhow::anyhow!(e))?;
-                            let headers =
-                                to_strs(dds.fold_set(&key, &cc, &FieldId::new("hdrs")).into_iter().collect());
-                            let compile_jars =
-                                to_strs(dds.fold_depset(&key, &java, &FieldId::new("compile_jars")));
-                            let runtime_jars = to_strs(dds.fold_depset_pruned(
-                                &key,
-                                &java,
-                                &FieldId::new("runtime_jars"),
-                                &FieldId::new("neverlink"),
-                            ));
+                            // C3a.3: `files` is own-exposed (DefaultInfo); every transitive field folds
+                            // via the registry — no hardcoded cc/java provider or field names here. The
+                            // fold (Set / OrderedDepset / pruned) + the dep-struct name come from the spec.
+                            let mut sfields: Vec<(String, Vec<String>)> =
+                                vec![("files".to_string(), dep_target.default_info.clone())];
+                            for ty in registry.provider_types() {
+                                for (field, kind, depfold) in registry.dep_folds(ty) {
+                                    use crate::registry::FoldPolicy;
+                                    let folded = match (kind, &depfold.policy) {
+                                        (FieldKind::Set, _) => {
+                                            to_strs(dds.fold_set(&key, ty, field).into_iter().collect())
+                                        }
+                                        (FieldKind::OrderedDepset, FoldPolicy::Plain) => {
+                                            to_strs(dds.fold_depset(&key, ty, field))
+                                        }
+                                        (FieldKind::OrderedDepset, FoldPolicy::PrunedBy(p)) => {
+                                            to_strs(dds.fold_depset_pruned(&key, ty, field, p))
+                                        }
+                                        (FieldKind::Scalar, _) => continue,
+                                    };
+                                    sfields.push((depfold.projection.to_string(), folded));
+                                }
+                            }
                             dep_labels.push(dep);
-                            providers.push(heap.alloc(AllocStruct([
-                                ("files".to_string(), files),
-                                ("headers".to_string(), headers),
-                                ("compile_jars".to_string(), compile_jars),
-                                ("runtime_jars".to_string(), runtime_jars),
-                            ])));
+                            providers.push(heap.alloc(AllocStruct(sfields)));
                         }
                     }
                     fields.push((key, heap.alloc(providers)));

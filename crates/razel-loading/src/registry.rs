@@ -58,15 +58,17 @@ impl ProviderRegistry {
             fields.iter().fold(ProviderSchema::new(), |s, (f, spec)| s.field(f.clone(), spec.kind))
         })
     }
-    /// A provider's dep-propagated fields: `(field, &DepFold)` — drives the two dep-folds (C3a.3).
-    pub(crate) fn dep_fields<'a>(
+    /// A provider's transitively-dep-folded fields: `(field, kind, &DepFold)` — drives the two
+    /// dep-folds (C3a.3). The `kind` selects the `DdsRead` fold (`Set` → `fold_set`, `OrderedDepset`
+    /// → `fold_depset`/`fold_depset_pruned`). Excludes own-only fields (`neverlink`, `DefaultInfo.files`).
+    pub(crate) fn dep_folds<'a>(
         &'a self,
         provider: &ProviderTypeId,
-    ) -> impl Iterator<Item = (&'a FieldId, &'a DepFold)> {
+    ) -> impl Iterator<Item = (&'a FieldId, FieldKind, &'a DepFold)> {
         self.providers
             .get(provider)
             .into_iter()
-            .flat_map(|m| m.iter().filter_map(|(f, s)| s.dep_fold.as_ref().map(|d| (f, d))))
+            .flat_map(|m| m.iter().filter_map(|(f, s)| s.dep_fold.as_ref().map(|d| (f, s.kind, d))))
     }
 }
 
@@ -76,8 +78,10 @@ impl ProviderRegistry {
 pub(crate) fn builtin_registry() -> ProviderRegistry {
     let mut r = ProviderRegistry::default();
     let folded = |projection, policy| Some(DepFold { projection, policy });
-    // DefaultInfo — every target's output files.
-    r.register("DefaultInfo", "files", FieldSpec { kind: FieldKind::Set, dep_fold: folded("files", FoldPolicy::Plain) });
+    // DefaultInfo — every target's output files. OWN-exposed (a dependent reads the dep's OWN files,
+    // NOT a transitive closure), so it has a schema but no transitive `dep_fold` — the dep struct
+    // special-cases `files` from `default_info`.
+    r.register("DefaultInfo", "files", FieldSpec { kind: FieldKind::Set, dep_fold: None });
     // cc — exported headers + compile flags (Sets); `CcInfo.hdrs` is read as `dep.headers`.
     r.register("CcInfo", "hdrs", FieldSpec { kind: FieldKind::Set, dep_fold: folded("headers", FoldPolicy::Plain) });
     r.register("CcInfo", "cflags", FieldSpec { kind: FieldKind::Set, dep_fold: folded("cflags", FoldPolicy::Plain) });
@@ -99,14 +103,16 @@ mod tests {
         for ty in ["DefaultInfo", "CcInfo", "JavaInfo"] {
             assert!(r.schema(&ProviderTypeId::new(ty)).is_some(), "schema for {ty}");
         }
-        // Dep-folded fields: cc has hdrs+cflags; java has compile_jars+runtime_jars (neverlink own-only).
-        assert_eq!(r.dep_fields(&ProviderTypeId::new("CcInfo")).count(), 2);
+        // Dep-folded fields: cc has hdrs+cflags; java has compile_jars+runtime_jars (neverlink own-only,
+        // DefaultInfo.files own-exposed → neither is transitively dep-folded).
+        assert_eq!(r.dep_folds(&ProviderTypeId::new("DefaultInfo")).count(), 0, "files is own-exposed");
+        assert_eq!(r.dep_folds(&ProviderTypeId::new("CcInfo")).count(), 2);
         let java = ProviderTypeId::new("JavaInfo");
-        assert_eq!(r.dep_fields(&java).count(), 2, "neverlink is own-only, not dep-folded");
+        assert_eq!(r.dep_folds(&java).count(), 2, "neverlink is own-only, not dep-folded");
         // The neverlink subtree-prune is registered on runtime_jars; CcInfo.hdrs projects to "headers".
-        assert!(r.dep_fields(&java).any(|(_, d)| matches!(d.policy, FoldPolicy::PrunedBy(_))));
+        assert!(r.dep_folds(&java).any(|(_, _, d)| matches!(d.policy, FoldPolicy::PrunedBy(_))));
         assert!(r
-            .dep_fields(&ProviderTypeId::new("CcInfo"))
-            .any(|(f, d)| *f == FieldId::new("hdrs") && d.projection == "headers"));
+            .dep_folds(&ProviderTypeId::new("CcInfo"))
+            .any(|(f, _, d)| *f == FieldId::new("hdrs") && d.projection == "headers"));
     }
 }
