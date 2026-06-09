@@ -17,6 +17,7 @@ mod deps;
 mod native_cc;
 mod shims;
 mod engine;
+mod toolchains; // C3b: the toolchain resolver (name -> config; the engine reads it)
 pub mod dds; // C2: loader -> DDS provider bridge
 mod registry; // C3a: the provider-schema registry (source of truth for schemas/folds/projections)
 // Per-language native rulesets — each maps a `@rules_*//` load to native rules, registered in

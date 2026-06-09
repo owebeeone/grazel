@@ -110,15 +110,9 @@ pub(crate) fn razel_build_members(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
         use razel_rulepack::constrain::{VarValue, Vars};
-        let config = match toolchain {
-            "cc" => razel_cc_toolchain::macos_core_config().map_err(|e| anyhow::anyhow!(e))?,
-            other => {
-                return Err(anyhow::anyhow!(
-                    "razel_build.command_line: unknown toolchain {other:?} — C1a resolves only \"cc\" \
-                     (java is template-shaped + uses ctx.actions.run; the toolchain resolver is C1b/D)"
-                ));
-            }
-        };
+        // C3b: the toolchain name resolves via the toolchain registry — the engine no longer names a
+        // language. (Adding a command-line-shaped toolchain is a row in `toolchains`, not here.)
+        let config = crate::toolchains::resolve_toolchain(toolchain).map_err(|e| anyhow::anyhow!(e))?;
         let mut vars = Vars::new();
         for (k, v) in &variables {
             if let Some(s) = v.unpack_str() {
