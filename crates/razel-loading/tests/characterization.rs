@@ -23,7 +23,10 @@ fn cc_library_lowering_is_stable() {
 
     let compile = &greet.actions[0];
     assert_eq!(compile.mnemonic, "CppCompile");
-    assert_eq!(compile.argv, ["/usr/bin/c++", "-iquote", ".", "-c", "greet.cc", "-o", "greet.cc.o"]);
+    // ·iii: argv[0] is the PATH-resolved host compiler (Native toolchain), not a hardcoded path.
+    let cc = &compile.argv[0];
+    assert!(["c++", "clang++", "g++", "cc"].iter().any(|s| cc.ends_with(s)), "resolved cc: {cc}");
+    assert_eq!(&compile.argv[1..], ["-iquote", ".", "-c", "greet.cc", "-o", "greet.cc.o"]);
     assert_eq!(compile.inputs, ["greet.cc", "greet.h"]);
     assert_eq!(compile.outputs, ["greet.cc.o"]);
 
@@ -43,15 +46,20 @@ fn cc_binary_links_dep_and_sees_transitive_header() {
     assert_eq!(app.deps, ["greet"]);
     assert_eq!(app.actions.len(), 2, "cc_binary = compile + link");
 
+    // ·iii: argv[0] is the PATH-resolved host compiler (Native toolchain).
+    let is_cc = |s: &str| ["c++", "clang++", "g++", "cc"].iter().any(|c| s.ends_with(c));
+
     let compile = &app.actions[0];
     assert_eq!(compile.mnemonic, "CppCompile");
-    assert_eq!(compile.argv, ["/usr/bin/c++", "-iquote", ".", "-c", "main.cc", "-o", "main.cc.o"]);
+    assert!(is_cc(&compile.argv[0]), "resolved cc: {}", compile.argv[0]);
+    assert_eq!(&compile.argv[1..], ["-iquote", ".", "-c", "main.cc", "-o", "main.cc.o"]);
     // The dep's public header propagates into the dependent's compile inputs.
     assert_eq!(compile.inputs, ["main.cc", "greet.h"]);
 
     let link = &app.actions[1];
     assert_eq!(link.mnemonic, "CppLink");
-    assert_eq!(link.argv, ["/usr/bin/c++", "-o", "app", "main.cc.o", "libgreet.a"]);
+    assert!(is_cc(&link.argv[0]), "resolved cc: {}", link.argv[0]);
+    assert_eq!(&link.argv[1..], ["-o", "app", "main.cc.o", "libgreet.a"]);
     assert_eq!(link.inputs, ["main.cc.o", "libgreet.a"]); // dep's archive linked in
     assert_eq!(link.outputs, ["app"]);
     assert_eq!(app.default_info, ["app"]);

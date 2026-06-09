@@ -934,6 +934,62 @@ fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
 const CXX: &str = "/usr/bin/c++";
 const AR: &str = "/usr/bin/ar";
 
+/// The resolved native (host) cc compiler, by walking `PATH` (§7 ·iii — the Native toolchain). This
+/// is what Bazel's `cc_configure` does (probe the host); razel does it at build time. Resolved +
+/// logged **once**; [`CXX`] is the fallback when no candidate is on `PATH`.
+fn host_cc() -> String {
+    use std::sync::OnceLock;
+    static RESOLVED: OnceLock<String> = OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            let path = std::env::var("PATH").unwrap_or_default();
+            let dirs: Vec<&str> = path.split(':').collect();
+            let cc = first_on_path(&["c++", "clang++", "g++", "cc"], &dirs, |p| p.is_file())
+                .unwrap_or_else(|| CXX.to_string());
+            // Log which tool + its identity (transparency; the digest → action-key fold that makes a
+            // toolchain change rebuild is the follow-on — RazelGaps "toolchain-change cache").
+            eprintln!("razel: native cc toolchain → {cc} (id {})", tool_id(&cc));
+            cc
+        })
+        .clone()
+}
+
+/// First `<dir>/<candidate>` for which `exists` holds — PATH-walk, candidates in preference order.
+/// Pure (dirs + probe injected) so it's testable without touching the environment.
+fn first_on_path(
+    candidates: &[&str],
+    dirs: &[&str],
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<String> {
+    for cand in candidates {
+        for dir in dirs {
+            let p = std::path::Path::new(dir).join(cand);
+            if exists(&p) {
+                return Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// A cheap stable identity for a resolved tool: `size@mtime` from one stat — the fast-path proxy.
+/// (The content digest that actually keys actions is the follow-on, RazelGaps "toolchain-change
+/// cache"; this is enough to log + later gate the re-hash.)
+fn tool_id(path: &str) -> String {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let secs = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{}b@{secs}", m.len())
+        }
+        Err(_) => "absent".to_string(),
+    }
+}
+
 pub(crate) fn record_target(sess: &Session, t: AnalyzedTarget) {
     sess.results.borrow_mut().insert(t.name.clone(), t.clone());
     sess.state.borrow_mut().targets.push(t);
@@ -1089,7 +1145,7 @@ fn cc_rules(b: &mut GlobalsBuilder) {
         let out = qualify(sess, &name);
         let mut link_inputs = objs.clone();
         link_inputs.extend(dep_libs.clone());
-        let mut link_argv = vec![CXX.into(), "-o".into(), out.clone()];
+        let mut link_argv = vec![host_cc(), "-o".into(), out.clone()];
         link_argv.extend(objs);
         link_argv.extend(dep_libs);
         link_argv.extend(sess.global.linkopts.clone());
@@ -1132,7 +1188,7 @@ fn include_flags(sess: &Session, includes: Option<UnpackList<String>>) -> Vec<St
 /// (`#include "pkg/x.h"`) resolve from the sandbox root (= exec root); `flags` are
 /// the target's copts + transitive defines/includes.
 fn compile_action(src: &str, obj: &str, flags: &[String], inputs: Vec<String>) -> AnalyzedAction {
-    let mut argv = vec![CXX.into(), "-iquote".into(), ".".into()];
+    let mut argv = vec![host_cc(), "-iquote".into(), ".".into()];
     argv.extend(flags.iter().cloned());
     argv.extend(["-c".into(), src.into(), "-o".into(), obj.into()]);
     AnalyzedAction {
@@ -1717,6 +1773,26 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_on_path_picks_first_existing_candidate_in_preference_order() {
+        // §7 ·iii native cc resolution: candidate order wins within a dir; dirs scanned per candidate.
+        let dirs = ["/nope", "/usr/bin", "/usr/local/bin"];
+        // Only c++ and clang++ "exist", in different dirs — c++ wins (earlier candidate).
+        let present = |p: &std::path::Path| {
+            p == std::path::Path::new("/usr/bin/c++")
+                || p == std::path::Path::new("/usr/local/bin/clang++")
+        };
+        assert_eq!(first_on_path(&["c++", "clang++"], &dirs, present).as_deref(), Some("/usr/bin/c++"));
+        // Falls through candidates when the preferred one is absent anywhere.
+        let only_clang = |p: &std::path::Path| p == std::path::Path::new("/usr/local/bin/clang++");
+        assert_eq!(
+            first_on_path(&["c++", "clang++"], &dirs, only_clang).as_deref(),
+            Some("/usr/local/bin/clang++")
+        );
+        // None present → None (host_cc then falls back to CXX).
+        assert_eq!(first_on_path(&["c++"], &dirs, |_| false), None);
+    }
 
     #[test]
     fn starlark_rule_analyzes_by_running_its_impl() {
