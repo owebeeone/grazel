@@ -18,10 +18,9 @@ use starlark::syntax::{AstModule, Dialect};
 use starlark::values::list::ListRef;
 use starlark::values::{Heap, Value};
 
-pub mod derive;
-pub mod rust;
-pub use derive::{DeclaredAction, derive_cc_library_actions};
-pub use rust::derive_rust_library_action;
+// (F22: the `derive`/`rust` action-derivation layer was deleted — it was a parallel, never-wired
+// action builder with no non-test caller. The LIVE cc path derives actions in `cc_defs.bzl` over
+// `razel_cc.command_line`; the path-model oracle for byte-parity is `bazel_compile_inputs` below.)
 
 /// Evaluate a Starlark cc toolchain config into a [`FeatureConfig`], in the REAL Bazel cc-config API
 /// (A5a): razel's `cc_toolchain_config_lib` (feature/flag_set/flag_group/action_config/tool +
@@ -185,12 +184,13 @@ pub fn cc_archive_argv(config: &FeatureConfig, inputs: &ArchiveInputs) -> Vec<St
     config.full_command_line(&config.select(&[]), "c++-link-static-library", &vars)
 }
 
-/// Strip a cc source extension to get the object stem (`util.cc` → `util`).
+/// The object stem = the source with its LAST extension stripped (`util.cc` → `util`,
+/// `a.b.cc` → `a.b`). MUST match `cc_defs.bzl`'s `src.rsplit(".", 1)[0]` (F22): that Starlark path
+/// model (the live cc path) and this Rust one ([`bazel_compile_inputs`] — the byte-parity oracle) are
+/// the two owners of the `bazel-out/.../_objs/<target>/<stem>` layout and must agree. Both are
+/// validated against the same golden, so they do; this aligns the stem rule so they can't drift.
 fn obj_stem(src: &str) -> &str {
-    [".cc", ".cpp", ".cxx", ".c", ".C"]
-        .iter()
-        .find_map(|e| src.strip_suffix(e))
-        .unwrap_or(src)
+    src.rsplit_once('.').map(|(base, _)| base).unwrap_or(src)
 }
 
 /// Bazel's compile-action variables for a cc source — the `bazel-out/<cfg>/bin/<pkg>/_objs/
