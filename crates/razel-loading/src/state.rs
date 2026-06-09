@@ -151,6 +151,10 @@ pub struct GlobalFlags {
     /// Which cc toolchain to use (§7): Native (host compiler, executable — default) or AdoptBazel
     /// (Bazel's faithful declared graph, for the parity runner).
     pub cc_toolchain: CcToolchainMode,
+    /// External-repo base (D4): where vendored `@repo` sources live (e.g. `third-party/`). An
+    /// `@repo//pkg:file` load resolves to `<base>/<repo>/pkg/file`, with `_`→`-` name tolerance
+    /// (canonical `@bazel_skylib` ↔ dir `bazel-skylib`). `None` ⇒ external loads not configured.
+    pub external_base: Option<PathBuf>,
 }
 
 /// The cc toolchain mode (RazelStarlarkBoundaryPlan §7) — the resolution to declared-vs-executable.

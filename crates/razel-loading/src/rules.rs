@@ -44,8 +44,9 @@ pub(crate) fn build_globals() -> Globals {
 }
 
 
-/// Resolve a `.bzl` load label to a file under `root`. `//pkg:f.bzl` → `root/pkg/f.bzl`;
-/// `:f.bzl` → `root/<current pkg>/f.bzl`. External repos other than `@rules_cc` error.
+/// Resolve a project `.bzl` load to a file under `root`. `//pkg:f.bzl` → `root/pkg/f.bzl`;
+/// `:f.bzl` → `root/<current pkg>/f.bzl`. (`@repo` loads go through [`external_bzl_path`] /
+/// the synthetic rulesets, not here.)
 pub(crate) fn resolve_bzl(root: &Path, label: &str, current_pkg: Option<&str>) -> Result<PathBuf, String> {
     if let Some(rest) = label.strip_prefix("//") {
         let (pkg, file) = rest
@@ -57,9 +58,24 @@ pub(crate) fn resolve_bzl(root: &Path, label: &str, current_pkg: Option<&str>) -
         Ok(root.join(pkg).join(file))
     } else {
         Err(format!(
-            "unsupported load path `{label}` (only //pkg:f.bzl, :f.bzl, @rules_cc)"
+            "unsupported load path `{label}` (only //pkg:f.bzl, :f.bzl, or a vendored @repo)"
         ))
     }
+}
+
+
+/// Resolve a vendored external load `@repo//pkg:file` to a real file under `base` (D4). The repo→dir
+/// name tolerates the `_`/`-` convention (canonical `@bazel_skylib` ↔ dir `bazel-skylib`): try the
+/// name as-is, then with `_`→`-`. `None` if not an `@repo//pkg:file` label or no such file. A real
+/// vendored file takes precedence over razel's synthetic shim, so configured corpora run REAL upstream.
+pub(crate) fn external_bzl_path(base: &Path, label: &str) -> Option<PathBuf> {
+    let rest = label.strip_prefix('@')?;
+    let (repo, pkgfile) = rest.split_once("//")?;
+    let (pkg, file) = pkgfile.split_once(':')?;
+    [repo.to_string(), repo.replace('_', "-")]
+        .iter()
+        .map(|dir| base.join(dir).join(pkg).join(file))
+        .find(|p| p.exists())
 }
 
 
@@ -87,20 +103,31 @@ pub(crate) struct BzlLoader<'a> {
 
 impl FileLoader for BzlLoader<'_> {
     fn load(&self, path: &str) -> starlark::Result<FrozenModule> {
-        if let Some(rs) = self.rulesets.iter().find(|r| path.starts_with(r.prefix)) {
-            return Ok(rs.module.clone());
-        }
         if let Some(m) = self.cache.borrow().get(path) {
             return Ok(m.clone());
         }
         let err = |m: String| starlark::Error::new_other(anyhow::anyhow!(m));
-        let root = self
+        // D4: a REAL vendored external file (external_base set + the file exists) takes precedence over
+        // the synthetic ruleset shim — so a configured corpus runs upstream `.bzl`, not razel's stand-in.
+        let real_external = self
             .session
-            .workspace
-            .clone()
-            .ok_or_else(|| err(format!("load(\"{path}\") needs workspace mode")))?;
-        let cur = self.session.current_pkg.borrow().clone();
-        let fs = resolve_bzl(&root, path, cur.as_deref()).map_err(err)?;
+            .global
+            .external_base
+            .as_deref()
+            .and_then(|base| external_bzl_path(base, path));
+        let fs = if let Some(p) = real_external {
+            p
+        } else if let Some(rs) = self.rulesets.iter().find(|r| path.starts_with(r.prefix)) {
+            return Ok(rs.module.clone());
+        } else {
+            let root = self
+                .session
+                .workspace
+                .clone()
+                .ok_or_else(|| err(format!("load(\"{path}\") needs workspace mode")))?;
+            let cur = self.session.current_pkg.borrow().clone();
+            resolve_bzl(&root, path, cur.as_deref()).map_err(err)?
+        };
         let src = std::fs::read_to_string(&fs)
             .map_err(|e| err(format!("cannot read {}: {e}", fs.display())))?;
 
