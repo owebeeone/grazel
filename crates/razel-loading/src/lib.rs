@@ -9,6 +9,7 @@
 //! used it). V2 rebuilds loading as a graph effect over the DDS (RazelV2Contracts §6).
 
 pub mod rules;
+pub mod state; // C0 decomposition: per-analysis state + core types + the host-cc tool layer
 // Per-language native rulesets — each maps a `@rules_*//` load to native rules, registered in
 // `rules::ruleset_modules`. (Independent modules so language support lands without touching the
 // shared cc/analysis core.)
@@ -16,9 +17,9 @@ mod py_rules;
 mod rust_rules;
 mod sh_rules;
 pub use rules::{
-    AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags, analyze_bazel, analyze_bazel_with,
-    analyze_starlark, analyze_workspace, analyze_workspace_with,
+    analyze_bazel, analyze_bazel_with, analyze_starlark, analyze_workspace, analyze_workspace_with,
 };
+pub use state::{AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags};
 
 /// Match a `glob` pattern against a path. Supports `*` (within a segment) and `**`
 /// (across segments). A documented subset of Bazel glob — enough for `*.cc`, `a/*.h`,
