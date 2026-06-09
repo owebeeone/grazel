@@ -32,6 +32,10 @@ pub fn parse_feature_config(src: &str) -> Result<FeatureConfig, String> {
     // Prepend razel's cc_toolchain_config_lib so the config is written in the REAL Bazel cc-config
     // API (feature/flag_set/… + cc_common.create_cc_toolchain_config_info) — A5a. The config must NOT
     // re-define those names (Starlark forbids reassigning a global).
+    // F35: prepending shifts the config's error line numbers by the lib length (and the parse module
+    // is named `cc_config.bzl`, not the source). Tolerable for embedded fixtures; for A5b/Phase D
+    // (real ~2000-line generated configs) load the lib as a separate FileLoader module so the config
+    // keeps its own filename/line numbers. (Tracked in RazelGaps.)
     let lib = include_str!("../fixtures/cc_toolchain_config_lib.bzl");
     let full = format!("{lib}\n{src}");
     let ast = AstModule::parse("cc_config.bzl", full, &Dialect::Extended)
@@ -226,6 +230,61 @@ pub fn macos_core_config() -> Result<FeatureConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shim_round_trips_the_richer_cc_config_constructs() {
+        // F34: the shim now emits the FULL surface its extractor reads — with_feature_set,
+        // feature_set, variable_with_value, expand_if_*, nested flag_groups, env_set/env_entry. These
+        // reads were dead before (the shim couldn't produce them); this proves shim ⟷ extractor agree.
+        let cfg = parse_feature_config(
+            r#"
+CONFIG = cc_common.create_cc_toolchain_config_info(
+    features = [
+        feature(
+            name = "opt",
+            enabled = True,
+            requires = [feature_set(features = ["a", "b"])],
+            flag_sets = [
+                flag_set(
+                    actions = ["c++-compile"],
+                    with_features = [with_feature_set(features = ["dbg"], not_features = ["fast"])],
+                    flag_groups = [
+                        flag_group(
+                            flags = ["-O2"],
+                            expand_if_not_available = "x",
+                            expand_if_equal = variable_with_value(name = "mode", value = "opt"),
+                            flag_groups = [flag_group(flags = ["-g"])],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+    action_configs = [
+        action_config(
+            action_name = "c++-compile",
+            tools = [tool(path = "cc")],
+            env_sets = [env_set(actions = ["c++-compile"], env_entries = [env_entry(key = "K", value = "V")])],
+        ),
+    ],
+)
+"#,
+        )
+        .unwrap();
+
+        let f = &cfg.features[0];
+        assert_eq!(f.name, "opt");
+        assert_eq!(f.requires, vec![vec!["a".to_string(), "b".to_string()]]); // feature_set
+        let fs = &f.flag_sets[0];
+        assert_eq!(fs.with_features[0].features, ["dbg"]); // with_feature_set
+        assert_eq!(fs.with_features[0].not_features, ["fast"]);
+        let fg = &fs.flag_groups[0];
+        assert_eq!(fg.expand_if_not_available, ["x"]);
+        assert_eq!(fg.expand_if_equal, Some(("mode".to_string(), "opt".to_string()))); // variable_with_value
+        assert_eq!(fg.flag_groups[0].flags, ["-g"]); // nested flag_groups
+        // env_set/env_entry/action_config-kwargs evaluate without error (accepted, absorbed by create).
+        assert_eq!(cfg.action_configs[0].action_name, "c++-compile");
+    }
 
     // Constructors + cc_common come from razel's prepended cc_toolchain_config_lib (A5a — the real
     // cc-config API); this fixture is just content written against it.

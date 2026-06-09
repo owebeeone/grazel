@@ -137,3 +137,17 @@ capture + fold through the DDS schema map + `FieldKind` fold, so tested==run and
 duplication collapses — F24/F29) is the **Phase-C provider-map** epic: the same work as generalizing
 `CcInfo`/`JavaInfo` off `AnalyzedTarget`'s flat fields, so do it once, there. Until then the loader's
 `fold_field` is the single source of truth; the DDS spine is a parallel design to fold in.
+
+## cc-config eval ergonomics (Phase D; review F35/F33)
+
+- **F35 — config error line numbers are offset.** `parse_feature_config` prepends the
+  `cc_toolchain_config_lib` shim and parses the concatenation as one module named `cc_config.bzl`, so
+  a config error reports at `line + <lib length>` against the wrong filename. Fine for embedded
+  fixtures; for **A5b** (real ~2000-line generated configs) load the shim as a separate `FileLoader`
+  module so the config keeps its own filename/line numbers (or subtract the prefix). Commented at the
+  call site.
+- **F33 — A5a content is hand-frozen for one host.** The API *shape* is real (real constructors +
+  `create_cc_toolchain_config_info`, round-tripped — F34); the *content* (`cc_macos_core.bzl`) is a
+  one-host `cc_configure` transcription. The generated config is explicitly A5b/Phase D. Flagged-
+  acceptable; an optional drift-catching characterization test (fixture vs a fresh host `cc_configure`)
+  can land with A5b.
