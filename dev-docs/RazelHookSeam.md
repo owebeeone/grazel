@@ -236,8 +236,13 @@ not a rename):
   provider; tests are allowlisted), and `cc_provider_map` relocates to the cc module once py+filegroup
   are off it.
 
-**Remaining steps:** **C3a.5** (untangle py+filegroup → relocate `cc_provider_map` + generic
-accessors; de-leaks `state`), then **C3b** (engine toolchain resolver, §4) and **C3c** (the gate).
+**ALL DONE** (`razelV2-RSB/C3a.1`…`C3c`): C3a.5 untangled py (→`PyInfo`) + filegroup (→`DefaultInfo`)
+and relocated `cc_provider_map` (→generic `set_set`) + the accessors (→generic `field_strs`/
+`scalar_bool`); C3b moved the toolchain resolver into `toolchains.rs` (engine reads it); C3c added the
+`xtask` no-language-in-core gate (distinctive tokens, skips comments + `#[cfg(test)]`, allowlists the
+registries + per-language rules + the ruleset table), unit-tested + **green**. The engine names no
+language; adding one is a registration. Phase-D items (the generic `Toolchain` type, the
+action-transform hook) remain in §8.
 
 ## 8. Phase-D handoff (explicitly out of C3)
 

@@ -335,7 +335,10 @@ generated config is likewise Phase D.*
   — note the toolchain-resolver hook hits a real abstraction gap (cc `FeatureConfig` vs java
   template), so C3b ships an interim registered resolver and the generic `Toolchain` type is Phase D.
 
-*Exit: a generic engine with two instances + a clean hook seam.*
+*Exit: a generic engine with two instances + a clean hook seam.* **DONE** (`razelV2-RSB/C0…C3c`):
+the provider model is one razel-dds value algebra (one fold), the provider/toolchain registries are
+the source of truth, and `xtask gates` enforces no-language-name-in-the-engine-core. The generic
+`Toolchain` type + the action-transform hook are Phase D (`dev-docs/RazelHookSeam.md` §4/§8).
 
 ### Phase D — run-it path (real upstream rules)
 *The real price of run-it = generic-`rule()` fidelity (the §2a/§6a least-built seam, now in full).*
