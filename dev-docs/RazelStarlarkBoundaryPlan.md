@@ -331,6 +331,9 @@ generated config is likewise Phase D.*
 - **C3 — hook seam.** Formalize the extension points the ledger surfaced (toolchain resolver,
   action-transform for ijar/include-scan). *Green:* cc + java's bespoke bits sit behind hooks; an
   `xtask gates`-style check that no language name leaks into the engine core.
+  **Design + staged plan (C3a registry / C3b toolchain hook / C3c gate): `dev-docs/RazelHookSeam.md`**
+  — note the toolchain-resolver hook hits a real abstraction gap (cc `FeatureConfig` vs java
+  template), so C3b ships an interim registered resolver and the generic `Toolchain` type is Phase D.
 
 *Exit: a generic engine with two instances + a clean hook seam.*
 
