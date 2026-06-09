@@ -157,6 +157,59 @@ record (i) as the Phase-D generalization (it needs the real-toolchain second ins
 | **C3b** | `Session` toolchain-resolver registry; `engine.rs` reads it (interim cc-coupled resolver — §4 ii) | small; engine goes language-free | parities; engine has no `"cc"` |
 | **C3c** | the `xtask` gate on **distinctive tokens** (`CcInfo`/`JavaInfo`/`macos_core_config`/`cc_provider_map`/field literals), not bare `cc`/`java` | gate authoring | gate green on the de-leaked core |
 
+### Step detail — the roll-build sequence
+
+Protocol (the project's roll-build discipline): each step below is **one green-gated commit + tag**
+(`razelV2-RSB/C3…`). Gate every step on `cargo test --workspace` (cc + java + py parities + all bins)
+**and** `cargo run -p xtask -- gates` (AD2 + dds-boundary); commit + tag only when green. The parity
+tests are the safety net — a wrong fold / capture / projection fails loudly, it cannot land silently.
+Order is fixed: **C3a → C3b → C3c**; the gate is last (it only passes once the tokens are evicted).
+
+**C3a — registry + generic capture (the real refactor):**
+
+1. **C3a.1 — `ProviderRegistry` (additive, no behavior change).** New type: provider → fields, each
+   field `{FieldKind, fold policy (plain | pruned-by ⟨field⟩), dep_struct_projection}`. Built
+   per-`Session` at construction; the active ruleset modules register their providers — cc →
+   `CcInfo{hdrs→headers : Set, cflags : Set}`, java →
+   `JavaInfo{compile_jars : OrderedDepset, runtime_jars : OrderedDepset pruned-by neverlink, neverlink : Scalar}`,
+   py → its OWN `PyInfo{srcs}` (the untangle target). AD2: per-Session, not a global.
+   *Touches:* a new `registry` module, `state.rs` (Session holds it), the ruleset modules.
+   *Green:* registry populated + unit-tested (the schema + projection map); nothing else wired →
+   parities unchanged.
+2. **C3a.2 — build `razel_build.info`; capture + `to_dds` read the registry; untangle py.** Build the
+   generic `info(provider, fields)` constructor (validate against the registry schema, write the map
+   via `set_provider`); `CcInfo`/`JavaInfo` builtins become thin wrappers over it. `to_dds` registers
+   schemas + asserts from the registry (drop the hardcoded `DefaultInfo`/`CcInfo`/`JavaInfo` list).
+   **Move python OFF** `cc_provider_map`→`CcInfo.hdrs` onto its `PyInfo` channel (`py_rules.rs` +
+   `resolve_dep`). *Touches:* `engine.rs`, `dialect.rs`, `dds.rs`, `py_rules.rs`, `deps.rs`.
+   *Green:* cc + java + py parities; capture flows through one constructor.
+3. **C3a.3 — both dep-folds via the registry; relocate `cc_provider_map`.** Route the **Starlark-path**
+   fold (`dialect.rs` dep-resolution) AND the **native-path** fold (`deps.rs::resolve_dep`) through the
+   registry: iterate registered fields, fold by kind/policy, project under `dep_struct_projection` (the
+   `hdrs`→`d.headers` ABI rename now lives in the registry, not a literal). With py untangled, relocate
+   `cc_provider_map` + the cc/java accessors out of `state.rs` into the language modules.
+   *Touches:* `dialect.rs`, `deps.rs`, `state.rs`. *Green:* cc + java + py parities (dep-struct
+   byte-identical via the projection). **Done ⇒ `state`/`dds`/the generic `dialect`/`deps` paths carry
+   no `CcInfo`/`JavaInfo`/field literals.**
+
+**C3b — toolchain-resolver hook:**
+
+4. **C3b.1 — `Session` toolchain-resolver registry.** `Session` holds
+   `toolchain_resolvers: BTreeMap<String, ResolverFn>`; the cc module registers `"cc" → macos_core_config`;
+   `engine.rs::command_line` calls `session.resolve_toolchain(name)`. Interim: the resolver returns
+   `FeatureConfig` (§4 ii — the generic `Toolchain` type is Phase D). AD2: per-Session, registered at
+   construction. *Touches:* `state.rs`, `engine.rs`, the cc registration. *Green:* cc command line
+   byte-identical; `engine.rs` free of `"cc"`/`macos_core_config`.
+
+**C3c — the gate (last):**
+
+5. **C3c.1 — the no-language-in-core `xtask` gate.** Mirror the AD2 / dds-boundary scanners
+   (`xtask/src/main.rs`): scan the core files (`state`/`engine`/`dds`/generic `dialect`/`deps`/loader;
+   allowlist the language modules + the registry + `ruleset_modules`) for **distinctive tokens**
+   (`CcInfo`/`JavaInfo`/`PyInfo`/`macos_core_config`/`cc_provider_map`/the bare field literals) — NOT
+   bare `cc`/`java`. *Touches:* `xtask/src/main.rs` + a gate unit test. *Green:* the gate passes on the
+   now-de-leaked core (lands only after C3a + C3b).
+
 *Exit (C3 / Phase C):* a generic engine with two instances behind a clean, **gate-enforced** hook
 seam. (The action-transform hook is explicitly **out** — deferred to Phase D, §8.)
 
