@@ -1360,7 +1360,7 @@ fn rules_cc_module_native() -> Result<FrozenModule, String> {
 }
 
 /// AdoptBazel: `cc_library` is razel's OWN rule — the bundled `cc:defs.bzl` evaluated over the
-/// `razel_cc` engine (the Bazel-faithful declared graph). `cc_binary` stays native until a `CppLink`
+/// `razel_build` engine (the Bazel-faithful declared graph). `cc_binary` stays native until a `CppLink`
 /// golden exists (Phase E). Bundling versions razel's two cc halves (Rust builtins + this `.bzl`)
 /// atomically with the binary.
 fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
@@ -1368,7 +1368,7 @@ fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
         .with(cc_rules) // native_cc_binary (cc_binary's backend until Phase E)
         .with(rule_globals) // rule(), CcInfo, DefaultInfo, depset, …
         .with(|b| {
-            b.namespace("razel_cc", razel_cc_members); // the cc engine seam (Constrain)
+            b.namespace("razel_build", razel_build_members); // the cc engine seam (Constrain)
         })
         .build();
     Module::with_temp_heap(|module| {
@@ -1642,22 +1642,32 @@ fn attr_members(b: &mut GlobalsBuilder) {
     }
 }
 
-/// The `razel_cc` builtin namespace (RazelStarlarkBoundaryPlan §10 A1): the tight cc engine
-/// exposed to Starlark. A1 ships one method — `command_line` — wrapping `Constrain` over the macOS
-/// cc config. Engine-tier bare global (like `attr`/`struct`/`depset`); the registration seam moves
-/// to razel-adapter-bazel at Phase C3.
+/// The `razel_build` builtin namespace (RazelStarlarkBoundaryPlan §10 C1): the GENERIC build engine
+/// exposed to Starlark — the four-move surface (toolchain / command_line / action / info). C1a ships
+/// `command_line`, now **toolchain-parameterized** (was the cc-hardcoded `razel_cc.command_line`): the
+/// feature config is resolved from the `toolchain` name, not baked in — the cc-specificity left the
+/// surface. (`action` is `ctx.actions.run`, already the unified move; `toolchain`/`info` are C1b/C2.)
 #[starlark::starlark_module]
-fn razel_cc_members(b: &mut GlobalsBuilder) {
-    /// `razel_cc.command_line(action, variables)` → the §8c argv for `action`: `Constrain` selects
-    /// the cc config's default features and expands them with `variables` (a dict of `str | [str]`).
-    /// A1 selects defaults only; explicit `features` + a resolved toolchain land in later phases.
+fn razel_build_members(b: &mut GlobalsBuilder) {
+    /// `razel_build.command_line(toolchain, action, variables)` → the §8c argv: `Constrain` selects
+    /// the toolchain's default features and expands them with `variables` (a dict of `str | [str]`).
+    /// `toolchain` names the toolchain ("cc"); the config is resolved from it (no cc-hardcoding).
     fn command_line<'v>(
+        toolchain: &str,
         action: &str,
         variables: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
         use razel_rulepack::constrain::{VarValue, Vars};
-        let config = razel_cc_toolchain::macos_core_config().map_err(|e| anyhow::anyhow!(e))?;
+        let config = match toolchain {
+            "cc" => razel_cc_toolchain::macos_core_config().map_err(|e| anyhow::anyhow!(e))?,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "razel_build.command_line: unknown toolchain {other:?} — C1a resolves only \"cc\" \
+                     (java is template-shaped + uses ctx.actions.run; the toolchain resolver is C1b/D)"
+                ));
+            }
+        };
         let mut vars = Vars::new();
         for (k, v) in &variables {
             if let Some(s) = v.unpack_str() {
@@ -1686,7 +1696,7 @@ fn build_globals() -> Globals {
     .with(|b| {
         b.namespace("native", native_members);
         b.namespace("attr", attr_members);
-        b.namespace("razel_cc", razel_cc_members);
+        b.namespace("razel_build", razel_build_members);
     })
     .build()
 }
@@ -1914,7 +1924,7 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
     ])
     .with(rule_globals)
     .with(|b| {
-        b.namespace("razel_cc", razel_cc_members);
+        b.namespace("razel_build", razel_build_members);
     })
     .build();
     let res: Result<(), String> = Module::with_temp_heap(|module| {

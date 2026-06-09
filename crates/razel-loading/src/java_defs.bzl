@@ -2,7 +2,7 @@
 # Phase B). The stress-test's findings, made concrete:
 #  - THREE action kinds per target (Turbine header-jar + Javac + JavaSourceJar), vs cc's two.
 #  - The command is a Starlark TEMPLATE (java + JavaBuilder + @args), NOT a Constrain feature config —
-#    java is template-shaped (rust-like), so there is no razel_java engine seam (unlike razel_cc).
+#    java is template-shaped (rust-like), so there is no razel_java engine seam (unlike razel_build.command_line, cc's Constrain seam).
 #  - The compile classpath is ORDERED (dep.compile_jars, the OrderedDepset fold — B2): a dependent
 #    compiles against deps' HEADER jars (compile-avoidance), not their full jars.
 # The commands here are representative (structure, not byte-parity); byte-parity vs the golden is the

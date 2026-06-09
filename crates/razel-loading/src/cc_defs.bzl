@@ -1,7 +1,7 @@
-# razel's own cc:defs.bzl — `cc_library` over the razel_cc engine (RazelStarlarkBoundaryPlan §6/§10).
+# razel's own cc:defs.bzl — `cc_library` over the razel_build engine (RazelStarlarkBoundaryPlan §6/§10).
 # Bundled into the binary (A3/4·ii) and served for `@rules_cc//cc:defs.bzl`; here (·i) it is evaluated
 # as source via analyze_starlark. The per-source loop + path model live in Starlark (the rule logic);
-# `razel_cc.command_line` is the tight engine seam (Constrain). Target-type logic stays legible.
+# `razel_build.command_line` is the tight engine seam (Constrain). Target-type logic stays legible.
 
 _CFG = "darwin_arm64-fastbuild"  # output-tree segment; normalize() maps it to <cfg> (live cfg: A4 open).
 _SDK = "<sdk>"                    # macOS SDK placeholder (host param).
@@ -27,7 +27,7 @@ def _cc_library_impl(ctx):
     for src in getattr(ctx.attr, "srcs", []):
         stem = src.rsplit(".", 1)[0]
         obj = "%s/%s.o" % (objs, stem)
-        cl = razel_cc.command_line("c++-compile", {
+        cl = razel_build.command_line("cc", "c++-compile", {
             "source_file": src_prefix + src,
             "output_file": obj,
             "dependency_file": "%s/%s.d" % (objs, stem),
@@ -44,7 +44,7 @@ def _cc_library_impl(ctx):
         objects.append(obj)
 
     lib = "%s/lib%s.a" % (prefix, name)
-    al = razel_cc.command_line("c++-link-static-library", {
+    al = razel_build.command_line("cc", "c++-link-static-library", {
         "output_execpath": lib,
         "libraries_to_link": objects,
     })

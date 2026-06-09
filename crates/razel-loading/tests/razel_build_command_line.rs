@@ -1,5 +1,5 @@
-//! A1 (RazelStarlarkBoundaryPlan §10): the `razel_cc` builtin namespace, called from a `rule()`
-//! impl. `razel_cc.command_line(action, variables)` wraps `Constrain` over the macOS cc config; a
+//! A1 (RazelStarlarkBoundaryPlan §10): the `razel_build` builtin namespace, called from a `rule()`
+//! impl. `razel_build.command_line(toolchain, action, variables)` wraps `Constrain` over the macOS cc config; a
 //! rule impl feeds its result to `ctx.actions.run`, and the declared action's argv must equal the
 //! golden's `CppCompile` command line. Proves the engine is reachable + correct *through Starlark*.
 
@@ -7,7 +7,7 @@ use razel_loading::analyze_starlark;
 
 const SRC: &str = r#"
 def _impl(ctx):
-    cl = razel_cc.command_line("c++-compile", {
+    cl = razel_build.command_line("cc", "c++-compile", {
         "source_file": "corpus/cc/transitive/util.cc",
         "output_file": "bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.o",
         "dependency_file": "bazel-out/<cfg>/bin/corpus/cc/transitive/_objs/util/util.d",
@@ -23,7 +23,7 @@ cc_compile(name = "util")
 "#;
 
 #[test]
-fn razel_cc_command_line_builtin_reproduces_the_golden_compile_argv() {
+fn razel_build_command_line_reproduces_the_golden_compile_argv() {
     let targets = analyze_starlark("BUILD", SRC).unwrap();
     let action = &targets[0].actions[0];
 
