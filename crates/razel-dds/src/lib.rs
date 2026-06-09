@@ -266,6 +266,45 @@ pub trait DdsRead {
         }
         acc
     }
+
+    /// Like [`fold_depset`](DdsRead::fold_depset), but PRUNES a node **and its whole subtree** when
+    /// its `prune` field (a `Scalar::Bool` on the same provider `ty`) is true. The java `neverlink`
+    /// rule: a compile-only dependency — and everything reachable only through it — drops out of the
+    /// dependent's RUNTIME closure, while the un-pruned [`fold_depset`](DdsRead::fold_depset) keeps it
+    /// on the COMPILE classpath. (The kind-driven equivalent of the loader's `fold_field` skip.)
+    fn fold_depset_pruned(
+        &self,
+        root: &TargetKey,
+        ty: &ProviderTypeId,
+        field: &FieldId,
+        prune: &FieldId,
+    ) -> Vec<Scalar> {
+        let mut acc = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut stack = vec![root.clone()];
+        while let Some(t) = stack.pop() {
+            if !visited.insert(t.clone()) {
+                continue;
+            }
+            let p = self.provider(&t, ty);
+            // neverlink: skip this node's elements AND don't descend into its deps.
+            if matches!(p.and_then(|p| p.get(prune)), Some(FieldValue::Scalar(Scalar::Bool(true)))) {
+                continue;
+            }
+            if let Some(FieldValue::OrderedDepset(xs)) = p.and_then(|p| p.get(field)) {
+                for x in xs {
+                    if seen.insert(x.clone()) {
+                        acc.push(x.clone());
+                    }
+                }
+            }
+            for d in self.deps(&t).iter().rev() {
+                stack.push(d.clone());
+            }
+        }
+        acc
+    }
 }
 
 /// The fact store: atomic provider facts keyed by `(TargetKey, ProviderTypeId)`. Only code
@@ -551,6 +590,37 @@ mod tests {
         d.assert_deps(tk("//:a"), vec![tk("//:b"), tk("//:c")]);
         d.assert_deps(tk("//:b"), vec![tk("//:d")]);
         assert_eq!(order(&d, "//:a"), ["a.jar", "b.jar", "d.jar", "c.jar"]);
+    }
+
+    #[test]
+    fn fold_depset_pruned_drops_a_neverlink_subtree() {
+        // app -> api(neverlink) -> hidden. The runtime fold prunes api AND its hidden subtree;
+        // the plain compile fold keeps them. (api keeps a non-empty runtime jar to prove the prune
+        // excludes it regardless of its own value.)
+        let mut d = Dds::new();
+        let (rj, nl) = (FieldId::new("runtime_jars"), FieldId::new("neverlink"));
+        d.register_schema(
+            java(),
+            ProviderSchema::new()
+                .field(rj.clone(), FieldKind::OrderedDepset)
+                .field(nl.clone(), FieldKind::Scalar),
+        );
+        let jp = |jar: &str, never: bool| {
+            Provider::new()
+                .with(rj.clone(), odep(&[jar]))
+                .with(nl.clone(), FieldValue::Scalar(Scalar::Bool(never)))
+        };
+        d.assert(tk("//:app"), java(), jp("app.jar", false)).unwrap();
+        d.assert(tk("//:api"), java(), jp("api.jar", true)).unwrap();
+        d.assert(tk("//:hidden"), java(), jp("hidden.jar", false)).unwrap();
+        d.assert_deps(tk("//:app"), vec![tk("//:api")]);
+        d.assert_deps(tk("//:api"), vec![tk("//:hidden")]);
+        let got: Vec<String> = d
+            .fold_depset_pruned(&tk("//:app"), &java(), &rj, &nl)
+            .iter()
+            .map(|s| if let Scalar::Str(x) = s { x.clone() } else { String::new() })
+            .collect();
+        assert_eq!(got, ["app.jar"], "neverlink api + its hidden subtree pruned from runtime");
     }
 
     #[test]

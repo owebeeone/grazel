@@ -134,4 +134,37 @@ mod tests {
         let dds_cj = strs(dds.fold_depset(&key, &ProviderTypeId::new("JavaInfo"), &FieldId::new("compile_jars")));
         assert_eq!(dds_cj, fold_compile_jars(&results, "app"), "DDS fold_depset must reproduce the loader's compile-jar fold");
     }
+
+    #[test]
+    fn dds_pruned_fold_reproduces_the_loader_runtime_fold() {
+        use crate::providers::fold_runtime_jars;
+        // app -> api(neverlink) -> hidden: the runtime closure prunes api + its subtree (C2b).
+        let mk = |name: &str, deps: &[&str], rj: &[&str], never: bool| AnalyzedTarget {
+            name: name.into(),
+            deps: deps.iter().map(|s| s.to_string()).collect(),
+            runtime_jars: rj.iter().map(|s| s.to_string()).collect(),
+            neverlink: never,
+            ..Default::default()
+        };
+        let ts = vec![
+            mk("hidden", &[], &["hidden.jar"], false),
+            mk("api", &["hidden"], &["api.jar"], true),
+            mk("app", &["api"], &["app.jar"], false),
+        ];
+        let results: BTreeMap<String, AnalyzedTarget> =
+            ts.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let dds = to_dds(&ts, InstanceId::SINGLE).unwrap();
+        let key = target_key(InstanceId::SINGLE, "app").unwrap();
+        let dds_rj = strs(dds.fold_depset_pruned(
+            &key,
+            &ProviderTypeId::new("JavaInfo"),
+            &FieldId::new("runtime_jars"),
+            &FieldId::new("neverlink"),
+        ));
+        assert_eq!(
+            dds_rj,
+            fold_runtime_jars(&results, "app"),
+            "DDS pruned fold must reproduce the loader's neverlink-pruned runtime fold"
+        );
+    }
 }
