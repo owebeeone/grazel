@@ -61,7 +61,7 @@ fn shq(s: &str) -> String {
 }
 
 #[starlark::starlark_module]
-fn py_rules(b: &mut GlobalsBuilder) {
+pub(crate) fn py_rules(b: &mut GlobalsBuilder) {
     /// `py_library(name, srcs, deps=?, **kw)` — no build action. Records its (and its
     /// deps') `.py` sources so dependents can import them; exposes them via both
     /// `default_info` and the `hdrs` channel (which `resolve_dep` propagates transitively).

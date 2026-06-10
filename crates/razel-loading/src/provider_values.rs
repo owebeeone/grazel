@@ -168,6 +168,25 @@ where
 }
 
 
+/// An `aspect(implementation=, attrs=, ...)` value: applied along label-attr edges at dep
+/// resolution (L5). `attrs` is the aspect's OWN implicit-attr schema dict (or none).
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Trace, Freeze, Coerce, Clone)]
+#[repr(C)]
+pub(crate) struct AspectObjGen<V: ValueLifetimeless> {
+    pub(crate) implementation: V,
+    pub(crate) attrs: V,
+}
+starlark_complex_value!(pub(crate) AspectObj);
+
+impl<V: ValueLifetimeless> std::fmt::Display for AspectObjGen<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<aspect>")
+    }
+}
+
+#[starlark_value(type = "aspect")]
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for AspectObjGen<V> where Self: ProvidesStaticType<'v> {}
+
 /// The constructor identity of a provider-instance value (frozen or live), for `dep[P]` capture.
 pub(crate) fn instance_callable<'v>(item: Value<'v>) -> Option<Value<'v>> {
     if let Some(pi) = item.downcast_ref::<ProviderInstance<'v>>() {

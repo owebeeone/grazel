@@ -161,6 +161,35 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(Value::new_none())
     }
 
+    /// `aspect(implementation, attrs=?, ...)` → a real aspect value, applied along label-attr
+    /// edges at dep resolution (L5 MVP: attr_aspects propagation is the `deps` edge).
+    fn aspect<'v>(
+        #[starlark(require = named)] implementation: Option<Value<'v>>,
+        #[starlark(require = named)] attrs: Option<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(eval.heap().alloc(crate::provider_values::AspectObj {
+            implementation: implementation.unwrap_or_else(Value::new_none),
+            attrs: attrs.unwrap_or_else(Value::new_none),
+        }))
+    }
+
+    /// `objc_library(...)` — declare-only stub (Apple rules; razel records the target name so
+    /// labels resolve; no actions). Registered debt.
+    fn objc_library<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+
     /// `subrule(implementation, ...)` (compat stub): Bazel's subrule mechanism, absorbed —
     /// rules defining subrules load; invoking one surfaces at analysis (registered debt).
     fn subrule<'v>(
@@ -207,14 +236,6 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
 
     /// `package_group(...)` — visibility grouping (compat stub: visibility not enforced).
     fn package_group<'v>(
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
-    }
-
-    /// `aspect(implementation, ...)` (compat stub): aspects are not modeled (TF uses 10); rules
-    /// DEFINING aspects load; applying them is registered debt (L6).
-    fn aspect<'v>(
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         Ok(NoneType)

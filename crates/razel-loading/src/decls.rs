@@ -21,7 +21,7 @@ use std::cell::RefCell;
 use std::fmt;
 use crate::ctxv::{Ctx, toolchain_map};
 use crate::labels::LabelV;
-use crate::provider_values::{DepTarget, instance_callable};
+use crate::provider_values::{AspectObj, DepTarget, FrozenAspectObj, instance_callable};
 use crate::selects::resolve_attr_value;
 
 
@@ -394,6 +394,27 @@ pub(crate) fn analyze_deferred<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     label: &str,
 ) -> starlark::Result<()> {
+    let found = find_deferred(eval, label);
+    let sess = session(eval);
+    let Some((pkg, rule, kwargs)) = found else { return Ok(()) };
+    if !sess.analyzing.borrow_mut().insert(label.to_string()) {
+        return Err(anyhow::anyhow!("dependency cycle detected at `{label}`").into());
+    }
+    // Analyze in the DECL's package context (labels/paths qualify to the origin package).
+    let prev = sess.current_pkg.borrow_mut().replace(pkg);
+    let res = analyze_rule_decl(eval, rule, &kwargs);
+    *session(eval).current_pkg.borrow_mut() = prev;
+    session(eval).analyzing.borrow_mut().remove(label);
+    res
+}
+
+
+/// Scan the Session's harvested deferred decls for `label` → (pkg, rule, kwargs), re-viewed in
+/// the consumer's eval. Also the aspect machinery's source of a target's ORIGINAL attrs.
+pub(crate) fn find_deferred<'v>(
+    eval: &Evaluator<'v, '_, '_>,
+    label: &str,
+) -> Option<(String, Value<'v>, Vec<(String, Value<'v>)>)> {
     let sess = session(eval);
     let owners: Vec<starlark::values::OwnedFrozenValue> = sess.deferred_decls.borrow().clone();
     let mut found: Option<(String, Value<'v>, Vec<(String, Value<'v>)>)> = None;
@@ -431,16 +452,7 @@ pub(crate) fn analyze_deferred<'v>(
             }
         }
     }
-    let Some((pkg, rule, kwargs)) = found else { return Ok(()) };
-    if !sess.analyzing.borrow_mut().insert(label.to_string()) {
-        return Err(anyhow::anyhow!("dependency cycle detected at `{label}`").into());
-    }
-    // Analyze in the DECL's package context (labels/paths qualify to the origin package).
-    let prev = sess.current_pkg.borrow_mut().replace(pkg);
-    let res = analyze_rule_decl(eval, rule, &kwargs);
-    *session(eval).current_pkg.borrow_mut() = prev;
-    session(eval).analyzing.borrow_mut().remove(label);
-    res
+    found
 }
 
 
@@ -507,6 +519,169 @@ pub(crate) fn record_native<'v>(
 }
 
 
+/// Apply an aspect to an analyzed dep (L5 MVP): run its impl in THIS eval with
+/// `target` = the dep's current providers and `ctx.rule.attr` = the dep's ORIGINAL attrs (deps
+/// resolved recursively WITH the aspect — `attr_aspects` propagation). Results memoize in the
+/// consumer store's captured map under `aspect::<label>`; returned pairs extend the DepTarget.
+pub(crate) fn apply_aspect<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    aspectv: Value<'v>,
+    label: &str,
+    providers: &mut Vec<(Value<'v>, Value<'v>)>,
+) -> starlark::Result<()> {
+    let (implementation, asp_attrs) = {
+        if let Some(a) = aspectv.downcast_ref::<AspectObj<'v>>() {
+            (a.implementation, a.attrs)
+        } else if let Some(a) = aspectv.downcast_ref::<FrozenAspectObj>() {
+            (a.implementation.to_value(), a.attrs.to_value())
+        } else {
+            return Ok(()); // not an aspect value (absorbed/None) — nothing to apply
+        }
+    };
+    let memo_key = format!("aspect::{label}");
+    if let Some(pairs) = decl_store(eval)?.captured.borrow().get(&memo_key) {
+        providers.extend(pairs.iter().copied());
+        return Ok(());
+    }
+    let sess = session(eval);
+    if !sess.analyzing.borrow_mut().insert(memo_key.clone()) {
+        return Ok(()); // cycle: the aspect is being computed up-stack
+    }
+    let res = apply_aspect_uncached(eval, implementation, asp_attrs, aspectv, label, providers);
+    session(eval).analyzing.borrow_mut().remove(&memo_key);
+    res
+}
+
+fn apply_aspect_uncached<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    implementation: Value<'v>,
+    asp_attrs: Value<'v>,
+    aspectv: Value<'v>,
+    label: &str,
+    providers: &mut Vec<(Value<'v>, Value<'v>)>,
+) -> starlark::Result<()> {
+    let heap = eval.heap();
+    // The dep's ORIGINAL attrs (the harvested decl): rule.attr for the aspect impl. `deps`
+    // resolve recursively WITH this aspect (attr_aspects propagation); other kwargs stay raw.
+    let deferred = find_deferred(eval, label);
+    // Aspect work runs in the TARGET's package context (declare_file/labels qualify there).
+    let origin = crate::state::pkg_of(label);
+    let prev = match origin {
+        Some(p) => session(eval).current_pkg.borrow_mut().replace(p),
+        None => session(eval).current_pkg.borrow().clone(),
+    };
+    let result = (|| -> starlark::Result<()> {
+        let mut rule_fields: Vec<(String, Value<'v>)> = Vec::new();
+        if let Some((_pkg, _rule, kwargs)) = &deferred {
+            for (k, v) in kwargs {
+                if k == "deps" {
+                    let mut sub = Vec::new();
+                    let aspect_list = heap.alloc(vec![aspectv]);
+                    let vv = resolve_attr_value(eval, *v)?;
+                    let resolved =
+                        resolve_label_attr_inner(eval, vv, false, &mut sub, aspect_list)?;
+                    rule_fields.push((k.clone(), resolved));
+                } else {
+                    rule_fields.push((k.clone(), *v));
+                }
+            }
+        }
+        if !rule_fields.iter().any(|(k, _)| k == "deps") {
+            rule_fields.push(("deps".to_string(), heap.alloc(Vec::<Value<'v>>::new())));
+        }
+        // The aspect's OWN attrs (implicit label defaults resolve like rule-schema defaults).
+        let mut own_fields: Vec<(String, Value<'v>)> = Vec::new();
+        if let Some(d) = starlark::values::dict::DictRef::from_value(asp_attrs) {
+            let entries: Vec<(String, Value<'v>)> = d
+                .iter()
+                .filter_map(|(k, desc)| k.unpack_str().map(|k| (k.to_string(), desc)))
+                .collect();
+            drop(d);
+            for (an, desc) in entries {
+                let default =
+                    desc.get_attr("default", heap)?.unwrap_or_else(Value::new_none);
+                let kind = desc
+                    .get_attr("kind", heap)?
+                    .and_then(|k| k.unpack_str().map(String::from))
+                    .unwrap_or_default();
+                let v = if !default.is_none() && (kind == "label" || kind == "label_list") {
+                    let default = resolve_attr_value(eval, default)?;
+                    let mut sub = Vec::new();
+                    resolve_label_attr_inner(eval, default, kind == "label", &mut sub,
+                        Value::new_none())?
+                } else {
+                    default
+                };
+                own_fields.push((an, v));
+            }
+        }
+        // target: the dep as seen so far (files + providers accumulated pre-aspect).
+        let target = heap.alloc(DepTarget {
+            label: label.to_string(),
+            fields: vec![("files".to_string(), heap.alloc(Vec::<Value<'v>>::new()))],
+            providers: providers.clone(),
+        });
+        let (repo, rest) = match label.split_once("//") {
+            Some((r, rest)) if r.starts_with('@') => (Some(r.to_string()), rest),
+            Some((_, rest)) => (None, rest),
+            None => (None, label),
+        };
+        let (lpkg, lname) = rest.split_once(':').unwrap_or(("", rest));
+        let ctx = heap.alloc(crate::engine::AbsorbWith {
+            overrides: vec![
+                (
+                    "rule".to_string(),
+                    heap.alloc(crate::engine::AbsorbWith {
+                        overrides: vec![(
+                            "attr".to_string(),
+                            heap.alloc(starlark::values::structs::AllocStruct(rule_fields)),
+                        )],
+                    }),
+                ),
+                (
+                    "attr".to_string(),
+                    heap.alloc(starlark::values::structs::AllocStruct(own_fields)),
+                ),
+                ("actions".to_string(), heap.alloc_complex_no_freeze(crate::values::Actions)),
+                (
+                    "label".to_string(),
+                    heap.alloc(crate::labels::LabelV {
+                        repo,
+                        package: lpkg.to_string(),
+                        name: lname.to_string(),
+                    }),
+                ),
+                ("toolchains".to_string(), crate::ctxv::toolchain_map(heap)),
+                ("bin_dir".to_string(), heap.alloc(crate::engine::AbsorbWith {
+                    overrides: vec![("path".to_string(), heap.alloc("bazel-out/bin"))],
+                })),
+                ("genfiles_dir".to_string(), heap.alloc(crate::engine::AbsorbWith {
+                    overrides: vec![("path".to_string(), heap.alloc("bazel-out/bin"))],
+                })),
+            ],
+        });
+        let ret = eval.eval_function(implementation, &[target, ctx], &[])?;
+        let mut pairs: Vec<(Value<'v>, Value<'v>)> = Vec::new();
+        if let Some(list) = ListRef::from_value(ret) {
+            for item in list.iter() {
+                if let Some(c) = instance_callable(item) {
+                    pairs.push((c, item));
+                }
+            }
+        } else if let Some(c) = instance_callable(ret) {
+            pairs.push((c, ret));
+        }
+        decl_store(eval)?
+            .captured
+            .borrow_mut()
+            .insert(format!("aspect::{label}"), pairs.clone());
+        providers.extend(pairs);
+        Ok(())
+    })();
+    *session(eval).current_pkg.borrow_mut() = prev;
+    result
+}
+
 /// Resolve a label/label_list attr VALUE (passed or default) to DepTarget struct(s) — shared by
 /// the kwargs arm and the schema-defaults pass (implicit label attrs like rules_cc's
 /// `_impl_delegate` must resolve exactly like passed ones).
@@ -515,6 +690,17 @@ pub(crate) fn resolve_label_attr<'v>(
     v: Value<'v>,
     single_label: bool,
     dep_labels: &mut Vec<String>,
+    aspects: Value<'v>,
+) -> starlark::Result<Value<'v>> {
+    resolve_label_attr_inner(eval, v, single_label, dep_labels, aspects)
+}
+
+fn resolve_label_attr_inner<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    v: Value<'v>,
+    single_label: bool,
+    dep_labels: &mut Vec<String>,
+    aspects: Value<'v>,
 ) -> starlark::Result<Value<'v>> {
     let one = |x: Value<'v>| -> Option<String> {
         x.unpack_str().map(String::from).or_else(|| {
@@ -695,6 +881,15 @@ pub(crate) fn resolve_label_attr<'v>(
             } else {
                 providers
             };
+            // L5: apply this attr's aspects — extra providers attach to the dep target.
+            let mut providers = providers;
+            if let Some(l) = ListRef::from_value(aspects) {
+                let to_apply: Vec<Value<'v>> = l.iter().collect();
+                for a in to_apply {
+                    apply_aspect(eval, a, &dep, &mut providers)?;
+                }
+            }
+            let heap = eval.heap();
             structs.push(
                 heap.alloc(DepTarget { label: dep.clone(), fields: dfields, providers }),
             );
@@ -730,19 +925,23 @@ pub(crate) fn analyze_rule_decl<'v>(
         let (key, v) = (key.clone(), *v);
         // D1b/c: the schema kind drives label resolution. Look it up once: `label`/`label_list`
         // resolve to provider struct(s); the legacy `deps` is an implicit `label_list`.
-        let attr_kind: Option<String> = {
+        let (attr_kind, attr_aspects): (Option<String>, Value<'v>) = {
             let mut k = None;
+            let mut asp = Value::new_none();
             if let Some(d) = starlark::values::dict::DictRef::from_value(attrs) {
                 for (kk, desc) in d.iter() {
                     if kk.unpack_str() == Some(key.as_str()) {
                         if let Ok(Some(kind)) = desc.get_attr("kind", eval.heap()) {
                             k = kind.unpack_str().map(String::from);
                         }
+                        if let Ok(Some(a)) = desc.get_attr("aspects", eval.heap()) {
+                            asp = a;
+                        }
                         break;
                     }
                 }
             }
-            k
+            (k, asp)
         };
         let is_label =
             key == "deps" || matches!(attr_kind.as_deref(), Some("label") | Some("label_list"));
@@ -755,7 +954,8 @@ pub(crate) fn analyze_rule_decl<'v>(
             // A label attr (legacy `deps` or any `attr.label_list`): resolve each label to its
             // analyzed providers as a `struct(files=…, <folded fields>…)`.
             _ if is_label => {
-                let resolved = resolve_label_attr(eval, v, single_label, &mut dep_labels)?;
+                let resolved =
+                    resolve_label_attr(eval, v, single_label, &mut dep_labels, attr_aspects)?;
                 fields.push((key, resolved));
             }
             _ => fields.push((key, v)),
@@ -782,7 +982,10 @@ pub(crate) fn analyze_rule_decl<'v>(
                 // Implicit label attrs (rules_cc `_impl_delegate` etc.) resolve like passed ones.
                 let v = if kind == "label" || kind == "label_list" {
                     let default = resolve_attr_value(eval, default)?;
-                    resolve_label_attr(eval, default, kind == "label", &mut dep_labels)?
+                    let asp = descriptor
+                        .get_attr("aspects", eval.heap())?
+                        .unwrap_or_else(Value::new_none);
+                    resolve_label_attr(eval, default, kind == "label", &mut dep_labels, asp)?
                 } else {
                     default
                 };

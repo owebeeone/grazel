@@ -451,6 +451,8 @@ fn attr_descriptor<'v>(
         ("kind".to_string(), heap.alloc(kind)),
         ("default".to_string(), default),
         ("mandatory".to_string(), heap.alloc(mandatory)),
+        // L5: the aspects to apply along this attr's dep edges.
+        ("aspects".to_string(), kw.get("aspects").copied().unwrap_or_else(Value::new_none)),
     ]))
 }
 

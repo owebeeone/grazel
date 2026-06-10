@@ -386,3 +386,25 @@ protobuf's own toolchains); files_to_run synthesis; demand-analysis instance vis
 **Frontier:** ProtoInfo identity mismatch at cc_proto_library.bzl:150 — protos_all carries 1
 provider pair that ptr-misses the consumer's ProtoInfo; needs ctor-identity tracing (which
 module's ProtoInfo instance vs which consumer's). 60 bins; 3 gates; 5 sentinels.
+
+## Round delta — razelV3 round 12 (2026-06-10)
+
+**ASPECTS LANDED (the L5 subsystem) — and the proto pipeline walked THROUGH them.**
+`aspect()` returns a real value (implementation + own-attrs schema); attr descriptors carry
+`aspects=`; dep resolution applies them per dep edge: the impl runs in the consumer's eval with
+`target` = the dep's providers and `ctx.rule.attr` = the dep's ORIGINAL attrs (harvested decl
+kwargs), with `deps` resolved recursively WITH the aspect (attr_aspects propagation), memoized
+per consumer store, cycle-guarded, in the target's package context. The aspect ctx rides
+`razel_host_absorb_with`-style overrides (rule/attr/actions/label/toolchains/bin_dir). With
+that, protobuf's real `cc_proto_aspect` runs `proto_common.compile` + our host
+`cc_common.compile` per proto_library and attaches `_ProtoCcFilesInfo`/`CcInfo` — the exact
+identity mismatch that gated the round is gone because the ASPECT now produces the providers.
+
+**The TF walk left protobuf and is fanning across TF's own tree** (the frontier moved through
+//tensorflow/core:protos_all → compiler/mlir): vendored this round: re2, farmhash, fft2d
+(OouraFFT), highwayhash, eigen, ml_dtypes, pybind11_bazel, snappy (TF overlay-BUILD pattern
+throughout); py_library/py_binary/py_test as BUILD globals; objc_library declare-stub.
+
+**Frontier: `@llvm-project`** — the MLIR/LLVM repo (GB-scale; overlay BUILDs reconstructed by
+llvm's utils/bazel script). A vendor-class task, not a semantics gap: the next session starts
+there. 60 bins; 3 gates; 5 sentinels.
