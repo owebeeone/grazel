@@ -668,3 +668,9 @@ sequential; the gap is cycle partial-state reads + order-sensitive classes, same
 different error shapes — NOT corruption). Pool stays OPT-IN until coverage parity per the
 acceptance bar. Next levers: per-declaration demand futures (P3's analyzing treatment),
 then scheduling (spine seeding / waiters-work). 61 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+---
+
+**Delta stream closed at round 27.** State snapshots continue in
+`RazelV3Checkpoint3Precis.md` (checkpoint 3: the tree-load yardstick + the parallel-load
+story); per-round deltas append there from round 28.

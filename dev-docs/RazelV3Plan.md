@@ -127,8 +127,9 @@ protocol spec). Summary of the model:
 
 ## §6 Doc map
 
-- **Plan of record:** this doc. **State snapshots:** `RazelV2Checkpoint1Precis.md` (+ per-round
-  deltas appended by the supervisor).
+- **Plan of record:** this doc. **State snapshots:** `RazelV3Checkpoint3Precis.md` (current —
+  per-round deltas append there from round 28); `RazelV2Checkpoint1Precis.md` (checkpoint 1 +
+  the round 1–27 delta stream, closed).
 - **Architecture of record (unchanged):** `RazelV2FinalArchProposal.md` + `RazelV2Contracts.md`;
   DDS model: `DdsQuerySystem.md`, `DdsCoveringSet.md`, `DdsWorkedTransformation.md`,
   `BzlToDdsValidation.md` — E0d implements what these specify.
