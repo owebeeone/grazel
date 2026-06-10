@@ -271,3 +271,19 @@ session, all green-gated (`tf-load-walk-1/2/3`, `tf-leaf-loads`, plus select/Lab
 (`//tensorflow:is_cuda_nvcc` — AND/OR condition groups need spec support);
 rules-rust-library → `ctx.toolchains` (the L2 boss, untouched this session).
 59 test bins + 3 gates + 4 probe sentinels green; tf-load-leaf is now a sentinel candidate.
+
+## Round delta — razelV3 round 6 (2026-06-10, autonomous cont.)
+
+The cc rung's dep cascade now walks EIGHT packages deep into TF's real core graph
+(risc → core:framework → example → framework → platform → @tsl → @com_google_absl), with REAL
+abseil cc_library targets ANALYZING through REAL rules_cc Starlark. Landed: host-native
+config_setting_group + alias-following condition resolution; call-site Label/select-key binding;
+cpu modeling; package shorthand; surfaced (unswallowed) demand-load failures; label-default
+resolution (implicit attrs); native.* namespace wholesale; @xla/@tsl pinned to TF's own vendored
+copies. Vendored: abseil, grpc, rules_proto.
+
+**The next boss is the L2a debt, hit exactly as registered:** cross-package custom-provider
+instances (rules_cc's FunctionInfo delegate). Design: BUILD modules become freezable (DeclStore →
+freeze-generic), packages freeze after their drive completes, captured provider instances harvest
+into the Session as OwnedFrozenValues (heap-independent), DepTarget falls back to the harvest for
+cross-package dep[P]. This also closes the same-package-only limit for rules_rust's layering (L2).
