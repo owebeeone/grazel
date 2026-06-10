@@ -320,6 +320,13 @@ where
                 ("files_to_run".to_string(), _heap.alloc(crate::engine::Absorb)),
             ])));
         }
+        // An ABSORBED provider key (platform_common.* etc.): the lookup absorbs.
+        if index.downcast_ref::<crate::engine::Absorb>().is_some()
+            || index.downcast_ref::<crate::engine::AbsorbWith>().is_some()
+            || index.downcast_ref::<crate::engine::FrozenAbsorbWith>().is_some()
+        {
+            return Ok(_heap.alloc(crate::engine::Absorb));
+        }
         // OutputGroupInfo: the builtin stub returns a plain struct (not capturable, no stable
         // ctor identity across modules) — synthesize an absorbing instance. Registered debt:
         // output groups don't flow.

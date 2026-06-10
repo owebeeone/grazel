@@ -445,3 +445,20 @@ TF cc (sentinel #6). Next ratchets, per the build-path plan: the L3/L4 RUN-golde
 tinyjson rustc action set / an abseil clang compile — converts "analyzes" to "builds" and
 makes the param-file + lib-naming debts due), then the TF full-tree load driver
 (packages-loaded coverage curve, the checkpoint-3 yardstick). 60 bins; 3 gates; 6 sentinels.
+
+## Round delta — razelV3 round 15 (2026-06-11)
+
+**MILESTONE: the first RUN-golden passes — razel BUILT a real upstream target.**
+`cargo xtask rungold` analyzes `@com_google_absl//absl/base:log_severity` (real abseil BUILD,
+real rules_cc `_cc_library_impl`, razel's host cc_common.compile over the Constrain engine)
+and EXECUTES the action set on the host: clang compiled log_severity.cc; outputs verified.
+"Analyzes" → "builds" for one real upstream action — the ratchet both checkpoints named.
+
+En route: googletest + google_benchmark vendored (absl's test deps); ctx.exec_groups /
+target_platform_has_constraint absorb; absorbed-provider dep lookups absorb
+(platform_common.* keys); module_version() stub; cc_helper's (File, Label) artifact tuples
+unwrap in the host shim (a silent-skip found by the golden — exactly what run-goldens are for);
+executor-level tool resolution (cc_wrapper.sh → host driver; registered debt).
+
+Next: widen the golden (multi-action targets, the archive/link step, then a rules_rust
+tinyjson run), and the TF full-tree load driver. 60 bins; 3 gates; 6 sentinels + rungold.

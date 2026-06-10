@@ -79,7 +79,7 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
             "bin_dir" | "genfiles_dir" => Some(_heap.alloc(crate::engine::AbsorbWith {
                 overrides: vec![("path".to_string(), _heap.alloc("bazel-out/bin"))],
             })),
-            "configuration" | "runfiles" | "expand_location"
+            "configuration" | "runfiles" | "expand_location" | "exec_groups" | "target_platform_has_constraint"
             | "expand_make_variables" | "coverage_instrumented" => {
                 Some(ctx_absorb(_heap))
             }

@@ -214,6 +214,11 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
+    /// `module_version()` — bzlmod introspection (razel: no module system → None).
+    fn module_version<'v>() -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
     /// `visibility(...)` — .bzl load-visibility declaration (compat stub: not enforced).
     fn visibility<'v>(
         #[starlark(args)] _a: UnpackTuple<Value<'v>>,

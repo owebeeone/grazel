@@ -29,6 +29,7 @@ fn workspace_root() -> PathBuf {
 }
 
 mod probe;
+mod rungold;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -40,6 +41,13 @@ fn main() -> ExitCode {
         Some("flags") => flags(check),
         Some("gates") => gates(),
         Some("probe") => probe::probe(workspace_root()),
+        Some("rungold") => match rungold::rungold(&workspace_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("xtask rungold: FAIL — {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some("capture-goldens") => capture_goldens(),
         other => {
             eprintln!(

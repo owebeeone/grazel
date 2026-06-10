@@ -38,7 +38,9 @@ def _toolchain_resolution_enabled(*args, **kwargs):
     return True
 
 def _path_of(f):
-    # File or string.
+    # File, (File, Label) pair (cc_helper's artifact-label maps), or string.
+    if type(f) == "tuple":
+        f = f[0]
     return f.path if type(f) == "File" else str(f)
 
 def _members(x):
