@@ -84,17 +84,22 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = named)] output: Value<'v>,
         #[starlark(require = named)] content: Option<String>,
+        #[starlark(require = named)] is_executable: Option<bool>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
         let output = file_path(output);
-        // Real write: a /bin/sh action printf-ing the content into the output file.
-        let script = format!(
+        // Real write: a /bin/sh action printf-ing the content into the output file
+        // (+ chmod when is_executable — the rules_rust launcher-script shape).
+        let mut script = format!(
             "printf '%s' {} > {}",
             shquote(&content.unwrap_or_default()),
             shquote(&output)
         );
+        if is_executable.unwrap_or(false) {
+            script.push_str(&format!(" && chmod +x {}", shquote(&output)));
+        }
         with_current(sess, |c| {
             c.actions.push(AnalyzedAction {
                 mnemonic: "FileWrite".into(),

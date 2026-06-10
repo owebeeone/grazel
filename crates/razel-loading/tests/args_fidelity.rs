@@ -30,3 +30,18 @@ r(name = "t")
         ["tool", "--flag", "v", "--x", "a", "--x", "b", "--lib=c", "m-one", "m-two"];
     assert_eq!(argv, &expect, "Args expansion fidelity");
 }
+
+/// `ctx.actions.write(…, is_executable = True)` chmods the output (the launcher-script shape).
+#[test]
+fn write_is_executable_chmods() {
+    let src = r#"
+def _impl(ctx):
+    ctx.actions.write(output = "run.sh", content = "echo hi", is_executable = True)
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "t")
+"#;
+    let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
+    let script = &targets[0].actions[0].argv[2];
+    assert!(script.contains("chmod +x"), "is_executable adds the chmod: {script}");
+}
