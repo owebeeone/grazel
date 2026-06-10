@@ -439,8 +439,8 @@ fn eval_build_src_inner(
 /// Push a harvest dict and index its label keys → owner position (O(1) demand lookups).
 fn index_harvest(
     owned: &starlark::values::OwnedFrozenValue,
-    store: &std::cell::RefCell<Vec<starlark::values::OwnedFrozenValue>>,
-    index: &std::cell::RefCell<std::collections::HashMap<String, usize>>,
+    store: &crate::state::SyncCell<Vec<starlark::values::OwnedFrozenValue>>,
+    index: &crate::state::SyncCell<std::collections::HashMap<String, usize>>,
 ) {
     let idx = store.borrow().len();
     {

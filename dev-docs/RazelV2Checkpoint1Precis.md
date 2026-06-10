@@ -529,3 +529,13 @@ allocator pressure, dep-resolution maps — no single >20% frame left. The next 
 magnitude is the eval worker-pool (freeze-and-harvest already confines cross-package values
 to Send+Sync frozen modules; the blocker is ~20 RefCell Session fields + Send native
 closures + demand futures). Sequential floor reached for cheap fixes.
+
+## Round delta — razelV3 round 20 (2026-06-11)
+
+**Worker-pool P1 LANDED: all 27 Session RefCells → SyncCell (an RwLock with RefCell's
+borrow()/borrow_mut() API — zero call-site changes).** Suite, gates, 6 sentinels, both
+rungolds green; sweep unchanged at 1:00 (uncontended RwLock is free); NO deadlocks — the
+[R1] borrow discipline transferred intact as lock discipline. session_dds gained a
+DerefMut guard shim (RwLockWriteGuard has no stable map API). Next: P2 Send bounds
+(NativeAnalyzeFn + eval.extra), then P3 demand futures, P4 the pool
+(RazelEvalParallelPlan.md).

@@ -72,12 +72,27 @@ pub(crate) fn assert_target(
 /// The Session's live fact store (E0d — the DDS IS the store): lazily initialized with the
 /// registry schemas; [`crate::deps::record_target`] asserts each target as it analyzes, and both
 /// dep-resolution paths fold over it directly — no per-dep rebuild, no snapshot clones.
-pub(crate) fn session_dds<'s>(sess: &'s crate::state::Session) -> std::cell::RefMut<'s, Dds> {
+pub(crate) fn session_dds<'s>(
+    sess: &'s crate::state::Session,
+) -> impl std::ops::DerefMut<Target = Dds> + 's {
     let mut o = sess.dds.borrow_mut();
     if o.is_none() {
         *o = Some(new_store());
     }
-    std::cell::RefMut::map(o, |o| o.as_mut().expect("just initialized"))
+    // Guard-mapping for RwLockWriteGuard (no stable map API): a Deref shim over the guard.
+    struct DdsGuard<'a>(std::sync::RwLockWriteGuard<'a, Option<Dds>>);
+    impl std::ops::Deref for DdsGuard<'_> {
+        type Target = Dds;
+        fn deref(&self) -> &Dds {
+            self.0.as_ref().expect("just initialized")
+        }
+    }
+    impl std::ops::DerefMut for DdsGuard<'_> {
+        fn deref_mut(&mut self) -> &mut Dds {
+            self.0.as_mut().expect("just initialized")
+        }
+    }
+    DdsGuard(o)
 }
 
 /// Build a standalone [`Dds`] from analyzed targets (tests + offline analysis; the LIVE store is

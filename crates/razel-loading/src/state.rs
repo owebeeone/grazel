@@ -83,19 +83,35 @@ pub(crate) struct AnalysisState {
 /// `eval_build_src`): every borrow is kept short and **never held across an `eval_*` call**
 /// (the [R1] discipline — a held `results`/`state` borrow across a nested eval would
 /// double-borrow-panic). Multiple `Session`s coexist → multi-instance analysis (F24).
+/// P1 (eval worker-pool plan): a `RefCell`-shaped wrapper over `RwLock` — same
+/// `borrow()`/`borrow_mut()` API, so the ~27 Session fields convert without touching call
+/// sites. RefCell's discipline ([R1]: never hold a borrow across a nested eval) becomes lock
+/// discipline; a violation deadlocks where RefCell panicked — caught by the suite/sentinels.
+#[derive(Default)]
+pub(crate) struct SyncCell<T>(std::sync::RwLock<T>);
+
+impl<T> SyncCell<T> {
+    pub(crate) fn borrow(&self) -> std::sync::RwLockReadGuard<'_, T> {
+        self.0.read().expect("SyncCell poisoned")
+    }
+    pub(crate) fn borrow_mut(&self) -> std::sync::RwLockWriteGuard<'_, T> {
+        self.0.write().expect("SyncCell poisoned")
+    }
+}
+
 #[derive(Default, ProvidesStaticType)]
 pub(crate) struct Session {
-    pub(crate) state: RefCell<AnalysisState>,
+    pub(crate) state: SyncCell<AnalysisState>,
     /// Analyzed targets by **canonical label** → providers, so a dependent's `deps` reads
     /// them (cross-target/-package provider flow). Bare name in single-package mode,
     /// `//pkg:name` in a workspace. This map is the embryonic DDS fact store.
-    pub(crate) results: RefCell<BTreeMap<String, AnalyzedTarget>>,
+    pub(crate) results: SyncCell<BTreeMap<String, AnalyzedTarget>>,
     /// Toolchain configs declared via `define_config` (host-config selection, D7).
-    pub(crate) configs: RefCell<Vec<String>>,
+    pub(crate) configs: SyncCell<Vec<String>>,
     /// The package currently being evaluated (`None` ⇒ single-package mode).
-    pub(crate) current_pkg: RefCell<Option<String>>,
+    pub(crate) current_pkg: SyncCell<Option<String>>,
     /// Packages whose BUILD has been loaded (cycle/repeat guard).
-    pub(crate) loaded: RefCell<HashSet<String>>,
+    pub(crate) loaded: SyncCell<HashSet<String>>,
     /// Workspace root (multi-package mode); `None` ⇒ single-package. Set once.
     pub(crate) workspace: Option<PathBuf>,
     /// CLI flags riding every cc action (`--copt`/`--linkopt`/`-c`). Set once.
@@ -103,76 +119,76 @@ pub(crate) struct Session {
     /// The resolved native (host) cc compiler, walked from `PATH` **once per Session** (AD2: not a
     /// process global — F13). `None` until first use; a different analysis (different PATH/toolchain)
     /// re-resolves because it's a fresh `Session`.
-    pub(crate) resolved_cc: RefCell<Option<String>>,
+    pub(crate) resolved_cc: SyncCell<Option<String>>,
     /// E0 phase split: declared-but-not-yet-analyzed targets (canonical label → index into the
     /// current package's declaration store). Registered at record time (BUILD eval), consumed by the
     /// demand-driven analysis pass — this is what makes forward references resolve. Entries belong to
     /// the package currently being driven; a nested `load_package` drains its own before returning.
-    pub(crate) pending: RefCell<BTreeMap<String, usize>>,
+    pub(crate) pending: SyncCell<BTreeMap<String, usize>>,
     /// Targets currently mid-analysis (cycle detection for the demand-driven pass).
-    pub(crate) analyzing: RefCell<HashSet<String>>,
+    pub(crate) analyzing: SyncCell<HashSet<String>>,
     /// E0c: deferred native-rule analysis bodies, indexed by the declaration store's
     /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
     /// `Value`s — so they need no GC tracing and can live on the Session).
-    pub(crate) native_decls: RefCell<Vec<Option<NativeAnalyzeFn>>>,
+    pub(crate) native_decls: SyncCell<Vec<Option<NativeAnalyzeFn>>>,
     /// Undriven NATIVE decls of completed packages: label → `native_decls` index. Native
     /// bodies capture only plain data, so they run on demand in any later eval (the
     /// cross-package twin of `deferred_decls`).
-    pub(crate) deferred_natives: RefCell<std::collections::HashMap<String, usize>>,
+    pub(crate) deferred_natives: SyncCell<std::collections::HashMap<String, usize>>,
     /// Output-FILE labels → (producing target, qualified output path). Registered at DECLARE
     /// time (genrule outs are static), so file labels naming generated outputs resolve.
-    pub(crate) output_index: RefCell<std::collections::HashMap<String, (String, String)>>,
+    pub(crate) output_index: SyncCell<std::collections::HashMap<String, (String, String)>>,
     /// The (repo, pkg) of the module currently being loaded/evaluated (BzlLoader + BUILD-eval
     /// maintained; repo == "" ⇒ the main workspace). String labels written in module code —
     /// `Label()`, select keys, attr DEFAULTS — bind against it (Bazel's lexical binding).
-    pub(crate) current_bzl_repo: RefCell<Vec<Option<(String, String)>>>,
+    pub(crate) current_bzl_repo: SyncCell<Vec<Option<(String, String)>>>,
     /// `alias()` targets (canonical name → canonical actual) — conditions resolve through them.
-    pub(crate) aliases: RefCell<BTreeMap<String, String>>,
+    pub(crate) aliases: SyncCell<BTreeMap<String, String>>,
     /// Declared `config_setting` specs by canonical label — what `select()` matches (razelV3).
-    pub(crate) config_specs: RefCell<BTreeMap<String, ConfigSpec>>,
+    pub(crate) config_specs: SyncCell<BTreeMap<String, ConfigSpec>>,
     /// Session-wide `.bzl` module cache (canonical label → frozen module). ONE evaluation per
     /// `.bzl` per Session — provider identities (`dep[MyInfo]` ptr-eq) hold across packages,
     /// and TF's macro layer evaluates once, not per-package.
-    pub(crate) bzl_cache: RefCell<std::collections::HashMap<String, starlark::environment::FrozenModule>>,
+    pub(crate) bzl_cache: SyncCell<std::collections::HashMap<String, starlark::environment::FrozenModule>>,
     /// Harvested UNDRIVEN Starlark declarations (one frozen dict per dependency-loaded
     /// package) — analyzed on demand cross-package ([`crate::dialect`] `analyze_deferred`).
-    pub(crate) deferred_decls: RefCell<Vec<starlark::values::OwnedFrozenValue>>,
+    pub(crate) deferred_decls: SyncCell<Vec<starlark::values::OwnedFrozenValue>>,
     /// label → index into `deferred_decls` (the harvest owner) — O(1) demand lookups; the
     /// linear all-packages scan was quadratic on tree sweeps.
-    pub(crate) deferred_index: RefCell<std::collections::HashMap<String, usize>>,
+    pub(crate) deferred_index: SyncCell<std::collections::HashMap<String, usize>>,
     /// label → index into `cross_captured` (same fix for provider-instance lookups).
-    pub(crate) cross_index: RefCell<std::collections::HashMap<String, usize>>,
+    pub(crate) cross_index: SyncCell<std::collections::HashMap<String, usize>>,
     /// Once-per-session warning keys (tree sweeps turned per-call warnings into log storms).
-    pub(crate) warned: RefCell<std::collections::BTreeSet<String>>,
+    pub(crate) warned: SyncCell<std::collections::BTreeSet<String>>,
     /// Per-target transitive-fold memo (label → folded fields). The DDS fold was the tree-sweep
     /// hotspot: every dep edge re-walked its transitive closure; diamonds made it quadratic.
-    pub(crate) fold_cache: RefCell<std::collections::HashMap<String, Vec<(String, Vec<String>)>>>,
+    pub(crate) fold_cache: SyncCell<std::collections::HashMap<String, Vec<(String, Vec<String>)>>>,
     /// Host tool discovery memo (rustc path, cc path, sysroot): these were probed via
     /// PATH walks + an `xcrun` SPAWN on EVERY ctx construction — two-thirds of sweep CPU
     /// was kernel time. Environment-derived, constant per session.
-    pub(crate) host_tools: RefCell<Option<(String, String, String)>>,
+    pub(crate) host_tools: SyncCell<Option<(String, String, String)>>,
     /// Filesystem caches (the sweep profile was 60% `stat`/`getdirentries`): file-existence
     /// memo for the file-label fallbacks + per-directory RECURSIVE walk memo for glob()
     /// (it re-walked whole package trees per call).
-    pub(crate) exists_cache: RefCell<std::collections::HashMap<std::path::PathBuf, bool>>,
+    pub(crate) exists_cache: SyncCell<std::collections::HashMap<std::path::PathBuf, bool>>,
     pub(crate) walk_cache:
-        RefCell<std::collections::HashMap<std::path::PathBuf, std::sync::Arc<Vec<String>>>>,
+        SyncCell<std::collections::HashMap<std::path::PathBuf, std::sync::Arc<Vec<String>>>>,
     /// glob() RESULT memo, keyed (package dir, include, exclude) — after the walk cache,
     /// pattern-matching huge trees per call was the top CPU frame (TF macros repeat globs).
-    pub(crate) glob_cache: RefCell<
+    pub(crate) glob_cache: SyncCell<
         std::collections::HashMap<(std::path::PathBuf, String, String), std::sync::Arc<Vec<String>>>,
     >,
     /// Pre-parsed BUILD ASTs (key = the eval name, `{pkg}/BUILD`): read+parse is pure and
     /// parallelizes across files; the sequential eval consumes them (load+parse / execute split).
-    pub(crate) ast_cache: RefCell<std::collections::HashMap<String, starlark::syntax::AstModule>>,
+    pub(crate) ast_cache: SyncCell<std::collections::HashMap<String, starlark::syntax::AstModule>>,
     /// Layer 0: harvested provider instances from COMPLETED packages (one frozen dict per
     /// package: canonical label → [(constructor, instance)]). OwnedFrozenValues keep their
     /// heaps alive; `dep[P]` falls back here for cross-package instances.
-    pub(crate) cross_captured: RefCell<Vec<starlark::values::OwnedFrozenValue>>,
+    pub(crate) cross_captured: SyncCell<Vec<starlark::values::OwnedFrozenValue>>,
     /// E0d: the Session's live fact store — the DDS IS the store. `None` until first use (lazy
     /// schema registration); access via [`crate::dds::session_dds`]. Targets assert incrementally
     /// at `record_target`; folds read this directly (no per-dep rebuild — O(n), not O(n²)).
-    pub(crate) dds: RefCell<Option<razel_dds::Dds>>,
+    pub(crate) dds: SyncCell<Option<razel_dds::Dds>>,
 }
 
 /// A deferred native-rule analysis body (E0c): the rule fn's work, run by the demand-driven pass.
