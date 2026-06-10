@@ -229,6 +229,23 @@ pub(crate) fn host_cpu() -> &'static str {
     }
 }
 
+/// Does a `constraint_value` (package family, value name) describe the REAL host? `@platforms`'
+/// os/cpu families match the host; foreign constraint families are conservative-false.
+pub(crate) fn host_constraint_matches(pkg: &str, name: &str) -> bool {
+    let fam = pkg.rsplit('/').next().unwrap_or(pkg).trim_start_matches("@platforms//");
+    match fam {
+        "os" => match std::env::consts::OS {
+            "macos" => matches!(name, "osx" | "macos"),
+            os => name == os,
+        },
+        "cpu" => match std::env::consts::ARCH {
+            "aarch64" => matches!(name, "arm64" | "aarch64"),
+            arch => name == arch,
+        },
+        _ => false,
+    }
+}
+
 /// A `config_setting`'s declared constraints — what `select()` matches against the configuration.
 /// `values` keys razel models: `compilation_mode`, `define` (`"k=v"`); an unmodeled key errors
 /// loudly at match time (never a silent non-match).

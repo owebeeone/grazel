@@ -275,6 +275,48 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// `config_setting`/`test_suite`/`alias` carry no buildable output here, so they
     /// record an empty target under their label (analysis-visible, builds to nothing);
     /// `filegroup` forwards its `srcs` as its outputs so dependents resolve them.
+    /// Platform constraint rules (@platforms): `constraint_value` registers as a select
+    /// condition matched against the REAL host (os/cpu); foreign constraint families are
+    /// conservative-false. `constraint_setting`/`platform` are declare-only.
+    fn constraint_setting<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget { name: canon_label(sess, &name), ..Default::default() });
+        Ok(NoneType)
+    }
+    fn constraint_value<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        let canon = canon_label(sess, &name);
+        let pkg = sess.current_pkg.borrow().clone().unwrap_or_default();
+        let host_matches = crate::state::host_constraint_matches(&pkg, &name);
+        sess.config_specs.borrow_mut().insert(
+            canon.clone(),
+            crate::state::ConfigSpec {
+                // empty spec ⇒ always-match; unmodeled ⇒ never-match (CPU-host posture).
+                unmodeled: !host_matches,
+                ..Default::default()
+            },
+        );
+        record_target(sess, AnalyzedTarget { name: canon, ..Default::default() });
+        Ok(NoneType)
+    }
+    fn platform<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget { name: canon_label(sess, &name), ..Default::default() });
+        Ok(NoneType)
+    }
+
     /// `toolchain(...)` / `toolchain_type(...)` — toolchain registration targets (declare-only;
     /// resolution is L3).
     fn toolchain<'v>(

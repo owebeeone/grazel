@@ -8,11 +8,20 @@ use std::path::Path;
 /// Shared `glob()`/`native.glob()` implementation: scan the current package dir
 /// against the include/exclude patterns, package-relative, sorted.
 pub(crate) fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>) -> anyhow::Result<Vec<String>> {
-    let dir = sess
-        .workspace
-        .clone()
-        .zip(sess.current_pkg.borrow().clone())
-        .map(|(root, pkg)| root.join(&pkg));
+    // External packages (`@repo//pkg`) glob against the vendored repo's dir.
+    let dir = sess.current_pkg.borrow().clone().and_then(|pkg| {
+        if let Some(rest) = pkg.strip_prefix('@') {
+            let (repo, sub) = rest.split_once("//")?;
+            let base = sess.global.external_base.clone()?;
+            [repo.to_string(), repo.replace('_', "-")]
+                .iter()
+                .map(|d| base.join(d))
+                .find(|p| p.exists())
+                .map(|r| r.join(sub))
+        } else {
+            sess.workspace.clone().map(|root| root.join(&pkg))
+        }
+    });
     let Some(dir) = dir else {
         return Err(anyhow::anyhow!(
             "glob() needs a package on disk — use the workspace build path"

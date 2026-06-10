@@ -82,6 +82,56 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
             items: RefCell::new(Vec::new()),
         }))
     }
+    /// `ctx.actions.symlink(output, target_file)` — a real `ln -sf` action.
+    fn symlink<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = named)] output: Value<'v>,
+        #[starlark(require = named)] target_file: Option<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        let output = file_path(output);
+        let target = target_file.map(file_path).unwrap_or_default();
+        with_current(sess, |c| {
+            c.actions.push(AnalyzedAction {
+                mnemonic: "Symlink".into(),
+                argv: vec!["/bin/ln".into(), "-sf".into(), target.clone(), output.clone()],
+                inputs: vec![target.clone()],
+                outputs: vec![output.clone()],
+            })
+        });
+        Ok(NoneType)
+    }
+    /// `ctx.actions.declare_directory` / `expand_template` / `run_shell` — loading-grade.
+    fn declare_directory<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        filename: String,
+    ) -> anyhow::Result<String> {
+        Ok(filename)
+    }
+    fn run_shell<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = named)] command: Option<Value<'v>>,
+        #[starlark(require = named)] outputs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] inputs: Option<UnpackList<Value<'v>>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        let cmd = command.map(file_path).unwrap_or_default();
+        let outs: Vec<String> = outputs.map(|l| l.items.iter().map(|v| file_path(*v)).collect()).unwrap_or_default();
+        let ins: Vec<String> = inputs.map(|l| l.items.iter().map(|v| file_path(*v)).collect()).unwrap_or_default();
+        with_current(sess, |c| {
+            c.actions.push(AnalyzedAction {
+                mnemonic: "RunShell".into(),
+                argv: vec!["/bin/bash".into(), "-c".into(), cmd.clone()],
+                inputs: ins.clone(),
+                outputs: outs.clone(),
+            })
+        });
+        Ok(NoneType)
+    }
     fn write<'v>(
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = named)] output: Value<'v>,
@@ -296,6 +346,11 @@ impl<'v> StarlarkValue<'v> for File {
         let base = p.rsplit('/').next().unwrap_or(p);
         match name {
             "path" | "short_path" => Some(heap.alloc(p.to_string())),
+            // Source vs generated: razel's loading-grade heuristic — generated paths live under
+            // an output prefix (bazel-out/); everything else is a source file.
+            "is_source" => Some(Value::new_bool(!p.starts_with("bazel-out/"))),
+            "owner" => Some(Value::new_none()),
+            "root" => Some(heap.alloc(crate::engine::Absorb)),
             "basename" => Some(heap.alloc(base.to_string())),
             "dirname" => {
                 Some(heap.alloc(p.rsplit_once('/').map(|x| x.0).unwrap_or("").to_string()))

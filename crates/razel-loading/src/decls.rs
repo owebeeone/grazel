@@ -744,17 +744,23 @@ pub(crate) fn analyze_rule_decl<'v>(
     let ctx = heap.alloc_complex_no_freeze(Ctx {
             attr: heap.alloc(AllocStruct(fields)),
             actions: heap.alloc_complex_no_freeze(Actions),
-            // `ctx.label` is a Label struct (`.package`/`.name`) — razel's cc:defs.bzl reads them
-            // for the path model. package is the current pkg (empty in single-package mode).
+            // `ctx.label` is a real Label value (.package/.name/.workspace_root; canonical str()).
             label: {
-                let pkg = sess.current_pkg.borrow().clone().unwrap_or_default();
-                heap.alloc(AllocStruct([
-                    ("package".to_string(), heap.alloc(pkg)),
-                    ("name".to_string(), heap.alloc(name.clone())),
-                ]))
+                let cur = sess.current_pkg.borrow().clone().unwrap_or_default();
+                let (repo, pkg) = match cur.strip_prefix('@') {
+                    Some(rest) => match rest.split_once("//") {
+                        Some((r, p)) => (Some(format!("@{r}")), p.to_string()),
+                        None => (None, cur.clone()),
+                    },
+                    None => (None, cur.clone()),
+                };
+                heap.alloc(LabelV { repo, package: pkg, name: name.clone() })
             },
             outputs: heap.alloc(AllocStruct(outputs_fields)),
-            files: heap.alloc(AllocStruct(files_fields)),
+            files: heap.alloc_complex_no_freeze(crate::ctxv::FilesNs {
+                fields: files_fields.clone(),
+            }),
+            file: heap.alloc_complex_no_freeze(crate::ctxv::FileNs { fields: files_fields }),
             executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
             toolchains: toolchain_map(heap),
             build_setting_value: kwargs

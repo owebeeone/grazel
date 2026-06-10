@@ -30,6 +30,8 @@ pub(crate) struct Ctx<'v> {
     pub(crate) toolchains: Value<'v>,
     /// `ctx.build_setting_value` — the declared `build_setting_default` (no flag overrides yet).
     pub(crate) build_setting_value: Value<'v>,
+    /// `ctx.file.<attr>` — single file of a label attr (first of files; None when absent).
+    pub(crate) file: Value<'v>,
 }
 
 
@@ -57,8 +59,17 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
             "files" => Some(self.files),
             "executable" => Some(self.executable),
             "toolchains" => Some(self.toolchains),
-            "fragments" | "configuration" => Some(ctx_absorb(_heap)),
+            // Layer-2 members, ABSORBED for analysis-shape (real values = Layer-3 action
+            // goldens; registered debt): file/runfiles/expand_location/expand_make_variables,
+            // bin_dir/genfiles_dir/var/workspace_name/features.
+            "fragments" | "configuration" | "runfiles" | "expand_location"
+            | "expand_make_variables" | "bin_dir" | "genfiles_dir" | "var" | "coverage_instrumented" => {
+                Some(ctx_absorb(_heap))
+            }
+            "workspace_name" => Some(_heap.alloc("")),
+            "features" | "disabled_features" => Some(_heap.alloc(Vec::<Value<'v>>::new())),
             "build_setting_value" => Some(self.build_setting_value),
+            "file" => Some(self.file),
             _ => None,
         }
     }
@@ -117,4 +128,57 @@ impl<'v> StarlarkValue<'v> for ToolchainMap<'v> {
 pub(crate) fn toolchain_map<'v>(heap: Heap<'v>) -> Value<'v> {
     let entries = crate::toolchains::toolchain_rows(heap);
     heap.alloc_complex_no_freeze(ToolchainMap { entries })
+}
+
+
+/// `ctx.files` — declared fields, with MISSING attrs defaulting to `[]` (Bazel: every schema
+/// attr exists on ctx.files; omitted label_lists are empty).
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+pub(crate) struct FilesNs<'v> {
+    pub(crate) fields: Vec<(String, Value<'v>)>,
+}
+
+impl fmt::Display for FilesNs<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<ctx.files>")
+    }
+}
+
+#[starlark_value(type = "ctx_files")]
+impl<'v> StarlarkValue<'v> for FilesNs<'v> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        Some(
+            self.fields
+                .iter()
+                .find(|(k, _)| k == attribute)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| heap.alloc(Vec::<Value<'v>>::new())),
+        )
+    }
+}
+
+
+/// `ctx.file` — the SINGLE file of a label attr (first of `ctx.files.<attr>`; `None` if absent).
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+pub(crate) struct FileNs<'v> {
+    pub(crate) fields: Vec<(String, Value<'v>)>,
+}
+
+impl fmt::Display for FileNs<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<ctx.file>")
+    }
+}
+
+#[starlark_value(type = "ctx_file")]
+impl<'v> StarlarkValue<'v> for FileNs<'v> {
+    fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
+        let v = self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| *v);
+        Some(match v {
+            Some(list) => starlark::values::list::ListRef::from_value(list)
+                .and_then(|l| l.iter().next())
+                .unwrap_or_else(Value::new_none),
+            None => Value::new_none(),
+        })
+    }
 }

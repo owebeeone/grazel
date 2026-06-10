@@ -248,6 +248,13 @@ impl<'v> starlark::values::StarlarkValue<'v> for Absorb {
     ) -> starlark::Result<Value<'v>> {
         Ok(heap.alloc(Absorb))
     }
+    /// Absorption flows through operators (`absorbed + s`, `s + absorbed`).
+    fn add(&self, _other: Value<'v>, heap: starlark::values::Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
+        Some(Ok(heap.alloc(Absorb)))
+    }
+    fn radd(&self, _lhs: Value<'v>, heap: starlark::values::Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
+        Some(Ok(heap.alloc(Absorb)))
+    }
 }
 
 /// The Bazel `attr.*` namespace: declares a rule's attribute schema. razel's `rule()`
