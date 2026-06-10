@@ -194,12 +194,12 @@ pub(crate) struct Session {
 /// A deferred native-rule analysis body (E0c): the rule fn's work, run by the demand-driven pass.
 /// MUST capture only plain data (no starlark `Value`s — they would be invisible to the GC).
 pub(crate) type NativeAnalyzeFn =
-    Box<dyn for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()>>;
+    Box<dyn for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()> + Send + Sync>;
 
 /// Coerce a closure to [`NativeAnalyzeFn`] (pins the higher-ranked lifetimes for inference).
 pub(crate) fn native_decl<F>(f: F) -> NativeAnalyzeFn
 where
-    F: for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()> + 'static,
+    F: for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()> + Send + Sync + 'static,
 {
     Box::new(f)
 }
@@ -588,4 +588,14 @@ pub(crate) fn host_tools(sess: &Session) -> (String, String, String) {
     let t = (find("rustc"), find("cc"), sysroot);
     *sess.host_tools.borrow_mut() = Some(t.clone());
     t
+}
+
+#[cfg(test)]
+mod sync_assertions {
+    /// P2 (worker-pool plan): the Session must be shareable across workers.
+    #[test]
+    fn session_is_send_and_sync() {
+        fn assert_sync<T: Send + Sync>() {}
+        assert_sync::<super::Session>();
+    }
 }
