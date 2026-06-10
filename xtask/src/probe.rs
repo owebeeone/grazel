@@ -64,7 +64,7 @@ const PROBES: &[Probe] = &[
         build: "",
         files: &[],
         real: Some(("third-party/tensorflow", "//tensorflow/core/lib/jxl/testdata:testdata")),
-        must_pass: false,
+        must_pass: true,
     },
     Probe {
         name: "tf-load-cc",

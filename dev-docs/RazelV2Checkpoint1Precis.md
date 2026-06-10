@@ -241,3 +241,33 @@ integration cherry-picked clean. The ctx-member batch is the fleet's first real 
 **Note (Gianni):** the host materializations live OUTSIDE razel's repo:
 `third-party/cc_compatibility_proxy/`, `third-party/bazel_tools/` (+ the rules_cc clone) —
 razel-authored content that should be committed in glial-dev.
+
+## Round delta — razelV3 round 5, autonomous session (2026-06-10)
+
+**MILESTONE — `tf-load-leaf: OK`: a real TensorFlow package (`//tensorflow/core/lib/jxl/testdata`)
+loads, declares, and analyzes end-to-end** through TF's full macro layer (tensorflow.default.bzl →
+tensorflow.bzl → XLA tsl → real rules_cc/skylib/protobuf machinery). ~25 frontiers cleared this
+session, all green-gated (`tf-load-walk-1/2/3`, `tf-leaf-loads`, plus select/Label/Depset reworks).
+
+**Substantive engine pieces landed:**
+- **Deferred select (Bazel's select-as-value):** select never resolves at load; SelectBranches +
+  SelectExpr (list+select concat, add/radd), Label-struct keys, resolution at attr consumption;
+  failed condition-package loads SURFACE. Hybrid eager path only for already-declared specs.
+- **Cross-repo label semantics:** repo-aware `Label` value (canonical str(), hashable);
+  canon_label/pkg_of/load_package handle `@repo//pkg`; EXTERNAL PACKAGE LOADING from the vendored
+  base; module load-context for BOTH external and workspace .bzl (relative loads resolve against
+  the module's own package/repo).
+- **Freeze-generic values:** ProviderInstance, SelectExpr/Branches, Depset — real .bzl construct
+  all of these at module level.
+- **Bazel native rules as BUILD globals** (cc_library/cc_binary/cc_test) + native.filegroup/alias.
+- **Host materializations from generators' own templates:** local_config_{cuda,rocm,sycl,tensorrt},
+  python_version_repo, tf_wheel_version_suffix, local_config_remote_execution,
+  proto_bazel_features, bazel_tools toolchain_utils — all compiled into the engine (host.rs);
+  host-false select conditions for generated GPU repos.
+- **Vendored** (repo manifest): xla (198M), com_google_protobuf, com_github_grpc_grpc,
+  rules_ml_toolchain, rules_proto.
+
+**Frontiers when paused:** tf-load-cc → skylib `config_setting_group` semantics
+(`//tensorflow:is_cuda_nvcc` — AND/OR condition groups need spec support);
+rules-rust-library → `ctx.toolchains` (the L2 boss, untouched this session).
+59 test bins + 3 gates + 4 probe sentinels green; tf-load-leaf is now a sentinel candidate.
