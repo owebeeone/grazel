@@ -56,10 +56,22 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
     /// build settings are registered debt).
     fn label_flag<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] build_setting_default: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
+        // A label flag/setting FORWARDS to its default target (providers flow through) —
+        // alias semantics; razel doesn't model flag overrides (registered debt).
+        if let Some(d) = build_setting_default {
+            let d = d.unpack_str().map(String::from).unwrap_or_else(|| d.to_string());
+            if !d.is_empty() {
+                let actual = crate::state::canon_label(sess, &d);
+                sess.aliases
+                    .borrow_mut()
+                    .insert(crate::state::canon_label(sess, &name), actual);
+            }
+        }
         crate::deps::record_target(sess, crate::state::AnalyzedTarget {
             name: crate::state::canon_label(sess, &name),
             ..Default::default()
@@ -68,10 +80,22 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
     }
     fn label_setting<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] build_setting_default: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
+        // A label flag/setting FORWARDS to its default target (providers flow through) —
+        // alias semantics; razel doesn't model flag overrides (registered debt).
+        if let Some(d) = build_setting_default {
+            let d = d.unpack_str().map(String::from).unwrap_or_else(|| d.to_string());
+            if !d.is_empty() {
+                let actual = crate::state::canon_label(sess, &d);
+                sess.aliases
+                    .borrow_mut()
+                    .insert(crate::state::canon_label(sess, &name), actual);
+            }
+        }
         crate::deps::record_target(sess, crate::state::AnalyzedTarget {
             name: crate::state::canon_label(sess, &name),
             ..Default::default()
@@ -252,6 +276,18 @@ impl<'v> starlark::values::StarlarkValue<'v> for Absorb {
     /// Absorbed values are FALSY (unknowns act empty — `if absorbed:` skips).
     fn to_bool(&self) -> bool {
         false
+    }
+    /// Absorbed unknowns compare EQUAL to None (`absorbed != None` is false — real rule code
+    /// probes optional config that way). Note `None == absorbed` still uses NoneType's equals.
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        use starlark::values::ValueLike;
+        Ok(other.is_none() || other.downcast_ref::<Absorb>().is_some())
+    }
+    /// Absorbed values are dict-key-able (one identity — consistent with equals).
+    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+        use std::hash::Hash;
+        "razel-absorbed".hash(hasher);
+        Ok(())
     }
     /// Absorbed collections iterate as empty (`for x in absorbed` yields nothing).
     fn iterate_collect(&self, _heap: starlark::values::Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {

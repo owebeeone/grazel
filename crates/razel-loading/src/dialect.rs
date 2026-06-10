@@ -38,7 +38,8 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // D1: keep the declared schema (was discarded) — instantiation consults it for defaults +
         // mandatory. alloc (freezable) so the rule survives module.freeze() (defined in a .bzl + load()ed).
         let attrs = attrs.unwrap_or_else(Value::new_none);
-        Ok(eval.heap().alloc(RuleObjGen { implementation, attrs }))
+        let outputs = _kw.get("outputs").copied().unwrap_or_else(Value::new_none);
+        Ok(eval.heap().alloc(RuleObjGen { implementation, attrs, outputs }))
     }
 
     /// `provider(doc=?, fields=?, init=?)` → a callable provider constructor (D4.2). With `init`
@@ -370,10 +371,22 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// `label_flag`/`label_setting` — build-setting label flags as BUILD globals (declare-only).
     fn label_flag<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] build_setting_default: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
+        // A label flag/setting FORWARDS to its default target (providers flow through) —
+        // alias semantics; razel doesn't model flag overrides (registered debt).
+        if let Some(d) = build_setting_default {
+            let d = d.unpack_str().map(String::from).unwrap_or_else(|| d.to_string());
+            if !d.is_empty() {
+                let actual = crate::state::canon_label(sess, &d);
+                sess.aliases
+                    .borrow_mut()
+                    .insert(crate::state::canon_label(sess, &name), actual);
+            }
+        }
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             ..Default::default()
@@ -382,10 +395,22 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     }
     fn label_setting<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] build_setting_default: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
+        // A label flag/setting FORWARDS to its default target (providers flow through) —
+        // alias semantics; razel doesn't model flag overrides (registered debt).
+        if let Some(d) = build_setting_default {
+            let d = d.unpack_str().map(String::from).unwrap_or_else(|| d.to_string());
+            if !d.is_empty() {
+                let actual = crate::state::canon_label(sess, &d);
+                sess.aliases
+                    .borrow_mut()
+                    .insert(crate::state::canon_label(sess, &name), actual);
+            }
+        }
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             ..Default::default()
@@ -419,6 +444,14 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             Some(c) => c,
             None => return Err(anyhow::anyhow!("genrule `{name}` needs cmd (or cmd_bash)")),
         };
+        // Output-file labels resolve statically (Bazel: outs are targets) — index them now.
+        {
+            let sess = session(eval);
+            let mut idx = sess.output_index.borrow_mut();
+            for o in &outs.items {
+                idx.insert(canon_label(sess, o), (label.clone(), qualify(sess, o)));
+            }
+        }
         record_native(eval, label, crate::state::native_decl(move |eval| {
             let sess = session(eval);
             // Split srcs: labels resolve to their files (their package loads/analyzes on
@@ -438,8 +471,19 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                     inputs.push(q);
                 }
             }
+            let outs_raw: Vec<String> = outs.items.clone();
             let outs: Vec<String> = outs.items.iter().map(|o| qualify(sess, o)).collect();
-            let expanded = expand_genrule_cmd(&cmd, &inputs, &outs, &loc)?;
+            // $(@D)/$(RULEDIR): the package's output root — qualified out minus the
+            // as-written path (single-out @D is the output's own directory).
+            let out_dir = match (outs.first(), outs_raw.first()) {
+                (Some(q), Some(raw)) if outs.len() > 1 => q
+                    .strip_suffix(raw.as_str())
+                    .map(|d| d.trim_end_matches('/').to_string())
+                    .unwrap_or_default(),
+                (Some(q), _) => q.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default(),
+                _ => String::new(),
+            };
+            let expanded = expand_genrule_cmd(&cmd, &inputs, &outs, &loc, &out_dir)?;
             record_target(sess, AnalyzedTarget {
                 name: canon_label(sess, &name),
                 deps,

@@ -158,8 +158,19 @@ def _get_artifact_name_for_category(*, cc_toolchain = None, category = None, out
     # (executables keep their name; lib naming arrives with the link goldens).
     return output_name
 
+def _action_is_enabled(*, feature_configuration = None, action_name = "", **_kwargs):
+    # Host posture: the actions razel can actually run are enabled (strip/link/compile).
+    return action_name in ("strip", "c++-compile", "c-compile", "c++-link-executable",
+                           "c++-link-static-library", "c++-link-dynamic-library")
+
+def _get_tool_for_action(*, feature_configuration = None, action_name = "", **_kwargs):
+    # REAL host tools by action class (PATH-resolved at run): strip → strip, else the driver.
+    return "strip" if action_name == "strip" else "cc"
+
 cc_common = razel_host_absorb_with({
     "is_cc_toolchain_resolution_enabled_do_not_use": _toolchain_resolution_enabled,
+    "action_is_enabled": _action_is_enabled,
+    "get_tool_for_action": _get_tool_for_action,
     "compile": _compile,
     "merge_compilation_contexts": _merge_compilation_contexts,
     "create_compilation_context": _create_compilation_context,

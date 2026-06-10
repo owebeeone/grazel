@@ -64,8 +64,23 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
             // Layer-2 members, ABSORBED for analysis-shape (real values = Layer-3 action
             // goldens; registered debt): file/runfiles/expand_location/expand_make_variables,
             // bin_dir/genfiles_dir/var/workspace_name/features.
-            "fragments" | "configuration" | "runfiles" | "expand_location"
-            | "expand_make_variables" | "bin_dir" | "genfiles_dir" | "coverage_instrumented" => {
+            // ctx.fragments: known-None config fields are REAL None (Bazel defaults real
+            // impls branch on — custom_malloc); everything else absorbs.
+            "fragments" => {
+                let none = Value::new_none();
+                let cpp = _heap.alloc(crate::engine::AbsorbWith {
+                    overrides: vec![("custom_malloc".to_string(), none)],
+                });
+                Some(_heap.alloc(crate::engine::AbsorbWith {
+                    overrides: vec![("cpp".to_string(), cpp)],
+                }))
+            }
+            // bin_dir/genfiles_dir carry a real .path (matches ctx.var["BINDIR"]).
+            "bin_dir" | "genfiles_dir" => Some(_heap.alloc(crate::engine::AbsorbWith {
+                overrides: vec![("path".to_string(), _heap.alloc("bazel-out/bin"))],
+            })),
+            "configuration" | "runfiles" | "expand_location"
+            | "expand_make_variables" | "coverage_instrumented" => {
                 Some(ctx_absorb(_heap))
             }
             "workspace_name" => Some(_heap.alloc("")),

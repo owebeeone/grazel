@@ -61,9 +61,11 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
         #[starlark(require = named)] sibling: Option<Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
+        // Outputs live in the declaring package's output dir (exec-root form) — owner /
+        // workspace_root derive from the path.
         let path = match sibling.map(file_path).as_deref().and_then(|s| s.rsplit_once('/')) {
             Some((dir, _)) => format!("{dir}/{filename}"),
-            None => filename,
+            None => crate::state::qualify(session(eval), &filename),
         };
         Ok(eval.heap().alloc(File { path }))
     }
@@ -121,7 +123,7 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
         // sibling: declare next to an existing file (same directory).
         let path = match sibling.map(file_path).as_deref().and_then(|s| s.rsplit_once('/')) {
             Some((dir, _)) => format!("{dir}/{filename}"),
-            None => filename,
+            None => crate::state::qualify(session(eval), &filename),
         };
         Ok(eval.heap().alloc(File { path }))
     }
@@ -151,9 +153,9 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
     }
     fn write<'v>(
         #[starlark(this)] _this: Value<'v>,
-        #[starlark(require = named)] output: Value<'v>,
-        #[starlark(require = named)] content: Option<String>,
-        #[starlark(require = named)] is_executable: Option<bool>,
+        output: Value<'v>,
+        content: Option<String>,
+        is_executable: Option<bool>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
@@ -249,7 +251,7 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
     }
     fn use_param_file<'v>(
         #[starlark(this)] _this: Value<'v>,
-        #[starlark(require = pos)] _flag: String,
+        _flag: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         Ok(NoneType)
@@ -449,16 +451,29 @@ impl<'v> StarlarkValue<'v> for File {
         let p = self.path.as_str();
         let base = p.rsplit('/').next().unwrap_or(p);
         match name {
-            "path" | "short_path" => Some(heap.alloc(p.to_string())),
+            "path" => Some(heap.alloc(p.to_string())),
+            // Bazel short_path: external files are `../<repo>/<pkg>/<file>`.
+            "short_path" => Some(match p.strip_prefix("external/") {
+                Some(rest) => heap.alloc(format!("../{rest}")),
+                None => heap.alloc(p.to_string()),
+            }),
             // Source vs generated: razel's loading-grade heuristic — generated paths live under
             // an output prefix (bazel-out/); everything else is a source file.
             "is_source" => Some(Value::new_bool(!p.starts_with("bazel-out/"))),
             // The generating label, derived from the path (package = dir, name = base) —
             // enough for owner.package/owner.name comparisons in real impls.
             "owner" => {
-                let (pkg, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
+                // `external/<repo>/…` paths derive an external owner label.
+                let (repo, rel) = match self.path.strip_prefix("external/") {
+                    Some(rest) => match rest.split_once('/') {
+                        Some((r, rel)) => (Some(format!("@{r}")), rel),
+                        None => (None, self.path.as_str()),
+                    },
+                    None => (None, self.path.as_str()),
+                };
+                let (pkg, name) = rel.rsplit_once('/').unwrap_or(("", rel));
                 Some(heap.alloc(crate::labels::LabelV {
-                    repo: None,
+                    repo,
                     package: pkg.to_string(),
                     name: name.to_string(),
                 }))

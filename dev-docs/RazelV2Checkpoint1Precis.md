@@ -364,3 +364,25 @@ toolchain_type); bare `@repo` ≡ `@repo//:repo` canon; genrule cmd_bash; @absei
 + zlib vendored. Frontier: `CcInfo in dep` where a dep item is None (cc_binary's runtimes path)
 — next probe step, then the link-stage members of cc_common as the walk demands them.
 60 bins; 3 gates; 5 sentinels.
+
+## Round delta — razelV3 round 11 (2026-06-10)
+
+**cc_binary_impl COMPLETED (protoc's cc side); the walk is now inside protobuf's proto pipeline
+— proto_library → proto_common.compile (descriptor sets) → proto_lang_toolchain →
+cc_proto_library, with TF's own //tensorflow/core:protos_all as the consumer.** Landed:
+ALIAS FORWARDING everywhere (deps arm + resolve_dep follow `aliases` chains; label_flag/
+label_setting forward to build_setting_default — flag targets carry providers);
+OUTPUT-FILE LABELS (Session.output_index registered at genrule declare-time — `outs` are
+targets, zlib's copy_public_headers pattern); EXEC-ROOT path semantics (qualify →
+`external/<repo>/…` for external packages; File.short_path → `../<repo>/…`; File.owner
+repo-aware; LabelV.workspace_name/workspace_root real; declare_file outputs package-qualified);
+ctx.fragments.cpp.custom_malloc = real None (AbsorbWith); implicit-output templates
+(rule(outputs={"%{name}.stripped"})); $(@D)/$(RULEDIR); genrule cmd_bash + named glob(include=);
+strip-action tools (action_is_enabled/get_tool_for_action host overrides); 3-positional
+actions.write; hashable+None-equal Absorb; @bazel_tools//tools/proto host package (aliases to
+protobuf's own toolchains); files_to_run synthesis; demand-analysis instance visibility
+(re-analyze deferred decls in the demanding consumer's eval).
+
+**Frontier:** ProtoInfo identity mismatch at cc_proto_library.bzl:150 — protos_all carries 1
+provider pair that ptr-misses the consumer's ProtoInfo; needs ctor-identity tracing (which
+module's ProtoInfo instance vs which consumer's). 60 bins; 3 gates; 5 sentinels.

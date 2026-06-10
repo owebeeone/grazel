@@ -11,6 +11,7 @@ pub(crate) fn expand_genrule_cmd(
     srcs: &[String],
     outs: &[String],
     loc: &[(String, Vec<String>)],
+    out_dir: &str,
 ) -> anyhow::Result<String> {
     let lookup = |x: &str| -> anyhow::Result<&Vec<String>> {
         loc.iter()
@@ -40,6 +41,11 @@ pub(crate) fn expand_genrule_cmd(
                 match inner.split_once(' ') {
                     None if inner == "SRCS" => out.push_str(&srcs.join(" ")),
                     None if inner == "OUTS" => out.push_str(&outs.join(" ")),
+                    None if inner == "@D" || inner == "RULEDIR" => out.push_str(out_dir),
+                    None if inner == "@" => match outs {
+                        [one] => out.push_str(one),
+                        _ => return Err(anyhow::anyhow!("$(@) needs exactly one output")),
+                    },
                     // rootpath/execpath: runfiles- vs exec-rooted forms — identical in razel's
                     // single-root model; resolved like location.
                     Some(("location" | "rootpath" | "execpath", x)) => match lookup(x.trim())?.as_slice() {

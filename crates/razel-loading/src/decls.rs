@@ -39,6 +39,9 @@ pub(crate) struct RuleObjGen<V: ValueLifetimeless> {
     /// The declared `attrs` schema (name → attr descriptor), frozen with the rule and consulted at
     /// instantiation for defaults / `mandatory` (D1). `None` when no schema was declared.
     pub(crate) attrs: V,
+    /// `rule(outputs = {"attr": "%{name}.ext"})` — implicit-output templates; expanded into
+    /// `ctx.outputs.<attr>` Files at instantiation. `None` when undeclared.
+    pub(crate) outputs: V,
 }
 
 
@@ -255,12 +258,14 @@ pub(crate) fn decl_store<'v>(eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<&'v
 }
 
 
-/// A rule value's (implementation, attrs-schema), frozen or not.
-pub(crate) fn rule_parts<'v>(rule: Value<'v>) -> anyhow::Result<(Value<'v>, Value<'v>)> {
+/// A rule value's (implementation, attrs-schema, outputs-templates), frozen or not.
+pub(crate) fn rule_parts<'v>(
+    rule: Value<'v>,
+) -> anyhow::Result<(Value<'v>, Value<'v>, Value<'v>)> {
     if let Some(r) = rule.downcast_ref::<RuleObj<'v>>() {
-        Ok((r.implementation, r.attrs))
+        Ok((r.implementation, r.attrs, r.outputs))
     } else if let Some(r) = rule.downcast_ref::<FrozenRuleObj>() {
-        Ok((r.implementation.to_value(), r.attrs.to_value()))
+        Ok((r.implementation.to_value(), r.attrs.to_value(), r.outputs.to_value()))
     } else {
         Err(anyhow::anyhow!("declaration's rule is not a rule value"))
     }
@@ -526,9 +531,20 @@ pub(crate) fn resolve_label_attr<'v>(
         let mut structs: Vec<Value<'v>> = Vec::new();
         for label in &labels {
             // Canonical label — bare in single-package mode, //pkg:name in a workspace.
-            let dep = canon_label(session(eval), label);
+            let mut dep = canon_label(session(eval), label);
             // E0: a forward-referenced local declaration analyzes on demand, first.
             ensure_analyzed(eval, &dep)?;
+            // Aliases forward to their `actual` (provider flow lives on the terminal target).
+            for _ in 0..32 {
+                let next = session(eval).aliases.borrow().get(&dep).cloned();
+                match next {
+                    Some(actual) => {
+                        dep = actual;
+                        ensure_analyzed(eval, &dep)?;
+                    }
+                    None => break,
+                }
+            }
             let sess = session(eval);
             // Cross-package dep: load its package on demand (mirrors resolve_dep);
             // a failed load SURFACES (silence turns into bogus "not declared").
@@ -554,6 +570,21 @@ pub(crate) fn resolve_label_attr<'v>(
             let files = match resolved {
                 Some(files) => files,
                 None => {
+                    // A file label naming a GENERATED output: resolve via the output index
+                    // (the producer analyzes on demand; the dep's file is the output path).
+                    let produced = sess.output_index.borrow().get(&dep).cloned();
+                    if let Some((producer, out_path)) = produced {
+                        ensure_analyzed(eval, &producer)?;
+                        let heap = eval.heap();
+                        let f = heap.alloc(crate::values::File { path: out_path });
+                        structs.push(heap.alloc(DepTarget {
+                            label: dep.clone(),
+                            fields: vec![("files".to_string(), heap.alloc(vec![f]))],
+                            providers: Vec::new(),
+                        }));
+                        dep_labels.push(producer);
+                        continue;
+                    }
                     // Bazel file-label semantics (L2): a label naming no declared target
                     // resolves to a SOURCE FILE in the package when that file exists
                     // (`srcs = ["lib.rs"]`). Source files are not target deps. External
@@ -648,6 +679,22 @@ pub(crate) fn resolve_label_attr<'v>(
             } else {
                 providers
             };
+            // Demand-analyzed-by-ANOTHER-consumer: the instances live in that consumer's
+            // (unfrozen, mid-load) module — invisible here. Re-analyze the harvested decl in
+            // THIS eval (idempotent: results overwrite by label) so instances are local.
+            let providers = if providers.is_empty()
+                && !session(eval).analyzing.borrow().contains(&dep)
+            {
+                analyze_deferred(eval, &dep)?;
+                decl_store(eval)?
+                    .captured
+                    .borrow()
+                    .get(&dep)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                providers
+            };
             structs.push(
                 heap.alloc(DepTarget { label: dep.clone(), fields: dfields, providers }),
             );
@@ -669,7 +716,7 @@ pub(crate) fn analyze_rule_decl<'v>(
     rule: Value<'v>,
     kwargs: &[(String, Value<'v>)],
 ) -> starlark::Result<()> {
-    let (implementation, attrs) = rule_parts(rule)?;
+    let (implementation, attrs, out_templates) = rule_parts(rule)?;
     // Deferred selects resolve HERE — attr consumption time (Bazel's model); conditions declared
     // anywhere in the loaded graph are visible by now.
     let kwargs: Vec<(String, Value<'v>)> = kwargs
@@ -780,10 +827,28 @@ pub(crate) fn analyze_rule_decl<'v>(
     // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
     // (qualified). ctx.executable is empty until an executable-label attr is wired.
     let mk_file = |s: &str| heap.alloc(File { path: qualify(sess, s) });
-    let outputs_fields: Vec<(String, Value<'v>)> = kwargs
+    let mut outputs_fields: Vec<(String, Value<'v>)> = Vec::new();
+    // Implicit outputs: rule(outputs = {"attr": "%{name}.ext"}) — templates expand with the
+    // target name into package-qualified Files on ctx.outputs.
+    if let Some(d) = starlark::values::dict::DictRef::from_value(out_templates) {
+        let name = kwargs
+            .iter()
+            .find(|(k, _)| k == "name")
+            .and_then(|(_, v)| v.unpack_str())
+            .unwrap_or_default()
+            .to_string();
+        for (k, tpl) in d.iter() {
+            if let (Some(k), Some(tpl)) = (k.unpack_str(), tpl.unpack_str()) {
+                let path = qualify(sess, &tpl.replace("%{name}", &name));
+                outputs_fields.push((k.to_string(), heap.alloc(File { path })));
+            }
+        }
+    }
+    let kw_outputs: Vec<(String, Value<'v>)> = kwargs
         .iter()
         .filter_map(|(k, v)| v.unpack_str().map(|s| (k.clone(), mk_file(s))))
         .collect();
+    outputs_fields.extend(kw_outputs);
     let files_fields: Vec<(String, Value<'v>)> = kwargs
         .iter()
         .filter_map(|(k, v)| {

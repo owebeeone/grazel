@@ -119,6 +119,9 @@ pub(crate) struct Session {
     /// bodies capture only plain data, so they run on demand in any later eval (the
     /// cross-package twin of `deferred_decls`).
     pub(crate) deferred_natives: RefCell<std::collections::HashMap<String, usize>>,
+    /// Output-FILE labels → (producing target, qualified output path). Registered at DECLARE
+    /// time (genrule outs are static), so file labels naming generated outputs resolve.
+    pub(crate) output_index: RefCell<std::collections::HashMap<String, (String, String)>>,
     /// The (repo, pkg) of the module currently being loaded/evaluated (BzlLoader + BUILD-eval
     /// maintained; repo == "" ⇒ the main workspace). String labels written in module code —
     /// `Label()`, select keys, attr DEFAULTS — bind against it (Bazel's lexical binding).
@@ -372,7 +375,16 @@ pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
 /// Package-qualify a source/output path (`x.cc` → `pkg/x.cc` in workspace mode).
 pub(crate) fn qualify(sess: &Session, path: &str) -> String {
     match &*sess.current_pkg.borrow() {
-        Some(pkg) => format!("{pkg}/{path}"),
+        // External package: FILE paths take Bazel's exec-root form, `external/<repo>/<pkg>/…`
+        // (`@repo//pkg` is a label, not a path).
+        Some(pkg) => match pkg.strip_prefix('@') {
+            Some(rest) => match rest.split_once("//") {
+                Some((repo, sub)) if sub.is_empty() => format!("external/{repo}/{path}"),
+                Some((repo, sub)) => format!("external/{repo}/{sub}/{path}"),
+                None => format!("external/{rest}/{path}"),
+            },
+            None => format!("{pkg}/{path}"),
+        },
         None => path.to_string(),
     }
 }

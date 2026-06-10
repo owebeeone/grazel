@@ -69,8 +69,8 @@ genrule(name = "g", srcs = [], outs = ["a", "b"], cmd = "touch $@")
 #[test]
 fn unmodeled_make_variable_errors() {
     let src = r#"
-genrule(name = "g", srcs = [], outs = ["o"], cmd = "cd $(RULEDIR) && touch o")
+genrule(name = "g", srcs = [], outs = ["o"], cmd = "$(JAVABASE)/bin/java -o o")
 "#;
     let err = analyze_starlark("BUILD", src).unwrap_err();
-    assert!(err.contains("RULEDIR"), "unmodeled variable must error loudly: {err}");
+    assert!(err.contains("JAVABASE"), "unmodeled variable must error loudly: {err}");
 }

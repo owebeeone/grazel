@@ -53,9 +53,21 @@ pub(crate) fn resolve_dep<'v>(
 ) -> anyhow::Result<DepInfo> {
     use razel_dds::InstanceId;
     let sess = crate::state::session(eval);
-    let canon = canon_label(sess, label);
+    let mut canon = canon_label(sess, label);
     // E0c: a forward-referenced local declaration analyzes first (demand-driven).
     crate::dialect::ensure_analyzed(eval, &canon).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Aliases forward to their `actual` (files/providers live on the terminal target).
+    for _ in 0..32 {
+        let next = crate::state::session(eval).aliases.borrow().get(&canon).cloned();
+        match next {
+            Some(actual) => {
+                canon = actual;
+                crate::dialect::ensure_analyzed(eval, &canon)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
+            None => break,
+        }
+    }
     let sess = crate::state::session(eval);
     // Workspace mode: lazy-load the dep's package if absent. The borrow in the condition is dropped
     // before `load_package` recurses into a nested eval (the [R1] discipline — a held `results`

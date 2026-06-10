@@ -222,6 +222,21 @@ where
                 name: name.to_string(),
             }));
         }
+        // FilesToRunProvider shape: executable = the dep's first file.
+        if attribute == "files_to_run" {
+            let exe = self
+                .fields
+                .iter()
+                .find(|(k, _)| k == "files")
+                .and_then(|(_, v)| {
+                    starlark::values::list::ListRef::from_value(v.to_value())
+                        .and_then(|l| l.iter().next())
+                })
+                .unwrap_or_else(Value::new_none);
+            return Some(_heap.alloc(crate::engine::AbsorbWith {
+                overrides: vec![("executable".to_string(), exe)],
+            }));
+        }
         self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| v.to_value())
     }
     /// `dep[MyInfo]` — the instance this dep's rule returned for that provider.
@@ -272,10 +287,22 @@ where
                 ("files_to_run".to_string(), _heap.alloc(crate::engine::Absorb)),
             ])));
         }
+        // OutputGroupInfo: the builtin stub returns a plain struct (not capturable, no stable
+        // ctor identity across modules) — synthesize an absorbing instance. Registered debt:
+        // output groups don't flow.
+        if index.to_string() == "OutputGroupInfo" {
+            return Ok(_heap.alloc(crate::engine::AbsorbWith { overrides: Vec::new() }));
+        }
         Err(starlark::Error::new_other(anyhow::anyhow!(
-            "target {} does not provide the requested provider {}",
+            "target {} does not provide the requested provider {} (have {} pairs: {})",
             self.label,
-            index.to_string()
+            index.to_string(),
+            self.providers.len(),
+            self.providers
+                .iter()
+                .map(|(c, _)| c.to_value().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )))
     }
 }

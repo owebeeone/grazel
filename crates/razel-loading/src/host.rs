@@ -68,10 +68,16 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
 /// The host BUILD for a canonical package (`@repo//pkg`), if razel provides one — the
 /// package-level twin of [`host_bzl`] (Bazel built-in packages like @bazel_tools//tools/cpp).
 pub(crate) fn host_build(pkg: &str) -> Option<&'static str> {
-    const HOST: &[(&str, &str)] = &[(
-        "@bazel_tools//tools/cpp",
-        include_str!("../host-repos/bazel_tools/tools/cpp/BUILD"),
-    )];
+    const HOST: &[(&str, &str)] = &[
+        (
+            "@bazel_tools//tools/cpp",
+            include_str!("../host-repos/bazel_tools/tools/cpp/BUILD"),
+        ),
+        (
+            "@bazel_tools//tools/proto",
+            include_str!("../host-repos/bazel_tools/tools/proto/BUILD"),
+        ),
+    ];
     HOST.iter().find(|(k, _)| *k == pkg).map(|(_, v)| *v)
 }
 
