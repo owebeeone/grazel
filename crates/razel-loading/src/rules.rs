@@ -71,7 +71,7 @@ pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
     b.namespace("config_common", config_common_members);
     // Foreign host namespaces ABSORB (any member resolves; surfaces only at analysis use —
     // registered debt). config/attr/native/razel_build stay explicit + typed.
-    for ns in ["cc_common", "coverage_common", "testing", "apple_common", "java_common", "proto_common", "platform_common"] {
+    for ns in ["cc_common", "coverage_common", "testing", "apple_common", "java_common", "proto_common", "platform_common", "proto_common_do_not_use", "py_internal"] {
         b.set(ns, crate::engine::Absorb);
     }
     // The absorber itself, for razel's HOST .bzl files (host-repos/) to bind symbols with.
@@ -154,10 +154,16 @@ impl BzlLoader<'_> {
         let Some(Some((repo, pkg))) = self.load_ctx.borrow().last().cloned() else {
             return path.to_string();
         };
+        // Main-repo modules carry `repo == ""` — relative loads resolve against the MODULE's
+        // package (not the BUILD package that triggered the load).
         if let Some(rest) = path.strip_prefix("//") {
-            format!("@{repo}//{rest}")
+            if repo.is_empty() { path.to_string() } else { format!("@{repo}//{rest}") }
         } else if let Some(file) = path.strip_prefix(':') {
-            format!("@{repo}//{pkg}:{file}")
+            if repo.is_empty() {
+                format!("//{pkg}:{file}")
+            } else {
+                format!("@{repo}//{pkg}:{file}")
+            }
         } else {
             path.to_string()
         }
@@ -184,9 +190,14 @@ impl FileLoader for BzlLoader<'_> {
                 .as_deref()
                 .and_then(|base| external_bzl_path(base, path))
         };
-        let ctx = (host.is_some() || real_external.is_some())
-            .then(|| parse_external(path))
-            .flatten();
+        let ctx = if host.is_some() || real_external.is_some() {
+            parse_external(path)
+        } else if let Some(rest) = path.strip_prefix("//") {
+            // A workspace .bzl: its own package is the context for ITS relative loads.
+            rest.split_once(':').map(|(pkg, _)| (String::new(), pkg.to_string()))
+        } else {
+            None
+        };
         let src = if let Some(content) = host {
             content.to_string()
         } else if let Some(p) = real_external {

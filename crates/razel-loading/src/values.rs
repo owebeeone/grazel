@@ -10,8 +10,10 @@ use starlark::environment::{
 use starlark::eval::Evaluator;
 use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
+use starlark::coerce::Coerce;
+use starlark::starlark_complex_value;
 use starlark::values::{
-    Heap, NoSerialize, StarlarkValue, Trace, Value, ValueLike,
+    Freeze, Heap, NoSerialize, StarlarkValue, Trace, Value, ValueLike,
     starlark_value,
 };
 use std::cell::RefCell;
@@ -331,23 +333,28 @@ pub(crate) fn file_path(v: Value) -> String {
 /// Construction folds in `direct` members and the elements of each `transitive`
 /// depset, de-duplicated by their string path. Stringification happens at use
 /// (`to_list`, `extract_files`, `Display`), not at construction.
-#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
-pub(crate) struct Depset<'v> {
-    // items holds live GC-visible Values — Trace must NOT be skipped.
-    pub(crate) items: Vec<Value<'v>>,
+#[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
+#[repr(C)]
+pub(crate) struct DepsetGen<V: starlark::values::ValueLifetimeless> {
+    // items holds live GC-visible Values — Trace must NOT be skipped. Freeze-generic: real .bzl
+    // build module-level depsets (protobuf), which freeze with their module.
+    pub(crate) items: Vec<V>,
 }
+starlark_complex_value!(pub(crate) Depset);
 
 
-impl fmt::Display for Depset<'_> {
+impl<V: starlark::values::ValueLifetimeless> fmt::Display for DepsetGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let paths: Vec<String> = self.items.iter().map(|v| file_path(*v)).collect();
-        write!(f, "depset({paths:?})")
+        write!(f, "depset({} items)", self.items.len())
     }
 }
 
 
 #[starlark_value(type = "depset")]
-impl<'v> StarlarkValue<'v> for Depset<'v> {
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for DepsetGen<V>
+where
+    Self: starlark::any::ProvidesStaticType<'v>,
+{
     fn get_methods() -> Option<&'static Methods> {
         Some(DEPSET_METHODS.methods())
     }

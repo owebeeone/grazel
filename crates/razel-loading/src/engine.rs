@@ -196,6 +196,12 @@ pub(crate) fn attr_members(b: &mut GlobalsBuilder) {
     fn output_list<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
         Ok(attr_descriptor("output_list", &kw, eval))
     }
+    fn int_list<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("int_list", &kw, eval))
+    }
+    fn string_keyed_label_dict<'v>(#[starlark(kwargs)] kw: SmallMap<String, Value<'v>>, eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<Value<'v>> {
+        Ok(attr_descriptor("string_keyed_label_dict", &kw, eval))
+    }
 }
 
 /// Build an attribute descriptor (D1): a struct `{kind, default, mandatory}` the loader reads when

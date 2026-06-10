@@ -1445,7 +1445,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 }
             }
         }
-        Ok(eval.heap().alloc_complex_no_freeze(Depset { items }))
+        Ok(eval.heap().alloc(Depset { items }))
     }
 
     /// `select({condition: value, …})` — Bazel semantics (razelV3): HYBRID resolution. If every

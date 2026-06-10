@@ -42,6 +42,10 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
             include_str!("../host-repos/local_config_tensorrt/build_defs.bzl"),
         ),
         (
+            "@proto_bazel_features//:features.bzl",
+            include_str!("../host-repos/proto_bazel_features/features.bzl"),
+        ),
+        (
             "@cc_compatibility_proxy//:symbols.bzl",
             include_str!("../host-repos/cc_compatibility_proxy/symbols.bzl"),
         ),
