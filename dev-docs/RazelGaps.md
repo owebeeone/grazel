@@ -242,3 +242,18 @@ output (a regression guard), per the characterization header.
   bzl_library fail()s on empty). Extend per probe, don't pre-build the doc graph.
 - **@bazel_features is all-True modern posture** (host-repos/bazel_features/features.bzl):
   five version-gates rules_cc consults; unlisted members error loudly by design.
+- **Template-variable flow (`toolchains=` attr → `ctx.var`) is unmodeled.** TFRT's
+  `make_variable` rule returns `platform_common.TemplateVariableInfo({name: value})` and
+  cc_library's `defines = ["$(TFRT_MAX_TRACING_LEVEL)"]` expects it in `ctx.var` (rules_cc
+  `_lookup_var` fail()s — loud). platform_common absorbs wholesale, so the variables dict is
+  swallowed today. Real fix: TemplateVariableInfo as a real provider + merge the toolchains=
+  attr targets' variables into ctx.var at ctx build. Surfaced by the tf_runtime vendor
+  (@tf_runtime//:tracing); same mechanism as the genrule `toolchains=` make-var debt.
+- **Eager select() composes wrongly with tuples (highway, 15 pkgs) — the deferred-select debt's
+  concrete corpus.** highway's BUILD: `HWY_TEST_DEPS = [...] + select({...})` then
+  `HWY_TEST_DEPS + extra_deps` where `extra_deps` is a TUPLE. Bazel never resolves select at
+  load, so the `+` is select-concat (tuple-tolerant); razel's hybrid select resolves eagerly
+  (conditions all declared) → plain list → `list + tuple` errors. Fix = the registered
+  deferred-select model (select always returns SelectBranches; pick at attr consumption), plus
+  tuple-tolerant part flattening in `resolve_attr_value`. Needs the full-sweep parity check —
+  eager resolution is load-bearing for macro paths that inspect resolved values.

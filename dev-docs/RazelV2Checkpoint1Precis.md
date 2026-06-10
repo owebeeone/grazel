@@ -606,3 +606,26 @@ abseil-cpp pattern). Root's next wall: @build_bazel_apple_support (inside grpc �
 Gianni's call). New top classes: @curl (64 pkgs, unvendored — Gianni), @pypi (35, posture
 proposal pending). RAZEL_TFLOAD_ONE now takes a comma list (sweep-order repro for
 order-dependent classes). 60 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 25 (2026-06-11, vendor batch)
+
+**Vendored: `com_google_highway` 1.3.0 (sha-verified, TF's build.patch applied — by hand,
+the patch is context-free and one line shifted) and `tf_runtime` @4ecc3a44 (sha-verified,
+f16_attr.patch applied clean), per the tensorflow/third_party overlay pattern. Earlier in the
+session: alias symlinks `com_google_googletest -> googletest`, `com_google_benchmark ->
+google_benchmark`. Full sweep 299 → 303/835 (36.3%); eval 2:19 → 1:13 (vendoring removed
+failing-package re-eval storms).** Both vendor walls moved to real frontiers: tf_runtime's
+`:tracing` needs template-variable flow (`toolchains=` → ctx.var via
+platform_common.TemplateVariableInfo — registered, same mechanism as the genrule toolchains=
+debt); highway's BUILD exposes the eager-select composition bug (`[..]+select(..)` resolved
+eagerly → `list + tuple` that Bazel never evaluates; 15 pkgs) — the deferred-select debt now
+has its corpus, registered with the fix shape.
+
+**@pypi POSTURE PROPOSAL (Gianni decision, 36 pkgs):** host-materialize the hub repo like
+local_config_* — `host_build` gains a PREFIX rule: any `@pypi//<name>` package synthesizes
+`py_library(name = "<name>", visibility = public)` on demand (no enumeration, no vendor, no
+files). Loading-grade truth: the dep target exists and analyzes; anything reading real
+srcs/data errors loudly. Build-grade (later, if ever) = point at host site-packages. Rejected
+alternatives: real vendor (300+ wheels, absurd); per-package static table (drift). Top
+remaining classes after this: @curl (66 — vendor decision also yours), tensorflow_py/
+protos_all_py "not analyzed" (60 — py macro layer), lite framework_experimental (22).
