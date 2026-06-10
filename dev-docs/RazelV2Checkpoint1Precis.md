@@ -564,3 +564,19 @@ critical path is the spine's sequential eval, exactly the plan's risk #3. Next l
 waiters must WORK (steal pending packages) or the queue must run the spine's independent
 sub-packages (llvm/mlir are mutually independent) breadth-first — cooperative scheduling,
 not more threads. Pool stays opt-in until then.
+
+## Round delta — razelV3 round 23 (2026-06-11)
+
+**Spine-seeding "208ms anomaly" diagnosed: seeding was never the bug — the pool is UNSOUND at
+threads>1.** Per-eval-stack state (`current_pkg`, `current_bzl_repo`, `AnalysisState.current`,
+`analyzing`) lives Session-wide; concurrent evals clobber each other's package context, so
+`canon_label`/`qualify` misresolve and the sweep collapses into a fast-fail cascade. Measured
+(sample-16): sequential 10/53 @ 54s; threads=2 gives 6-7/53 in <1s, nondeterministic; the same
+select key qualified into DIFFERENT packages run-to-run (direct bleed evidence). The "20s
+unseeded vs 208ms seeded, identical coverage" was two equally-corrupted runs agreeing at 7/53 —
+the 20s/40s walls were `begin_pkg_load`'s condvar-timeout constant, not eval (round 22's "40s at
+2% CPU" reading falls too). Verdict for the <10s question: neither seed-order nor work-stealing
+is next — **P4a per-worker eval context** (EvalCtx in eval.extra, Deref to Session; `analyzing`
+gets the P3 InFlight treatment) is the prerequisite; added to RazelEvalParallelPlan.md +
+RazelGaps.md. Pool stays opt-in and now warns loudly at threads>1. Repro footgun fixed in the
+record: the spine file is `$TMPDIR/razel-tfload-spine.txt` (temp_dir()), not /tmp.

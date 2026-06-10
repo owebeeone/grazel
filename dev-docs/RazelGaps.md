@@ -200,3 +200,22 @@ output (a regression guard), per the characterization header.
 - **Generated-repo defaults.** `@python_version_repo` is host-materialized from its generator's
   template with no-env defaults (py 3.11, USE_PYWRAP_RULES=False). Snapshot-from-configure is
   the upgrade path if fidelity bites (L6a decision).
+
+## Worker-pool debt register (razelV3 round 23 — 2026-06-11)
+
+- **P4a — per-worker eval context (the pool's real blocker).** Session carries per-EVAL-STACK
+  state as Session-wide fields: `current_pkg` (read by `canon_label`/`qualify` — every label
+  resolution), `current_bzl_repo` (load-context stack), `AnalysisState.current` (the in-flight
+  target), `analyzing` (re-entrancy guard set). Two workers evaluating concurrently clobber each
+  other's context; labels qualify into the wrong packages and the sweep collapses into fast-fail
+  cascades (measured: 6-7/53 in <1s at threads≥2 vs 10/53 in 54s sequential, sample-16; the same
+  select key qualified into different packages run-to-run — direct evidence). Design sketch: an
+  `EvalCtx { session: &Session, current_pkg, current_bzl_repo, current_target }` per worker,
+  stashed in `eval.extra` (today's `session(eval)` returns it; `Deref<Target=Session>` keeps the
+  shared-state call sites untouched); `analyzing` gets the P3 InFlight/wait treatment for
+  cross-worker demand analysis. ~27 `current_pkg` + 7 `current_bzl_repo` sites across 6 files,
+  plus the `load_package_entry`→`eval_build_src_in` signature chain. Engine-core: supervisor-grade.
+- **`begin_pkg_load` 20s takeover timeout masquerades as work.** A cross-thread wait that cycles
+  burns exactly 20s then duplicates the load — sweep walls of ~20s/~40s are timeout multiples,
+  not eval (the round-22 "40s at 2% CPU" reading). Post-P4a: real cycle detection (waits-for
+  check) instead of the timeout, per the P3 plan note.

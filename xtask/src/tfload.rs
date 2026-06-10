@@ -56,9 +56,13 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     // is wide and mutually independent) so workers fan across it instead of queueing behind
     // one demand chain.
     let spine_path = std::env::temp_dir().join("razel-tfload-spine.txt");
-    // EXPERIMENTAL (off by default): run-2 timing came back anomalously fast (208ms for a
-    // spine that takes 20s) with matching coverage — too good to trust without diagnosis.
-    // Enable with RAZEL_TFLOAD_SEED=1 to investigate.
+    // DIAGNOSED (round 23; was "208ms anomaly"): seeding was never the bug — the POOL is
+    // unsound at threads>1. Per-eval-stack Session state (current_pkg / current_bzl_repo) is
+    // shared across workers, so any concurrent eval misresolves labels and the sweep collapses
+    // into a fast-fail cascade (sample-16: 6-7/53 in <1s at threads≥2 vs 10/53 in 54s
+    // sequential; the "20s" walls were begin_pkg_load's condvar timeout, not eval). Seeding
+    // just fans workers out, exposing it sooner. Parked until P4a (per-worker eval context —
+    // RazelGaps.md); coverage printed at threads>1 is not a coverage number.
     let seed_enabled = std::env::var("RAZEL_TFLOAD_SEED").is_ok();
     if let Ok(spine) = std::fs::read_to_string(&spine_path).and_then(|s| {
         if seed_enabled { Ok(s) } else { Err(std::io::Error::other("seeding disabled")) }

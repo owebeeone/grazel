@@ -613,13 +613,21 @@ pub fn load_tree_report_seeded(
     session.ast_cache.borrow_mut().extend(asts);
     // P4: N workers over a shared queue against ONE Session (Send+Sync, P1–P3).
     // RAZEL_LOAD_THREADS=1 reproduces sequential behavior exactly.
-    // EXPERIMENTAL (P4 debug pending): first parallel run finished impossibly fast with
-    // coverage loss (7/53 vs 10/53) — workers error rather than work. OPT-IN until the
-    // worker error class is diagnosed; default = sequential parity.
+    // UNSOUND at threads>1 (round-23 diagnosis): per-eval-stack state (current_pkg,
+    // current_bzl_repo, AnalysisState.current, analyzing) is Session-wide — concurrent evals
+    // clobber each other's package context and labels misresolve (canon_label/qualify read
+    // current_pkg). Blocked on P4a per-worker eval context (RazelGaps.md). Stays opt-in.
     let threads = std::env::var("RAZEL_LOAD_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1);
+    if threads > 1 {
+        eprintln!(
+            "razel: warning: RAZEL_LOAD_THREADS={threads} — the worker pool is UNSOUND until \
+             P4a (per-worker eval context): labels misresolve across threads and reported \
+             coverage is garbage. Diagnostic use only."
+        );
+    }
     if threads <= 1 {
         let report: Vec<(String, Result<(), String>)> = packages
             .iter()

@@ -48,6 +48,17 @@ established profiling recipe (`CARGO_PROFILE_RELEASE_STRIP=none` +
 `CARGO_PROFILE_RELEASE_DEBUG=true`, `sample` + dsymutil). Expect the DDS store and
 `results` to be the contended locks; shard if measured, not before.
 
+**P4a — per-worker eval context (added round 23; the pool's actual blocker).**
+P1–P3 made Session's fields *lockable*, but four of them are per-EVAL-STACK state living
+Session-wide: `current_pkg` (read by every `canon_label`/`qualify`), `current_bzl_repo`,
+`AnalysisState.current`, `analyzing`. Concurrent workers clobber each other's package
+context — labels misresolve and coverage collapses (6-7/53 in <1s at threads≥2 vs 10/53
+sequential, sample-16). The "spine seeding vs work-stealing" scheduling question is moot
+until this lands: both are queue-order refinements over a pool that corrupts its own evals.
+Shape: per-worker `EvalCtx` in `eval.extra` with `Deref<Target=Session>`; `analyzing` gets
+the P3 InFlight treatment. Details: `RazelGaps.md` round-23 register. Engine-core,
+supervisor-grade. Scheduling (seed order, work-stealing waits) re-measures only after P4a.
+
 ## Risks, ranked
 
 1. **Lock-across-recursion deadlocks** (the RefCell-borrow equivalent). Mitigation: P1
