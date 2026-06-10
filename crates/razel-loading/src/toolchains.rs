@@ -28,7 +28,9 @@ pub(crate) fn resolve_toolchain(name: &str) -> Result<FeatureConfig, String> {
 /// here is the point (allowlisted). Real `rule(toolchains=)` resolution is L3.
 pub(crate) fn toolchain_rows<'v>(
     heap: starlark::values::Heap<'v>,
+    sess: &crate::state::Session,
 ) -> Vec<(String, starlark::values::Value<'v>)> {
+    let (host_rustc, host_cc, host_sysroot) = crate::state::host_tools(sess);
     // Absorbing stand-ins: any field/method resolves (loading/analysis-shape); REAL fields
     // (rustc path, cc tool paths) land with the Layer-3 action goldens. Registered debt.
     // The rust row carries REAL scalar fields (typed builtins reject absorbed values) — grown
@@ -84,16 +86,7 @@ pub(crate) fn toolchain_rows<'v>(
         ("lto".to_string(), heap.alloc(AllocStruct([
             ("mode".to_string(), heap.alloc("off")),
         ]))),
-        ("rustc".to_string(), {
-            let path = std::env::var("PATH").unwrap_or_default();
-            let found = path
-                .split(':')
-                .map(|d| std::path::Path::new(d).join("rustc"))
-                .find(|p| p.is_file())
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "rustc".to_string());
-            heap.alloc(crate::values::File { path: found })
-        }),
+        ("rustc".to_string(), heap.alloc(crate::values::File { path: host_rustc })),
         ("rust_std".to_string(), heap.alloc(Vec::<starlark::values::Value<'v>>::new())),
         ("all_files".to_string(), heap.alloc(crate::values::Depset { items: Vec::new() })),
         ("env".to_string(), heap.alloc(starlark::values::dict::AllocDict::EMPTY)),
@@ -121,16 +114,7 @@ pub(crate) fn toolchain_rows<'v>(
         ("nostd_and_global_allocator_ccinfo".to_string(), starlark::values::Value::new_none()),
         // A real host linker File (cc): cc_common.get_tool_for_action absorbs (falsy), so
         // the rust-linker fallback path reads this.
-        ("linker".to_string(), {
-            let path = std::env::var("PATH").unwrap_or_default();
-            let found = path
-                .split(':')
-                .map(|d| std::path::Path::new(d).join("cc"))
-                .find(|p| p.is_file())
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "cc".to_string());
-            heap.alloc(crate::values::File { path: found })
-        }),
+        ("linker".to_string(), heap.alloc(crate::values::File { path: host_cc })),
         ("linker_type".to_string(), heap.alloc("default")),
         ("linker_preference".to_string(), heap.alloc("default")),
         ("llvm_cov".to_string(), starlark::values::Value::new_none()),
@@ -162,22 +146,7 @@ pub(crate) fn toolchain_rows<'v>(
     let absorb = heap.alloc(crate::engine::Absorb);
     let cc = heap.alloc(AllocStruct([
         ("_legacy_cc_flags_make_variable".to_string(), heap.alloc("")),
-        ("sysroot".to_string(), {
-            // The REAL host sysroot (macOS SDK / linux "/"): grte_top-style checks compare
-            // against None, and later flag assembly reads the path.
-            let sdk = if std::env::consts::OS == "macos" {
-                std::process::Command::new("xcrun")
-                    .args(["--show-sdk-path"])
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            } else {
-                None
-            };
-            heap.alloc(sdk.unwrap_or_else(|| "/".to_string()))
-        }),
+        ("sysroot".to_string(), heap.alloc(host_sysroot)),
         ("compiler".to_string(), heap.alloc("clang")),
         ("cpu".to_string(), heap.alloc(std::env::consts::ARCH)),
         ("libc".to_string(), heap.alloc("macosx")),

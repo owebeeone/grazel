@@ -27,14 +27,14 @@ pub(crate) fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>
             "glob() needs a package on disk — use the workspace build path"
         ));
     };
-    let mut files = Vec::new();
-    walk_files(&dir, &dir, &mut files);
+    let files = crate::state::walk_cached(sess, &dir);
     let mut out: Vec<String> = files
-        .into_iter()
+        .iter()
         .filter(|f| {
             include.iter().any(|p| crate::glob_match(p, f))
                 && !exclude.iter().any(|p| crate::glob_match(p, f))
         })
+        .cloned()
         .collect();
     out.sort();
     Ok(out)
@@ -56,7 +56,14 @@ pub(crate) fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
         if dot {
             continue;
         }
-        if p.is_dir() {
+        // file_type() comes from the readdir entry — no extra stat per entry. Symlinks
+        // (the llvm-project overlay tree) still need the follow-stat.
+        let is_dir = match e.file_type() {
+            Ok(t) if t.is_symlink() => p.is_dir(),
+            Ok(t) => t.is_dir(),
+            Err(_) => false,
+        };
+        if is_dir {
             walk_files(&p, base, out);
         } else if let Ok(rel) = p.strip_prefix(base) {
             out.push(rel.to_string_lossy().replace('\\', "/"));

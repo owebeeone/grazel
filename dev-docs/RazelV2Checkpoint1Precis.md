@@ -496,3 +496,24 @@ pkgs — one bug), BuildSettingInfo value flow (36), @pypi (35), Label.repo_name
 Round fixes: llvm configure outputs generated (vars/targets/bolt — ported from
 llvm_configure); flatbuffers vendored; $(STACK_FRAME_UNLIMITED); ctx.file single-string
 attrs; ctx.outputs defaulting namespace; tfload classifier + RAZEL_TFLOAD_ONE debug mode.
+
+## Round delta — razelV3 round 18 (2026-06-11, perf session cont.)
+
+**Full TF tree sweep: 8:10 → 1:06 (7.4×); sys time 268s → 2.7s.** The profiler (sampled live)
+showed 60% of ALL samples in `stat`/`getdirentries`/`open`: glob() re-walked entire package
+trees per call (with a follow-stat per entry), and every file-label fallback stat'd per srcs
+entry. Fixes: Session walk-cache (dir → recursive file list, Arc-shared; readdir file_type
+instead of per-entry stat, symlink-aware for the llvm overlay), existence-memo
+(path_is_file), host-tools memo (xcrun/PATH probes were per-ctx spawns). Plus
+RAZEL_TFLOAD_SAMPLE=N (every-Nth-package inner loop: ~1:19 for 105 pkgs incl. deps) and an
+explicit-None kwarg fix (Bazel: None = unset, use the attr default — TF passes copts=None
+through macros), which also lifted coverage 236 → 270/835 (32.3%).
+
+Perf ledger this session: never-finishes (debug) → 14.5min† → 3:00 → 8:10 (deeper walks
+opened) → 1:06. Remaining: 60s user-time, CPU-bound eval — next levers are the
+enable_registration_v2 BuildSettingInfo class (55 pkgs), then the eval worker-pool.
+(† killed, incomplete.)
+
+Tooling note: rounds 17–18's razel edits ran through AIEdit (the new transactional MCP
+editor) — including one atomic 8-edit/4-file transaction for the FS caches. Smoke suite 5/5;
+field verdict in the eval thread.

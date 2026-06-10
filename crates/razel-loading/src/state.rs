@@ -147,6 +147,16 @@ pub(crate) struct Session {
     /// Per-target transitive-fold memo (label → folded fields). The DDS fold was the tree-sweep
     /// hotspot: every dep edge re-walked its transitive closure; diamonds made it quadratic.
     pub(crate) fold_cache: RefCell<std::collections::HashMap<String, Vec<(String, Vec<String>)>>>,
+    /// Host tool discovery memo (rustc path, cc path, sysroot): these were probed via
+    /// PATH walks + an `xcrun` SPAWN on EVERY ctx construction — two-thirds of sweep CPU
+    /// was kernel time. Environment-derived, constant per session.
+    pub(crate) host_tools: RefCell<Option<(String, String, String)>>,
+    /// Filesystem caches (the sweep profile was 60% `stat`/`getdirentries`): file-existence
+    /// memo for the file-label fallbacks + per-directory RECURSIVE walk memo for glob()
+    /// (it re-walked whole package trees per call).
+    pub(crate) exists_cache: RefCell<std::collections::HashMap<std::path::PathBuf, bool>>,
+    pub(crate) walk_cache:
+        RefCell<std::collections::HashMap<std::path::PathBuf, std::sync::Arc<Vec<String>>>>,
     /// Pre-parsed BUILD ASTs (key = the eval name, `{pkg}/BUILD`): read+parse is pure and
     /// parallelizes across files; the sequential eval consumes them (load+parse / execute split).
     pub(crate) ast_cache: RefCell<std::collections::HashMap<String, starlark::syntax::AstModule>>,
@@ -503,4 +513,58 @@ mod tests {
         // None present → None (host_cc then falls back to CXX).
         assert_eq!(first_on_path(&["c++"], &dirs, |_| false), None);
     }
+}
+
+
+/// Cached file-existence check (the dep/file-label fallbacks stat per srcs entry).
+pub(crate) fn path_is_file(sess: &Session, p: &std::path::Path) -> bool {
+    if let Some(&hit) = sess.exists_cache.borrow().get(p) {
+        return hit;
+    }
+    let v = p.is_file();
+    sess.exists_cache.borrow_mut().insert(p.to_path_buf(), v);
+    v
+}
+
+/// Cached RECURSIVE file listing under `dir` (paths relative to it) for glob().
+pub(crate) fn walk_cached(sess: &Session, dir: &std::path::Path) -> std::sync::Arc<Vec<String>> {
+    if let Some(hit) = sess.walk_cache.borrow().get(dir) {
+        return hit.clone();
+    }
+    let mut files = Vec::new();
+    crate::glob::walk_files(dir, dir, &mut files);
+    let arc = std::sync::Arc::new(files);
+    sess.walk_cache.borrow_mut().insert(dir.to_path_buf(), arc.clone());
+    arc
+}
+
+/// The session's host tool triple (rustc, cc, sysroot) — discovered ONCE per session.
+pub(crate) fn host_tools(sess: &Session) -> (String, String, String) {
+    if let Some(t) = sess.host_tools.borrow().as_ref() {
+        return t.clone();
+    }
+    let find = |name: &str| -> String {
+        std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .map(|d| std::path::Path::new(d).join(name))
+            .find(|p| p.is_file())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| name.to_string())
+    };
+    let sysroot = if std::env::consts::OS == "macos" {
+        std::process::Command::new("xcrun")
+            .args(["--show-sdk-path"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/".to_string())
+    } else {
+        "/".to_string()
+    };
+    let t = (find("rustc"), find("cc"), sysroot);
+    *sess.host_tools.borrow_mut() = Some(t.clone());
+    t
 }

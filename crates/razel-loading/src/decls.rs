@@ -684,7 +684,7 @@ fn apply_aspect_uncached<'v>(
                         name: lname.to_string(),
                     }),
                 ),
-                ("toolchains".to_string(), crate::ctxv::toolchain_map(heap)),
+                ("toolchains".to_string(), crate::ctxv::toolchain_map(heap, session(eval))),
                 ("bin_dir".to_string(), heap.alloc(crate::engine::AbsorbWith {
                     overrides: vec![("path".to_string(), heap.alloc("bazel-out/bin"))],
                 })),
@@ -822,10 +822,10 @@ fn resolve_label_attr_inner<'v>(
                                         [repo.to_string(), repo.replace('_', "-")]
                                             .iter()
                                             .any(|d| {
-                                                base.join(d)
-                                                    .join(pkg)
-                                                    .join(file)
-                                                    .is_file()
+                                                crate::state::path_is_file(
+                                                    sess,
+                                                    &base.join(d).join(pkg).join(file),
+                                                )
                                             })
                                     });
                                 (exists, format!("external/{repo}/{pkg}/{file}"))
@@ -838,14 +838,14 @@ fn resolve_label_attr_inner<'v>(
                         let exists = sess
                             .workspace
                             .as_ref()
-                            .is_some_and(|root| root.join(&q).is_file());
+                            .is_some_and(|root| crate::state::path_is_file(sess, &root.join(&q)));
                         (exists, q)
                     } else {
                         let q = qualify(sess, label.trim_start_matches(':'));
                         let exists = sess
                             .workspace
                             .as_ref()
-                            .is_some_and(|root| root.join(&q).is_file());
+                            .is_some_and(|root| crate::state::path_is_file(sess, &root.join(&q)));
                         (exists, q)
                     };
                     if on_disk {
@@ -960,9 +960,11 @@ pub(crate) fn analyze_rule_decl<'v>(
 ) -> starlark::Result<()> {
     let (implementation, attrs, out_templates) = rule_parts(rule)?;
     // Deferred selects resolve HERE — attr consumption time (Bazel's model); conditions declared
-    // anywhere in the loaded graph are visible by now.
+    // anywhere in the loaded graph are visible by now. An EXPLICIT `None` kwarg means UNSET
+    // (Bazel drops it; the schema default applies) — TF macros pass `copts = None` through.
     let kwargs: Vec<(String, Value<'v>)> = kwargs
         .iter()
+        .filter(|(_, v)| !v.is_none())
         .map(|(k, v)| Ok((k.clone(), resolve_attr_value(eval, *v)?)))
         .collect::<anyhow::Result<_>>()?;
     let mut name = String::new();
@@ -1165,7 +1167,7 @@ pub(crate) fn analyze_rule_decl<'v>(
                 (heap.alloc("STACK_FRAME_UNLIMITED"), heap.alloc("")),
             ])),
             executable: heap.alloc_complex_no_freeze(crate::ctxv::ExecNs { fields: Vec::new() }),
-            toolchains: toolchain_map(heap),
+            toolchains: toolchain_map(heap, sess),
             build_setting_value: kwargs
                 .iter()
                 .find(|(k, _)| k == "build_setting_default")

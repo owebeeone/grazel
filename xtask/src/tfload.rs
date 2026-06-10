@@ -25,6 +25,15 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     }
     packages.sort();
     packages.dedup();
+    // RAZEL_TFLOAD_SAMPLE=N: sweep every Nth package — the fast inner loop (seconds, not
+    // minutes); the full sweep is for banking numbers.
+    if let Ok(n) = std::env::var("RAZEL_TFLOAD_SAMPLE") {
+        if let Ok(n) = n.parse::<usize>() {
+            if n > 1 {
+                packages = packages.into_iter().step_by(n).collect();
+            }
+        }
+    }
     let mut flags = GlobalFlags::default();
     flags.external_base = Some(root.join("../third-party"));
     // RAZEL_TFLOAD_ONE=<pkg>: print one package's FULL error (debugging a failure class).

@@ -143,8 +143,8 @@ impl<'v> StarlarkValue<'v> for ToolchainMap<'v> {
 
 
 /// Build the ctx.toolchains map from the registered host rows.
-pub(crate) fn toolchain_map<'v>(heap: Heap<'v>) -> Value<'v> {
-    let entries = crate::toolchains::toolchain_rows(heap);
+pub(crate) fn toolchain_map<'v>(heap: Heap<'v>, sess: &crate::state::Session) -> Value<'v> {
+    let entries = crate::toolchains::toolchain_rows(heap, sess);
     heap.alloc_complex_no_freeze(ToolchainMap { entries })
 }
 

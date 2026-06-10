@@ -103,7 +103,7 @@ pub(crate) fn resolve_dep<'v>(
                     sess.global.external_base.as_ref().and_then(|base| {
                         [repo.to_string(), repo.replace('_', "-")]
                             .iter()
-                            .find(|d| base.join(d).join(pkg).join(file).is_file())
+                            .find(|d| crate::state::path_is_file(sess, &base.join(d).join(pkg).join(file)))
                             .map(|_| format!("external/{repo}/{pkg}/{file}"))
                     })
                 })
@@ -113,7 +113,7 @@ pub(crate) fn resolve_dep<'v>(
                     let rel = if p.is_empty() { f.to_string() } else { format!("{p}/{f}") };
                     sess.workspace
                         .as_ref()
-                        .filter(|root| root.join(&rel).is_file())
+                        .filter(|root| crate::state::path_is_file(sess, &root.join(&rel)))
                         .map(|_| rel)
                 })
             })
