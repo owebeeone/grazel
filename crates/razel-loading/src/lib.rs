@@ -35,7 +35,7 @@ mod rust_rules;
 mod sh_rules;
 pub use rules::{
     analyze_bazel, analyze_bazel_with, analyze_starlark, analyze_workspace, analyze_workspace_with,
-    load_tree_report, load_tree_report_prepared, prepare_build_asts,
+    load_tree_report, load_tree_report_prepared, load_tree_report_seeded, prepare_build_asts,
 };
 pub use state::{AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags};
 

@@ -591,12 +591,24 @@ pub fn load_tree_report(
 
 /// `load_tree_report` with PRE-PARSED BUILD ASTs (from [`prepare_build_asts`]): the load+parse
 /// half runs in parallel; the eval half stays sequential and consumes the cache.
+/// `load_tree_report_prepared` + the session's FULL loaded-package list (deps included) —
+/// the next run seeds its queue with it so workers fan across the shared dep spine instead
+/// of queueing behind whoever demands it first.
 pub fn load_tree_report_prepared(
     root: &Path,
     flags: GlobalFlags,
     packages: &[String],
     asts: Vec<(String, starlark::syntax::AstModule)>,
 ) -> Vec<(String, Result<(), String>)> {
+    load_tree_report_seeded(root, flags, packages, asts).0
+}
+
+pub fn load_tree_report_seeded(
+    root: &Path,
+    flags: GlobalFlags,
+    packages: &[String],
+    asts: Vec<(String, starlark::syntax::AstModule)>,
+) -> (Vec<(String, Result<(), String>)>, Vec<String>) {
     let session = Session::new(Some(root.to_path_buf()), flags);
     session.ast_cache.borrow_mut().extend(asts);
     // P4: N workers over a shared queue against ONE Session (Send+Sync, P1–P3).
@@ -609,10 +621,12 @@ pub fn load_tree_report_prepared(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1);
     if threads <= 1 {
-        return packages
+        let report: Vec<(String, Result<(), String>)> = packages
             .iter()
             .map(|pkg| (pkg.clone(), load_package_entry(&session, pkg)))
             .collect();
+        let loaded = loaded_done(&session);
+        return (report, loaded);
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(vec![None; packages.len()]);
@@ -628,10 +642,24 @@ pub fn load_tree_report_prepared(
             });
         }
     });
-    packages
+    let report: Vec<(String, Result<(), String>)> = packages
         .iter()
         .cloned()
         .zip(results.into_inner().expect("results").into_iter().map(|r| r.unwrap_or(Ok(()))))
+        .collect();
+    let loaded = loaded_done(&session);
+    (report, loaded)
+}
+
+/// All packages the session finished loading (deps included) — the spine list.
+fn loaded_done(session: &Session) -> Vec<String> {
+    session
+        .loaded
+        .lock()
+        .expect("loaded")
+        .iter()
+        .filter(|(_, st)| matches!(st, crate::state::PkgState::Done))
+        .map(|(k, _)| k.clone())
         .collect()
 }
 
