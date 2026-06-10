@@ -429,3 +429,19 @@ File.is_directory; gif vendored (TF overlay).
 build-setting flag targets — the value is a provider instance where a bool is expected
 (build-setting VALUE flow through label_flag aliases; razel doesn't model flag values yet).
 60 bins; 3 gates; 5 sentinels.
+
+## Round delta — razelV3 round 14 (2026-06-11)
+
+**MILESTONE: `tf-load-cc` PASSES (sentinel #6, must_pass) — a real TensorFlow cc target
+(`//tensorflow/core/kernels/risc:risc`) ANALYZES end-to-end**, through tensorflow.bzl's macro
+layer, rules_cc's real impls, protobuf's proto pipeline + cc_proto_aspect, skylib build
+settings, and the full vendor graph (llvm-project included). The closing fixes were small:
+label_keyed_string_dict KEYS resolve to dep targets (TF's build_settings pattern; DepTarget
+gained hash/equals by label); actions.expand_template as a real sed action; the output-file
+index consulted from resolve_dep (generated headers like registration:options.h).
+
+Both original lanes now end in analysis: rust (rules_rust rust_library, sentinel #5) and
+TF cc (sentinel #6). Next ratchets, per the build-path plan: the L3/L4 RUN-goldens (execute a
+tinyjson rustc action set / an abseil clang compile — converts "analyzes" to "builds" and
+makes the param-file + lib-naming debts due), then the TF full-tree load driver
+(packages-loaded coverage curve, the checkpoint-3 yardstick). 60 bins; 3 gates; 6 sentinels.

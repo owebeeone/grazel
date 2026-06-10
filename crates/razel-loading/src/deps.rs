@@ -81,6 +81,18 @@ pub(crate) fn resolve_dep<'v>(
     let results = sess.results.borrow();
     let Some(t) = results.get(&canon) else {
         drop(results);
+        // A GENERATED-output file label: the producer analyzes on demand; the dep's file is
+        // the registered output path.
+        let produced = sess.output_index.borrow().get(&canon).cloned();
+        if let Some((producer, out_path)) = produced {
+            crate::dialect::ensure_analyzed(eval, &producer)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            return Ok(DepInfo {
+                libs: vec![out_path],
+                canon,
+                fields: Default::default(),
+            });
+        }
         // Bazel file-label semantics: a label naming no declared target resolves to a SOURCE
         // FILE when it exists (mirrors the deps-arm fallback). External labels check the
         // vendored repo (exec-root path form).

@@ -983,6 +983,22 @@ pub(crate) fn analyze_rule_decl<'v>(
                 name = v.unpack_str().unwrap_or_default().to_string();
                 fields.push((key, v));
             }
+            // `label_keyed_string_dict` (TF's build_settings pattern): KEYS resolve to dep
+            // targets; string values pass through.
+            _ if attr_kind.as_deref() == Some("label_keyed_string_dict") => {
+                let heap = eval.heap();
+                let mut entries: Vec<(Value<'v>, Value<'v>)> = Vec::new();
+                if let Some(d) = starlark::values::dict::DictRef::from_value(v) {
+                    let pairs: Vec<(Value<'v>, Value<'v>)> = d.iter().collect();
+                    drop(d);
+                    for (kk, vv) in pairs {
+                        let resolved =
+                            resolve_label_attr(eval, kk, true, &mut dep_labels, Value::new_none())?;
+                        entries.push((resolved, vv));
+                    }
+                }
+                fields.push((key, heap.alloc(starlark::values::dict::AllocDict(entries))));
+            }
             // A label attr (legacy `deps` or any `attr.label_list`): resolve each label to its
             // analyzed providers as a `struct(files=…, <folded fields>…)`.
             _ if is_label => {

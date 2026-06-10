@@ -72,7 +72,7 @@ const PROBES: &[Probe] = &[
         build: "",
         files: &[],
         real: Some(("third-party/tensorflow", "//tensorflow/core/kernels/risc:risc")),
-        must_pass: false,
+        must_pass: true,
     },
 ];
 

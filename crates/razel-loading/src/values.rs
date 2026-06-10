@@ -127,6 +127,37 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
         };
         Ok(eval.heap().alloc(File { path }))
     }
+    /// `expand_template(template=, output=, substitutions=)` — a real sed-style action.
+    fn expand_template<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = named)] template: Value<'v>,
+        #[starlark(require = named)] output: Value<'v>,
+        #[starlark(require = named)] substitutions: Option<SmallMap<String, String>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        let tpl = file_path(template);
+        let out = file_path(output);
+        // One sed program applying every substitution (literal, not regex — escape specials).
+        let esc = |s: &str| s.replace(['\\', '/', '&'], "_").replace('\n', " ");
+        let prog: String = substitutions
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| format!("s/{}/{}/g;", esc(k), esc(v)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        with_current(sess, |c| {
+            c.actions.push(AnalyzedAction {
+                mnemonic: "TemplateExpand".into(),
+                argv: vec!["/usr/bin/sed".into(), prog.clone(), tpl.clone()],
+                inputs: vec![tpl.clone()],
+                outputs: vec![out.clone()],
+            })
+        });
+        Ok(NoneType)
+    }
     fn run_shell<'v>(
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = named)] command: Option<Value<'v>>,

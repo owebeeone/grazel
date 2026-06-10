@@ -259,6 +259,20 @@ where
         self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| v.to_value())
     }
     /// `dep[MyInfo]` — the instance this dep's rule returned for that provider.
+    /// Dep targets key dicts (`label_keyed_string_dict`): identity = canonical label.
+    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+        use std::hash::Hash;
+        self.label.hash(hasher);
+        Ok(())
+    }
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(match other.downcast_ref::<DepTarget<'v>>() {
+            Some(o) => o.label == self.label,
+            None => other
+                .downcast_ref::<FrozenDepTarget>()
+                .is_some_and(|o| o.label == self.label),
+        })
+    }
     /// `Provider in dep` — true for registered providers (and the implicit DefaultInfo).
     fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
         Ok(self.providers.iter().any(|(c, _)| c.to_value().ptr_eq(other))
