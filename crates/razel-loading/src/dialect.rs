@@ -407,16 +407,36 @@ fn analyze_rule_decl<'v>(
                     // E0: a forward-referenced local declaration analyzes on demand, first.
                     ensure_analyzed(eval, &dep)?;
                     let sess = session(eval);
-                    let files = {
+                    let resolved = {
                         let results = sess.results.borrow();
-                        let Some(dep_target) = results.get(&dep) else {
+                        results.get(&dep).map(|t| t.default_info.clone())
+                    };
+                    let files = match resolved {
+                        Some(files) => files,
+                        None => {
+                            // Bazel file-label semantics (L2): a label naming no declared target
+                            // resolves to a SOURCE FILE in the package when that file exists
+                            // (`srcs = ["lib.rs"]`). Source files are not target deps.
+                            let qualified = qualify(sess, label.trim_start_matches(':'));
+                            let on_disk = sess
+                                .workspace
+                                .as_ref()
+                                .is_some_and(|root| root.join(&qualified).is_file());
+                            if on_disk {
+                                let heap = eval.heap();
+                                let f = heap.alloc(qualified);
+                                structs.push(heap.alloc_complex_no_freeze(DepTarget {
+                                    fields: vec![("files".to_string(), heap.alloc(vec![f]))],
+                                    providers: Vec::new(),
+                                }));
+                                continue;
+                            }
                             return Err(anyhow::anyhow!(
-                                "dep `{dep}` is not declared in this package \
-                                 (or its package failed to load)"
+                                "`{dep}` is neither a declared target nor a source file in \
+                                 this package"
                             )
                             .into());
-                        };
-                        dep_target.default_info.clone()
+                        }
                     };
                     let tkey = crate::dds::target_key(InstanceId::SINGLE, &dep)
                         .map_err(|e| anyhow::anyhow!(e))?;

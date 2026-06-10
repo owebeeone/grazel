@@ -12,6 +12,8 @@ struct Probe {
     name: &'static str,
     rung: &'static str,
     build: &'static str,
+    /// Extra package files the corpus needs on disk (path under the package, content).
+    files: &'static [(&'static str, &'static str)],
     /// Green rungs guard against regression; frontier rungs report their first failure.
     must_pass: bool,
 }
@@ -22,6 +24,7 @@ const PROBES: &[Probe] = &[
         rung: "L2",
         build: "load(\"@bazel_skylib//lib:paths.bzl\", \"paths\")\n\
                 filegroup(name = paths.basename(\"x/leaf.o\"), srcs = [])\n",
+        files: &[],
         must_pass: true,
     },
     Probe {
@@ -29,6 +32,7 @@ const PROBES: &[Probe] = &[
         rung: "L2",
         build: "load(\"@bazel_skylib//rules:common_settings.bzl\", \"BuildSettingInfo\")\n\
                 filegroup(name = \"x\", srcs = [])\n",
+        files: &[],
         must_pass: true,
     },
     Probe {
@@ -36,6 +40,7 @@ const PROBES: &[Probe] = &[
         rung: "L2",
         build: "load(\"@rules_rust//rust/private:rust.bzl\", \"rust_library\")\n\
                 filegroup(name = \"x\", srcs = [])\n",
+        files: &[],
         must_pass: false,
     },
     Probe {
@@ -43,6 +48,7 @@ const PROBES: &[Probe] = &[
         rung: "L2",
         build: "load(\"@rules_rust//rust/private:rust.bzl\", \"rust_library\")\n\
                 rust_library(name = \"hello\", srcs = [\"lib.rs\"])\n",
+        files: &[("lib.rs", "pub fn hello() {}\n")],
         must_pass: false,
     },
 ];
@@ -85,6 +91,9 @@ pub(crate) fn probe(workspace_root: PathBuf) -> ExitCode {
             continue;
         }
         let _ = std::fs::write(pkg.join("BUILD"), p.build);
+        for (name, content) in p.files {
+            let _ = std::fs::write(pkg.join(name), content);
+        }
         let flags = GlobalFlags { external_base: third_party.clone(), ..Default::default() };
         // Probe targets are named for what the BUILD declares; analyze the package's first target.
         let result = analyze_workspace_with(&ws, "//app:x", flags);
