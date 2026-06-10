@@ -7,7 +7,8 @@ use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
 use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
-use starlark::values::Value;
+use starlark::any::ProvidesStaticType;
+use starlark::values::{NoSerialize, Value};
 
 
 
@@ -51,6 +52,17 @@ pub(crate) fn config_members(b: &mut GlobalsBuilder) {
     fn string_list<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
         Ok(NoneType)
     }
+    /// `config.exec(exec_group=?)` / `config.target()` / `config.none()` — attr `cfg=` transition
+    /// constructors (absorbed; configurations/transitions are not yet applied).
+    fn exec<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn target<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn none<'v>(#[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
 }
 
 /// Bazel builtin-namespace stubs (D4 upstream compat): `config_common` / `cc_common` /
@@ -67,24 +79,45 @@ pub(crate) fn config_common_members(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 }
-#[starlark::starlark_module]
-pub(crate) fn cc_common_members(_b: &mut GlobalsBuilder) {}
-#[starlark::starlark_module]
-pub(crate) fn coverage_common_members(_b: &mut GlobalsBuilder) {}
-#[starlark::starlark_module]
-pub(crate) fn testing_members(_b: &mut GlobalsBuilder) {}
+/// An ABSORBING host-namespace value (`cc_common`, `apple_common`, …): any member access, call,
+/// or index resolves to another absorber, so real `.bzl` LOAD regardless of which host-internal
+/// member they touch at module level. The absorption surfaces at ANALYSIS time (an absorbed value
+/// used as a real input fails with a clear `<host-absorbed>` in the traceback) — registered debt;
+/// members gain real semantics as corpora demand them.
+#[derive(Debug, ProvidesStaticType, NoSerialize, allocative::Allocative)]
+#[allow(dead_code)]
+pub(crate) struct Absorb;
+starlark::starlark_simple_value!(Absorb);
 
-/// Bazel's `platform_common.*` namespace (D4 upstream compat). Stub: real rules reference
-/// `platform_common.TemplateVariableInfo` etc.; razel resolves the global so the `.bzl` loads (the
-/// member calls are deferred to instantiation, not yet exercised).
-#[allow(non_snake_case)]
-#[starlark::starlark_module]
-pub(crate) fn platform_common_members(b: &mut GlobalsBuilder) {
-    fn TemplateVariableInfo<'v>(
-        #[starlark(require = pos)] _fields: Option<Value<'v>>,
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
+impl std::fmt::Display for Absorb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<host-absorbed>")
+    }
+}
+
+#[starlark::values::starlark_value(type = "host_absorbed")]
+impl<'v> starlark::values::StarlarkValue<'v> for Absorb {
+    fn get_attr(
+        &self,
+        _attr: &str,
+        heap: starlark::values::Heap<'v>,
+    ) -> Option<Value<'v>> {
+        Some(heap.alloc(Absorb))
+    }
+    fn invoke(
+        &self,
+        _me: Value<'v>,
+        _args: &starlark::eval::Arguments<'v, '_>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        Ok(eval.heap().alloc(Absorb))
+    }
+    fn at(
+        &self,
+        _index: Value<'v>,
+        heap: starlark::values::Heap<'v>,
+    ) -> starlark::Result<Value<'v>> {
+        Ok(heap.alloc(Absorb))
     }
 }
 

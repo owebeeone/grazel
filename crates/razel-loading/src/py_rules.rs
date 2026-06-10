@@ -193,11 +193,12 @@ fn py_executable(
 /// The synthetic `@rules_python` module: re-exports the native rules under the names
 /// real BUILD files `load()` (`py_binary`, `py_library`, `py_test`).
 pub(crate) fn module() -> Result<FrozenModule, String> {
-    let globals = GlobalsBuilder::standard().with(py_rules).build();
+    let globals = GlobalsBuilder::standard().with(py_rules).with(crate::dialect::rule_globals).build();
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse(
             "@rules_python",
-            "py_binary = native_py_binary\npy_library = native_py_library\npy_test = native_py_test\n"
+            "py_binary = native_py_binary\npy_library = native_py_library\npy_test = native_py_test\n\
+             PyInfo = provider(fields = [\"transitive_sources\", \"imports\"])\n"
                 .to_owned(),
             &Dialect::Extended,
         )

@@ -836,10 +836,70 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc(AllocStruct(fields)))
     }
 
+    /// Builtin global provider stubs real rulesets reference (PackageSpecificationInfo:
+    /// package_group's provider; RunEnvironmentInfo/OutputGroupInfo are constructed). Globals
+    /// referenced-but-not-modeled resolve to constructors that absorb.
+    fn PackageSpecificationInfo<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `subrule(implementation, ...)` (compat stub): Bazel's subrule mechanism, absorbed —
+    /// rules defining subrules load; invoking one surfaces at analysis (registered debt).
+    fn subrule<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(Value::new_none())
+    }
+
     /// `transition(implementation, inputs, outputs)` (D4 compat stub): real rules define config
     /// transitions + pass them as `rule(cfg=…)`. razel doesn't apply transitions yet — absorb the args
     /// so the rule defines; `rule()` already absorbs the `cfg` kwarg.
     fn transition<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `visibility(...)` — .bzl load-visibility declaration (compat stub: not enforced).
+    fn visibility<'v>(
+        #[starlark(args)] _a: UnpackTuple<Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `licenses(...)` — legacy license declaration (compat stub).
+    fn licenses<'v>(#[starlark(args)] _a: UnpackTuple<Value<'v>>) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `exports_files(...)` — source files are package-visible in razel already (compat stub).
+    fn exports_files<'v>(
+        #[starlark(args)] _a: UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `package_group(...)` — visibility grouping (compat stub: visibility not enforced).
+    fn package_group<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `aspect(implementation, ...)` (compat stub): aspects are not modeled (TF uses 10); rules
+    /// DEFINING aspects load; applying them is registered debt (L6).
+    fn aspect<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `exec_group(toolchains=?, exec_compatible_with=?)` (compat stub): execution groups are not
+    /// modeled (single execution platform); absorb so real rules define.
+    fn exec_group<'v>(
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         Ok(NoneType)

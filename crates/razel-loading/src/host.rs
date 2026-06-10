@@ -14,12 +14,20 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
             include_str!("../host-repos/bazel_tools/tools/build_defs/cc/action_names.bzl"),
         ),
         (
+            "@bazel_tools//tools/cpp:toolchain_utils.bzl",
+            include_str!("../host-repos/bazel_tools/tools/cpp/toolchain_utils.bzl"),
+        ),
+        (
             "@cc_compatibility_proxy//:symbols.bzl",
             include_str!("../host-repos/cc_compatibility_proxy/symbols.bzl"),
         ),
         (
             "@cc_compatibility_proxy//:proxy.bzl",
             include_str!("../host-repos/cc_compatibility_proxy/proxy.bzl"),
+        ),
+        (
+            "@python_version_repo//:py_version.bzl",
+            include_str!("../host-repos/python_version_repo/py_version.bzl"),
         ),
     ];
     HOST.iter().find(|(k, _)| *k == label).map(|(_, v)| *v)

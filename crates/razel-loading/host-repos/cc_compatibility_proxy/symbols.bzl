@@ -14,7 +14,7 @@ def merge_cc_infos(direct_cc_infos = [], cc_infos = []):
         linking_context = None,
     )
 
-cc_common = struct()
+cc_common = razel_host_absorb  # the host absorber: any member resolves (analysis-time surfacing)
 CcToolchainConfigInfo = provider(doc = "razel host materialization.", fields = [])
 DebugPackageInfo = provider(doc = "razel host materialization.", fields = [])
 ObjcInfo = provider(doc = "razel host materialization.", fields = [])
