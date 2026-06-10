@@ -52,6 +52,12 @@ The two debts that everything else would otherwise be built on twice. Engine-cor
 - **Exit:** parity + full suite green; forward references work; no `to_dds` call in a dep path;
   tag `razelV3/E0-exit`.
 
+**E0 DONE** (`razelV3/E0b`/`E0c`/`E0d`, 2026-06-10): all exit criteria green — forward refs
+resolve (Starlark + native, cycle-guarded), both dep paths fold over the Session-owned live
+store, 54 test bins + the three gates pass. **One honest deviation:** the new declaration
+structures kept `String` labels (born-typed `Label` was not done) — debt item 4 in the précis §7
+stands unchanged; retire it with the L4-scale work at the latest.
+
 ## §3 The corpus ladder (the route to TF-class)
 
 Inherited from précis §3, normative here. Every rung exit is a **build-and-run golden**
