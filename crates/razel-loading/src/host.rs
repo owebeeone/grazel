@@ -65,6 +65,10 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
             "@python_version_repo//:py_version.bzl",
             include_str!("../host-repos/python_version_repo/py_version.bzl"),
         ),
+        (
+            "@bazel_features//:features.bzl",
+            include_str!("../host-repos/bazel_features/features.bzl"),
+        ),
     ];
     HOST.iter().find(|(k, _)| *k == label).map(|(_, v)| *v)
 }
@@ -80,6 +84,44 @@ pub(crate) fn host_build(pkg: &str) -> Option<&'static str> {
         (
             "@bazel_tools//tools/proto",
             include_str!("../host-repos/bazel_tools/tools/proto/BUILD"),
+        ),
+        // The proxy repo's root package: `@cc_compatibility_proxy//:symbols_bzl` is depped by
+        // rules_cc's bzl_libraries (and through them TF's doc targets).
+        (
+            "@cc_compatibility_proxy//",
+            include_str!("../host-repos/cc_compatibility_proxy/BUILD"),
+        ),
+        (
+            "@bazel_features//",
+            include_str!("../host-repos/bazel_features/BUILD"),
+        ),
+        (
+            "@compatibility_proxy//",
+            include_str!("../host-repos/compatibility_proxy/BUILD"),
+        ),
+        (
+            "@proto_bazel_features//",
+            include_str!("../host-repos/proto_bazel_features/BUILD"),
+        ),
+        (
+            "@rules_python//python",
+            include_str!("../host-repos/rules_python/python/BUILD"),
+        ),
+        (
+            "@local_config_cuda//cuda",
+            include_str!("../host-repos/local_config_cuda/cuda/BUILD"),
+        ),
+        (
+            "@local_config_tensorrt//",
+            include_str!("../host-repos/local_config_tensorrt/BUILD"),
+        ),
+        (
+            "@local_config_rocm//rocm",
+            include_str!("../host-repos/local_config_rocm/rocm/BUILD"),
+        ),
+        (
+            "@local_config_sycl//sycl",
+            include_str!("../host-repos/local_config_sycl/sycl/BUILD"),
         ),
     ];
     HOST.iter().find(|(k, _)| *k == pkg).map(|(_, v)| *v)

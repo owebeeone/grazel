@@ -57,6 +57,7 @@ pub(crate) fn bazel_native_rule_globals(b: &mut GlobalsBuilder) {
     b.set("cc_library", get("native_cc_library"));
     b.set("cc_binary", get("native_cc_binary"));
     b.set("cc_test", get("native_cc_binary"));
+    b.set("cc_libc_top_alias", get("native_cc_libc_top_alias"));
     let native_py = GlobalsBuilder::standard().with(crate::py_rules::py_rules).build();
     let getp = |name: &str| {
         native_py

@@ -219,3 +219,26 @@ output (a regression guard), per the characterization header.
   burns exactly 20s then duplicates the load — sweep walls of ~20s/~40s are timeout multiples,
   not eval (the round-22 "40s at 2% CPU" reading). Post-P4a: real cycle detection (waits-for
   check) instead of the timeout, per the P3 plan note.
+
+## Round-24 register (2026-06-11)
+
+- **Failed-package loads re-eval per consumer (perf debt; the purge fix's cost).** A failed
+  package eval now purges its partial `results`/`pending`/`fold_cache` (the round-24 poison
+  fix), so every consumer dep-loading a failing package (e.g. tensorflow/core behind @curl)
+  pays a fresh eval: full sweep 1:00 → 2:19. Follow-up: tag eval failures by phase —
+  DECLARE-phase failure = Bazel's "package in error", memoizable as `PkgState::Failed(err)`
+  (cached error per consumer, loud, no re-eval); drive/analysis failure = declarations are
+  fine, dep re-load stays legitimate (the test contract in cross_package_providers.rs).
+- **Package "load" conflates declarations with whole-package analysis.** `drive_all` entry
+  loads fail the PACKAGE when any single target's analysis fails; Bazel fails per-target.
+  The tfload report therefore undercounts loadable packages. Revisit when the report needs
+  per-target resolution (checkpoint-3 yardstick refinement).
+- **`cc_libc_top_alias` is a record-named stub** (native_cc.rs): rules_cc cc/BUILD's
+  `:current_libc_top`. No grte/libc model; becomes real with L4 platforms if ever needed.
+- **Host doc-target BUILDs are minimal.** @cc_compatibility_proxy/@compatibility_proxy/
+  @bazel_features/@proto_bazel_features/@local_config_{cuda,tensorrt,rocm,sycl}/@rules_python
+  host BUILDs declare only the bzl_library/filegroup doc targets the vendored tree deps
+  today; @rules_python's are filegroups (shim repo has no host-served files — skylib's
+  bzl_library fail()s on empty). Extend per probe, don't pre-build the doc graph.
+- **@bazel_features is all-True modern posture** (host-repos/bazel_features/features.bzl):
+  five version-gates rules_cc consults; unlisted members error loudly by design.

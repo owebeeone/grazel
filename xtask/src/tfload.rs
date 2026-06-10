@@ -36,13 +36,18 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     }
     let mut flags = GlobalFlags::default();
     flags.external_base = Some(root.join("../third-party"));
-    // RAZEL_TFLOAD_ONE=<pkg>: print one package's FULL error (debugging a failure class).
+    // RAZEL_TFLOAD_ONE=<pkg>[,<pkg>…]: print FULL errors (debugging a failure class). A comma
+    // list loads in order in ONE session — replicates sweep context (earlier packages paving
+    // aliases/config_settings) for order-dependent classes.
     if let Ok(one) = std::env::var("RAZEL_TFLOAD_ONE") {
-        let report = load_tree_report(&ws, flags, &[one.clone()]);
-        match &report[0].1 {
-            Ok(()) => println!("{one}: OK"),
-            Err(e) => println!("{one}: FAIL
+        let pkgs: Vec<String> = one.split(',').map(String::from).collect();
+        let report = load_tree_report(&ws, flags, &pkgs);
+        for (pkg, r) in &report {
+            match r {
+                Ok(()) => println!("{pkg}: OK"),
+                Err(e) => println!("{pkg}: FAIL
 {e}"),
+            }
         }
         return Ok(());
     }

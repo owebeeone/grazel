@@ -251,13 +251,31 @@ pub(crate) fn begin_pkg_load(sess: &Session, pkg: &str) -> bool {
 /// Finish a load this caller owned: mark Done (success) or clear (failure — retryable), and
 /// wake waiters.
 pub(crate) fn finish_pkg_load(sess: &Session, pkg: &str, ok: bool) {
-    let mut m = sess.loaded.lock().expect("loaded poisoned");
-    if ok {
-        m.insert(pkg.to_string(), PkgState::Done);
-    } else {
-        m.remove(pkg);
+    {
+        let mut m = sess.loaded.lock().expect("loaded poisoned");
+        if ok {
+            m.insert(pkg.to_string(), PkgState::Done);
+        } else {
+            m.remove(pkg);
+        }
+        sess.loaded_cv.notify_all();
     }
-    sess.loaded_cv.notify_all();
+    if !ok {
+        purge_partial_package(sess, pkg);
+    }
+}
+
+/// A failed package eval must not poison its RESULTS either (the loaded-set twin): targets
+/// analyzed before the failure sit in `results` with their captured provider instances DEAD
+/// (the harvest is skipped on error), so every later consumer would read providerless deps
+/// (`have 0 pairs`) — the TF enable_registration_v2 class. Drop the package's partial
+/// entries; a dep re-load re-declares and re-analyzes them cleanly (the same idempotent
+/// re-analysis consumers already do for harvested decls).
+fn purge_partial_package(sess: &Session, pkg: &str) {
+    let in_pkg = |label: &str| pkg_of(label).is_some_and(|p| p == pkg);
+    sess.results.borrow_mut().retain(|k, _| !in_pkg(k));
+    sess.pending.borrow_mut().retain(|k, _| !in_pkg(k));
+    sess.fold_cache.borrow_mut().retain(|k, _| !in_pkg(k));
 }
 
 impl Session {

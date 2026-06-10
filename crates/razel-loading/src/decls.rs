@@ -814,20 +814,23 @@ fn resolve_label_attr_inner<'v>(
                             pf.split_once(':').map(|(p, f)| (r, p, f))
                         }) {
                             Some((repo, pkg, file)) => {
-                                let exists = sess
-                                    .global
-                                    .external_base
-                                    .as_ref()
-                                    .is_some_and(|base| {
-                                        [repo.to_string(), repo.replace('_', "-")]
-                                            .iter()
-                                            .any(|d| {
-                                                crate::state::path_is_file(
-                                                    sess,
-                                                    &base.join(d).join(pkg).join(file),
-                                                )
-                                            })
-                                    });
+                                // Host-materialized repo files (`@cc_compatibility_proxy//:
+                                // symbols.bzl`) exist by construction — razel compiled them in.
+                                let exists = crate::host::host_bzl(&dep).is_some()
+                                    || sess
+                                        .global
+                                        .external_base
+                                        .as_ref()
+                                        .is_some_and(|base| {
+                                            [repo.to_string(), repo.replace('_', "-")]
+                                                .iter()
+                                                .any(|d| {
+                                                    crate::state::path_is_file(
+                                                        sess,
+                                                        &base.join(d).join(pkg).join(file),
+                                                    )
+                                                })
+                                        });
                                 (exists, format!("external/{repo}/{pkg}/{file}"))
                             }
                             None => (false, dep.clone()),

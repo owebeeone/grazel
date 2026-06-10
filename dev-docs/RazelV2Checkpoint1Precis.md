@@ -580,3 +580,29 @@ is next — **P4a per-worker eval context** (EvalCtx in eval.extra, Deref to Ses
 gets the P3 InFlight treatment) is the prerequisite; added to RazelEvalParallelPlan.md +
 RazelGaps.md. Pool stays opt-in and now warns loudly at threads>1. Repro footgun fixed in the
 record: the spine file is `$TMPDIR/razel-tfload-spine.txt` (temp_dir()), not /tmp.
+
+## Round delta — razelV3 round 24 (2026-06-11)
+
+**The enable_registration_v2 class (55 pkgs) is DEAD — root cause was engine-general, not
+flag-specific: a package eval failing AFTER some targets analyzed left those targets in
+`results` with their captured provider instances dead (harvest skips on error), so every
+consumer read providerless deps ("have 0 pairs"). Fixed: `finish_pkg_load(ok=false)` purges
+the package's partial `results`/`pending`/`fold_cache` — the loaded-set unpoisoning's twin —
+and a dep re-load re-evals cleanly.** Minimal repro became the test
+(cross_package_providers: bool_flag + failing sibling, then a consumer reading
+`target[BuildSettingInfo].value` through a label_keyed_string_dict key — tf_gen_options_header's
+exact shape; the isolated chain had already passed, the poisoning needed the failed-entry
+sequence). **Full sweep 270 → 299/835 (35.8%).** Cost: failing packages re-eval per consumer
+(1:00 → 2:19) — follow-up registered (phase-tagged `PkgState::Failed` memo: declare-phase =
+Bazel's package-in-error, cacheable; drive-phase = re-load legitimate).
+
+En route, the tensorflow-root entry onion peeled five layers (each a host materialization of
+a real generated repo's doc targets): @cc_compatibility_proxy / @compatibility_proxy /
+@bazel_features (all-True modern posture) / @proto_bazel_features / @local_config_{cuda,
+tensorrt,rocm,sycl} / @rules_python doc BUILDs; host-served files now satisfy the external
+source-file existence check; `cc_libc_top_alias` record-named stub; vendor symlink aliases
+`com_google_googletest -> googletest`, `com_google_benchmark -> google_benchmark` (the
+abseil-cpp pattern). Root's next wall: @build_bazel_apple_support (inside grpc — unvendored,
+Gianni's call). New top classes: @curl (64 pkgs, unvendored — Gianni), @pypi (35, posture
+proposal pending). RAZEL_TFLOAD_ONE now takes a comma list (sweep-order repro for
+order-dependent classes). 60 bins; 3 gates; 6 sentinels; 2 rungolds.

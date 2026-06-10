@@ -171,6 +171,22 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
         }))?;
         Ok(NoneType)
     }
+
+    /// Bazel's legacy `cc_libc_top_alias` (rules_cc cc/BUILD `:current_libc_top`): an alias
+    /// for `--grte_top`. razel has no grte model — record the named target so deps resolve
+    /// (loading-grade stub; RazelGaps).
+    fn native_cc_libc_top_alias<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
 }
 
 
