@@ -115,6 +115,10 @@ pub(crate) struct Session {
     /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
     /// `Value`s — so they need no GC tracing and can live on the Session).
     pub(crate) native_decls: RefCell<Vec<Option<NativeAnalyzeFn>>>,
+    /// E0d: the Session's live fact store — the DDS IS the store. `None` until first use (lazy
+    /// schema registration); access via [`crate::dds::session_dds`]. Targets assert incrementally
+    /// at `record_target`; folds read this directly (no per-dep rebuild — O(n), not O(n²)).
+    pub(crate) dds: RefCell<Option<razel_dds::Dds>>,
 }
 
 /// A deferred native-rule analysis body (E0c): the rule fn's work, run by the demand-driven pass.

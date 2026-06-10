@@ -18,6 +18,10 @@ use std::collections::BTreeMap;
 
 
 pub(crate) fn record_target(sess: &Session, t: AnalyzedTarget) {
+    // E0d: assert into the Session's live fact store as we go — folds read it directly. A failure
+    // here is a programming error (registry schema and capture out of sync), like `session()`.
+    crate::dds::assert_target(&mut crate::dds::session_dds(sess), &t, razel_dds::InstanceId::SINGLE)
+        .expect("DDS assert: provider value/schema mismatch");
     sess.results.borrow_mut().insert(t.name.clone(), t.clone());
     sess.state.borrow_mut().targets.push(t);
 }
@@ -69,12 +73,11 @@ pub(crate) fn resolve_dep<'v>(
         ));
     };
     let libs = t.default_info.clone();
-    // The transitive provider closure via the ONE registry-driven fold (C3a.3b) — same helper the
-    // Starlark path uses; targets store OWN, the dependent's view is folded over the dep graph.
-    let all: Vec<AnalyzedTarget> = results.values().cloned().collect();
     drop(results);
-    let dds = crate::dds::to_dds(&all, InstanceId::SINGLE).map_err(|e| anyhow::anyhow!(e))?;
+    // The transitive provider closure via the ONE registry-driven fold (C3a.3b), over the
+    // Session's LIVE store (E0d) — no per-dep rebuild, no snapshot clones.
     let key = crate::dds::target_key(InstanceId::SINGLE, &canon).map_err(|e| anyhow::anyhow!(e))?;
+    let dds = crate::dds::session_dds(sess);
     let fields = crate::dds::fold_dep_fields(&dds, &key).into_iter().collect();
     Ok(DepInfo { libs, canon, fields })
 }

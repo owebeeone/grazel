@@ -334,28 +334,27 @@ fn analyze_rule_decl<'v>(
                     // E0: a forward-referenced local declaration analyzes on demand, first.
                     ensure_analyzed(eval, &dep)?;
                     let sess = session(eval);
-                    let results = sess.results.borrow();
-                    let Some(dep_target) = results.get(&dep) else {
-                        return Err(anyhow::anyhow!(
-                            "dep `{dep}` is not declared in this package \
-                             (or its package failed to load)"
-                        )
-                        .into());
+                    let files = {
+                        let results = sess.results.borrow();
+                        let Some(dep_target) = results.get(&dep) else {
+                            return Err(anyhow::anyhow!(
+                                "dep `{dep}` is not declared in this package \
+                                 (or its package failed to load)"
+                            )
+                            .into());
+                        };
+                        dep_target.default_info.clone()
                     };
-                    // C2c: transitive provider closures come from the ONE razel-dds fold. (E0b
-                    // transitional: per-dep snapshot rebuild — E0d makes the Session own the Dds.)
-                    let dds = crate::dds::to_dds(
-                        &results.values().cloned().collect::<Vec<_>>(),
-                        InstanceId::SINGLE,
-                    )
-                    .map_err(|e| anyhow::anyhow!(e))?;
                     let tkey = crate::dds::target_key(InstanceId::SINGLE, &dep)
                         .map_err(|e| anyhow::anyhow!(e))?;
                     // `files` is own-exposed (DefaultInfo); transitive fields fold via the ONE
-                    // registry-driven helper (shared with the native path) — no hardcoded cc/java.
+                    // registry-driven helper over the Session's LIVE store (E0d — no rebuild).
                     let mut sfields: Vec<(String, Vec<String>)> =
-                        vec![("files".to_string(), dep_target.default_info.clone())];
-                    sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
+                        vec![("files".to_string(), files)];
+                    {
+                        let dds = crate::dds::session_dds(sess);
+                        sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
+                    }
                     dep_labels.push(dep);
                     structs.push(eval.heap().alloc(AllocStruct(sfields)));
                 }
@@ -440,14 +439,11 @@ fn analyze_rule_decl<'v>(
         });
     eval.eval_function(implementation, &[ctx], &[])?;
 
-    // Post-impl: commit the analyzed target. `sess` is still valid — it borrows the extra
-    // target, not `eval`. Short, non-overlapping borrows.
-    {
-        let mut st = sess.state.borrow_mut();
-        if let Some(c) = st.current.take() {
-            sess.results.borrow_mut().insert(c.name.clone(), c.clone());
-            st.targets.push(c);
-        }
+    // Post-impl: commit the analyzed target via record_target (E0d: it also asserts into the
+    // Session's live fact store). Take the in-flight target with a short borrow first.
+    let committed = sess.state.borrow_mut().current.take();
+    if let Some(c) = committed {
+        record_target(sess, c);
     }
     Ok(())
 }

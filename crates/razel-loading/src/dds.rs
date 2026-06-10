@@ -28,41 +28,64 @@ fn set(xs: &[String]) -> FieldValue {
     FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.clone())).collect())
 }
 
-/// Build a [`Dds`] fact store from the analyzed targets: register the cc/java provider schemas, then
-/// assert each target's OWN providers + its dep edges. Transitive provider queries are then folds
-/// over this store (`DdsRead`), not a bespoke loader traversal.
-pub fn to_dds(targets: &[AnalyzedTarget], instance: InstanceId) -> Result<Dds, String> {
+/// A fresh fact store with the registry's provider schemas registered (C3a.2: the registry is the
+/// source of truth — the engine doesn't enumerate languages here).
+fn new_store() -> Dds {
     let mut dds = Dds::new();
-    // C3a.2: schemas come from the provider registry, not a hardcoded cc/java list — the engine no
-    // longer enumerates the languages here (the registry is the source of truth).
     let registry = crate::registry::builtin_registry();
     for ty in registry.provider_types() {
         if let Some(schema) = registry.schema(ty) {
             dds.register_schema(ty.clone(), schema);
         }
     }
+    dds
+}
 
+/// Assert one analyzed target into the store: its `DefaultInfo`, its OWN providers (already DDS
+/// values — the storage IS the algebra, C2d), and its dep edges.
+pub(crate) fn assert_target(
+    dds: &mut Dds,
+    t: &AnalyzedTarget,
+    instance: InstanceId,
+) -> Result<(), String> {
+    let key = target_key(instance, &t.name)?;
+    let e = |m: razel_dds::MergeError| format!("{m:?}");
+    dds.assert(
+        key.clone(),
+        ProviderTypeId::new("DefaultInfo"),
+        Provider::new().with(FieldId::new("files"), set(&t.default_info)),
+    )
+    .map_err(e)?;
+    let mut by_ty: BTreeMap<ProviderTypeId, Vec<(FieldId, FieldValue)>> = BTreeMap::new();
+    for ((ty, fid), val) in &t.providers {
+        by_ty.entry(ty.clone()).or_default().push((fid.clone(), val.clone()));
+    }
+    for (ty, fields) in by_ty {
+        let p = fields.into_iter().fold(Provider::new(), |p, (f, v)| p.with(f, v));
+        dds.assert(key.clone(), ty, p).map_err(e)?;
+    }
+    let deps = t.deps.iter().map(|d| target_key(instance, d)).collect::<Result<Vec<_>, _>>()?;
+    dds.assert_deps(key, deps);
+    Ok(())
+}
+
+/// The Session's live fact store (E0d — the DDS IS the store): lazily initialized with the
+/// registry schemas; [`crate::deps::record_target`] asserts each target as it analyzes, and both
+/// dep-resolution paths fold over it directly — no per-dep rebuild, no snapshot clones.
+pub(crate) fn session_dds<'s>(sess: &'s crate::state::Session) -> std::cell::RefMut<'s, Dds> {
+    let mut o = sess.dds.borrow_mut();
+    if o.is_none() {
+        *o = Some(new_store());
+    }
+    std::cell::RefMut::map(o, |o| o.as_mut().expect("just initialized"))
+}
+
+/// Build a standalone [`Dds`] from analyzed targets (tests + offline analysis; the LIVE store is
+/// [`session_dds`]).
+pub fn to_dds(targets: &[AnalyzedTarget], instance: InstanceId) -> Result<Dds, String> {
+    let mut dds = new_store();
     for t in targets {
-        let key = target_key(instance, &t.name)?;
-        let e = |m: razel_dds::MergeError| format!("{m:?}");
-        dds.assert(
-            key.clone(),
-            ProviderTypeId::new("DefaultInfo"),
-            Provider::new().with(FieldId::new("files"), set(&t.default_info)),
-        )
-        .map_err(e)?;
-        // C2d: the providers are already DDS values — group the target's OWN map by provider type
-        // and assert each. No flat-field reflection; the storage IS the algebra.
-        let mut by_ty: BTreeMap<ProviderTypeId, Vec<(FieldId, FieldValue)>> = BTreeMap::new();
-        for ((ty, fid), val) in &t.providers {
-            by_ty.entry(ty.clone()).or_default().push((fid.clone(), val.clone()));
-        }
-        for (ty, fields) in by_ty {
-            let p = fields.into_iter().fold(Provider::new(), |p, (f, v)| p.with(f, v));
-            dds.assert(key.clone(), ty, p).map_err(e)?;
-        }
-        let deps = t.deps.iter().map(|d| target_key(instance, d)).collect::<Result<Vec<_>, _>>()?;
-        dds.assert_deps(key, deps);
+        assert_target(&mut dds, t, instance)?;
     }
     Ok(dds)
 }
