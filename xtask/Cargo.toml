@@ -10,4 +10,5 @@ publish = false
 # `cargo xtask` alias (.cargo/config.toml). Builds only when invoked.
 
 [dependencies]
+razel-loading = { path = "../crates/razel-loading" } # the ladder probe drives the engine (probe)
 razel-parity = { path = "../crates/razel-parity" } # shared golden normalization (capture-goldens)

@@ -28,6 +28,8 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+mod probe;
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next();
@@ -37,11 +39,12 @@ fn main() -> ExitCode {
         Some("corpus") => corpus(check),
         Some("flags") => flags(check),
         Some("gates") => gates(),
+        Some("probe") => probe::probe(workspace_root()),
         Some("capture-goldens") => capture_goldens(),
         other => {
             eprintln!(
                 "unknown xtask {other:?}\n\
-                 usage: cargo xtask <codegen|corpus|flags|gates|capture-goldens> [--check]"
+                 usage: cargo xtask <codegen|corpus|flags|gates|probe|capture-goldens> [--check]"
             );
             ExitCode::from(64)
         }
