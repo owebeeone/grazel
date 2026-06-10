@@ -257,3 +257,8 @@ output (a regression guard), per the characterization header.
   deferred-select model (select always returns SelectBranches; pick at attr consumption), plus
   tuple-tolerant part flattening in `resolve_attr_value`. Needs the full-sweep parity check —
   eager resolution is load-bearing for macro paths that inspect resolved values.
+- **cc executables stay analysis-absorbed** (round 25): host `cc_common.link` returns absorb
+  when the toolchain has no `c++-link-executable` action_config (the adopted config declares
+  only c++-compile + c++-link-static-library). A BINARY run-golden adds the action_config and
+  makes link real end-to-end. Link artifacts are file-LIKE host values (.path/.short_path/
+  .basename/.extension absorb_with), not real Files — File-ification with that golden.

@@ -90,7 +90,23 @@ pub(crate) fn rungold(root: &Path) -> Result<(), String> {
         }
         ran += 1;
     }
-    println!("xtask rungold: OK — {ran} real actions executed for {target} (outputs verified)");
+    // The ARCHIVE ratchet (round 25): the library target must link its objects into
+    // liblog_severity.a (host cc_common.create_linking_context_from_compilation_outputs —
+    // the lib-naming debt is due here: unix `lib<name>.a`).
+    let archive = t
+        .actions
+        .iter()
+        .find(|a| a.mnemonic == "CppArchive")
+        .ok_or("no CppArchive action on the library target — the archive step is missing")?;
+    let lib = archive
+        .outputs
+        .iter()
+        .find(|o| o.ends_with("liblog_severity.a"))
+        .ok_or_else(|| format!("archive output misnamed: {:?}", archive.outputs))?;
+    if !er.join(lib).exists() {
+        return Err(format!("archive `{lib}` not produced"));
+    }
+    println!("xtask rungold: OK — {ran} real actions executed for {target} (outputs + archive verified)");
 
     // The RUST golden: tinyjson (a real crates.io package) through real rules_rust.
     let ws = root.join("../third-party/rules_rust_tinyjson");

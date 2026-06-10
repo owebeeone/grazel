@@ -629,3 +629,18 @@ srcs/data errors loudly. Build-grade (later, if ever) = point at host site-packa
 alternatives: real vendor (300+ wheels, absurd); per-package static table (drift). Top
 remaining classes after this: @curl (66 — vendor decision also yours), tensorflow_py/
 protos_all_py "not analyzed" (60 — py macro layer), lite framework_experimental (22).
+
+## Round delta — razelV3 round 26 (2026-06-11)
+
+**The abseil run-golden now BUILDS THE ARCHIVE: real `_cc_library_impl` → host
+`cc_common.create_linking_context_from_compilation_outputs` → a real `c++-link-static-library`
+action (libtool) over the Constrain engine — `_libs/log_severity/liblog_severity.a` produced
+and verified in the execroot (rungold ratcheted to require it). The static lib-naming debt is
+PAID at the seam: `get_artifact_name_for_category` does real unix naming (lib<name>.a /
+lib<name>.lo); dynamic naming stays passthrough until a dynamic golden.** Also real now:
+`cc_common.merge_compilation_outputs` (its absorption silently emptied the object list — the
+golden caught it) and `cc_common.link` (executable-link template; returns absorb while the
+adopted toolchain lacks a c++-link-executable action_config — a binary golden's debt,
+registered). Link artifacts are file-LIKE absorb values (.path/.short_path/.basename/
+.extension; cc_library's collision check reads short_path). 60 bins; 3 gates; 6 sentinels;
+rungold = cc compile+archive, rust 2 actions.
