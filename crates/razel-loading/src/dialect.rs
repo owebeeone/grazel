@@ -495,6 +495,28 @@ fn analyze_rule_decl<'v>(
                 .unwrap_or(false)
             {
                 return Err(anyhow::anyhow!("mandatory attribute `{an}` not provided").into());
+            } else {
+                // Bazel TYPE defaults: an attr always exists on ctx.attr (real rules iterate
+                // `ctx.attr.deps` unconditionally). Lists → [], dicts → {}, string → "",
+                // int → 0, bool → False, label/output → None.
+                let heap = eval.heap();
+                let kind = descriptor
+                    .get_attr("kind", heap)?
+                    .and_then(|k| k.unpack_str().map(String::from))
+                    .unwrap_or_default();
+                let v = match kind.as_str() {
+                    "label_list" | "string_list" | "output_list" => {
+                        heap.alloc(Vec::<Value<'v>>::new())
+                    }
+                    "string_dict" | "string_list_dict" | "label_keyed_string_dict" => {
+                        heap.alloc(starlark::values::dict::AllocDict::EMPTY)
+                    }
+                    "string" => heap.alloc(""),
+                    "int" => heap.alloc(0),
+                    "bool" => Value::new_bool(false),
+                    _ => Value::new_none(), // label / output / unknown kinds
+                };
+                fields.push((an.to_string(), v));
             }
         }
     }

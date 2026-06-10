@@ -134,6 +134,12 @@ pub(crate) fn probe(workspace_root: PathBuf) -> ExitCode {
         };
         match result {
             Ok(_) => eprintln!("PROBE {} [{}]: OK", p.name, p.rung),
+            Err(e) if std::env::var_os("RAZEL_PROBE_FULL").is_some() => {
+                eprintln!("PROBE {} [{}]: FAIL\n{e}", p.name, p.rung);
+                if p.must_pass {
+                    sentinel_failures += 1;
+                }
+            }
             Err(e) => {
                 let class = classify(&e);
                 eprintln!("PROBE {} [{}]: FAIL({class}) — {}", p.name, p.rung, first_line(&e));

@@ -55,6 +55,29 @@ user(name = "u", lib = ":a")
     assert!(u.actions[0].argv.contains(&"a.o".to_string()), "single label resolved to its files: {:?}", u.actions[0].argv);
 }
 
+/// L2: an omitted attr with NO explicit default gets its Bazel TYPE default (`label_list`→[],
+/// `string`→"", `int`→0, `bool`→False) — `ctx.attr.<name>` always exists (real rules iterate
+/// `ctx.attr.deps` unconditionally).
+#[test]
+fn omitted_attrs_get_type_defaults() {
+    let src = r#"
+def _impl(ctx):
+    args = [str(len(ctx.attr.deps)), ctx.attr.s + "end", str(ctx.attr.n), str(ctx.attr.b)]
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = args)
+
+r = rule(implementation = _impl, attrs = {
+    "deps": attr.label_list(),
+    "s": attr.string(),
+    "n": attr.int(),
+    "b": attr.bool(),
+})
+r(name = "t")
+"#;
+    let targets = analyze_starlark("BUILD", src).unwrap();
+    let argv = &targets[0].actions[0].argv;
+    assert_eq!(argv[1..], ["0", "end", "0", "False"], "type defaults applied: {argv:?}");
+}
+
 /// D1a: a `mandatory` attr that's omitted is a clear analysis error (not a silent `None`).
 #[test]
 fn rule_errors_on_missing_mandatory_attr() {
