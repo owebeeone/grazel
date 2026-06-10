@@ -384,9 +384,13 @@ cc_thing(name = "gadget", src = "gadget.c")
 
     #[test]
     fn select_picks_default_branch() {
+        // razelV3: conditions must be DECLARED config_settings (the stub tolerated unknowns);
+        // under the default config (fastbuild) the non-matching :dbg falls through to default.
         let src = r#"
+config_setting(name = "dbg", values = {"compilation_mode": "dbg"})
+
 def _impl(ctx):
-    flags = select({"//conditions:default": ["-O2"], "@cfg//:dbg": ["-g"]})
+    flags = select({"//conditions:default": ["-O2"], ":dbg": ["-g"]})
     ctx.actions.run(executable = "cc", outputs = [ctx.attr.name], inputs = [], arguments = flags)
     return [DefaultInfo(files = [ctx.attr.name])]
 
@@ -394,8 +398,9 @@ thing = rule(implementation = _impl, attrs = {})
 thing(name = "x")
 "#;
         let targets = analyze_starlark("BUILD", src).unwrap();
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].actions[0].mnemonic, "cc");
+        let x = targets.iter().find(|t| t.name.ends_with("x")).unwrap();
+        assert_eq!(x.actions[0].mnemonic, "cc");
+        assert!(x.actions[0].argv.contains(&"-O2".to_string()), "default branch picked");
     }
 
     #[test]

@@ -702,12 +702,21 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// `config_setting`/`test_suite`/`alias` carry no buildable output here, so they
     /// record an empty target under their label (analysis-visible, builds to nothing);
     /// `filegroup` forwards its `srcs` as its outputs so dependents resolve them.
+    /// `config_setting(name, values=?, define_values=?)` — declare a constraint spec `select()`
+    /// matches against the structured configuration (razelV3: real resolution, not a placeholder).
     fn config_setting<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] values: Option<SmallMap<String, String>>,
+        #[starlark(require = named)] define_values: Option<SmallMap<String, String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
+        let spec = crate::state::ConfigSpec {
+            values: values.map(|m| m.into_iter().collect()).unwrap_or_default(),
+            define_values: define_values.map(|m| m.into_iter().collect()).unwrap_or_default(),
+        };
+        sess.config_specs.borrow_mut().insert(canon_label(sess, &name), spec);
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             ..Default::default()
@@ -835,17 +844,59 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc_complex_no_freeze(Depset { items }))
     }
 
-    /// `select({cond: value, …})` — host-config-lite: pick `//conditions:default`, else
-    /// the first branch. (Real config_setting matching is Phase 8.)
-    fn select<'v>(branches: SmallMap<String, Value<'v>>) -> anyhow::Result<Value<'v>> {
-        if let Some(v) = branches.get("//conditions:default") {
-            return Ok(*v);
+    /// `select({condition: value, …})` — REAL resolution (razelV3, retiring the first-branch
+    /// stub): each condition names a declared `config_setting`, whose constraints must ALL match
+    /// the structured configuration; the most-specialized match wins (its constraints contain
+    /// every other match's); `//conditions:default` is the fallback; no match + no default, an
+    /// ambiguous pair, or an undeclared condition error LOUDLY. Eager (call-time) resolution:
+    /// declare conditions before the selects that use them (deferred select = registered debt).
+    fn select<'v>(
+        branches: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let sess = session(eval);
+        let mut matches: Vec<(String, crate::state::ConfigSpec, Value<'v>)> = Vec::new();
+        for (cond, v) in &branches {
+            if cond == "//conditions:default" {
+                continue;
+            }
+            let canon = canon_label(sess, cond);
+            // Cross-package condition in workspace mode: load its package on demand (the borrow
+            // in the condition drops before the nested eval — the [R1] discipline).
+            if !sess.config_specs.borrow().contains_key(&canon)
+                && sess.workspace.is_some()
+                && let Some(pkg) = crate::state::pkg_of(&canon)
+            {
+                let _ = crate::rules::load_package(sess, &pkg);
+            }
+            let spec = sess.config_specs.borrow().get(&canon).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "select(): `{cond}` is not a declared config_setting — declare conditions \
+                     before the selects that use them"
+                )
+            })?;
+            if spec.matches(&sess.global).map_err(|e| anyhow::anyhow!(e))? {
+                matches.push((cond.clone(), spec, *v));
+            }
         }
-        branches
-            .values()
-            .next()
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("select() with no branches"))
+        if matches.is_empty() {
+            return branches.get("//conditions:default").copied().ok_or_else(|| {
+                anyhow::anyhow!("select() matched no condition and has no //conditions:default")
+            });
+        }
+        // Most-specialized wins: the winner's constraint set must contain every other match's.
+        matches.sort_by_key(|(_, s, _)| std::cmp::Reverse(s.constraints().len()));
+        let win = matches[0].1.constraints();
+        for (cond, s, _) in &matches[1..] {
+            if !s.constraints().is_subset(&win) {
+                return Err(anyhow::anyhow!(
+                    "select() is ambiguous: `{}` and `{cond}` both match and neither \
+                     specializes the other",
+                    matches[0].0
+                ));
+            }
+        }
+        Ok(matches[0].2)
     }
 
     /// `define_config(name, compile, archive=None, link=None)` — declare + register a

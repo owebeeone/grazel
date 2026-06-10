@@ -6,7 +6,7 @@ use razel_dds::{FieldId, FieldValue, ProviderTypeId, Scalar};
 use starlark::any::ProvidesStaticType;
 use starlark::eval::Evaluator;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 /// One action registered by a rule impl (`ctx.actions.run`/`write`).
@@ -115,6 +115,8 @@ pub(crate) struct Session {
     /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
     /// `Value`s — so they need no GC tracing and can live on the Session).
     pub(crate) native_decls: RefCell<Vec<Option<NativeAnalyzeFn>>>,
+    /// Declared `config_setting` specs by canonical label — what `select()` matches (razelV3).
+    pub(crate) config_specs: RefCell<BTreeMap<String, ConfigSpec>>,
     /// E0d: the Session's live fact store — the DDS IS the store. `None` until first use (lazy
     /// schema registration); access via [`crate::dds::session_dds`]. Targets assert incrementally
     /// at `record_target`; folds read this directly (no per-dep rebuild — O(n), not O(n²)).
@@ -183,6 +185,65 @@ pub struct GlobalFlags {
     /// `@repo//pkg:file` load resolves to `<base>/<repo>/pkg/file`, with `_`→`-` name tolerance
     /// (canonical `@bazel_skylib` ↔ dir `bazel-skylib`). `None` ⇒ external loads not configured.
     pub external_base: Option<PathBuf>,
+    /// `-c`/`--compilation_mode` as STRUCTURED configuration (`config_setting` matching reads
+    /// this; the cc flag expansion into `copts` is separate, done by the CLI). Empty ⇒ Bazel's
+    /// default `fastbuild`.
+    pub compilation_mode: String,
+    /// `--define k=v` pairs as structured configuration (`config_setting` `define_values` /
+    /// `values = {"define": "k=v"}`).
+    pub defines: Vec<(String, String)>,
+}
+
+impl GlobalFlags {
+    /// The effective compilation mode (`fastbuild` when unset — Bazel's default).
+    pub(crate) fn mode(&self) -> &str {
+        if self.compilation_mode.is_empty() { "fastbuild" } else { &self.compilation_mode }
+    }
+}
+
+/// A `config_setting`'s declared constraints — what `select()` matches against the configuration.
+/// `values` keys razel models: `compilation_mode`, `define` (`"k=v"`); an unmodeled key errors
+/// loudly at match time (never a silent non-match).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConfigSpec {
+    pub(crate) values: BTreeMap<String, String>,
+    pub(crate) define_values: BTreeMap<String, String>,
+}
+
+impl ConfigSpec {
+    /// Does every constraint hold against the configuration?
+    pub(crate) fn matches(&self, flags: &GlobalFlags) -> Result<bool, String> {
+        let has_define =
+            |k: &str, v: &str| flags.defines.iter().any(|(dk, dv)| dk == k && dv == v);
+        for (key, want) in &self.values {
+            let ok = match key.as_str() {
+                "compilation_mode" => flags.mode() == want,
+                "define" => match want.split_once('=') {
+                    Some((k, v)) => has_define(k, v),
+                    None => return Err(format!("config_setting `define` value `{want}` is not k=v")),
+                },
+                other => {
+                    return Err(format!(
+                        "config_setting key `{other}` is not modeled (razel models \
+                         compilation_mode + define)"
+                    ));
+                }
+            };
+            if !ok {
+                return Ok(false);
+            }
+        }
+        Ok(self.define_values.iter().all(|(k, v)| has_define(k, v)))
+    }
+
+    /// All constraints as one comparable set (for the most-specialized-wins rule).
+    pub(crate) fn constraints(&self) -> BTreeSet<(String, String, String)> {
+        self.values
+            .iter()
+            .map(|(k, v)| ("v".to_string(), k.clone(), v.clone()))
+            .chain(self.define_values.iter().map(|(k, v)| ("d".to_string(), k.clone(), v.clone())))
+            .collect()
+    }
 }
 
 /// The cc toolchain mode (RazelStarlarkBoundaryPlan §7) — the resolution to declared-vs-executable.

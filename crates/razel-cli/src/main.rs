@@ -120,6 +120,14 @@ impl Opts {
         GlobalFlags {
             copts,
             linkopts: self.linkopts.clone(),
+            // Structured configuration (config_setting/select matching) — the cc flag
+            // expansion above is separate.
+            compilation_mode: self.compilation_mode.clone().unwrap_or_default(),
+            defines: self
+                .defines
+                .iter()
+                .filter_map(|d| d.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                .collect(),
             ..Default::default()
         }
     }
