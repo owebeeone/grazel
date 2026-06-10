@@ -145,3 +145,44 @@ delta — not ticket count — is the progress metric.
   — treat L6a (pre-configured vendored repos) as the honest first cut.
 - **Agent-cost blowout.** Implementers must run on narrow context; the supervisor batches; the
   probe harness, not an agent, does the searching.
+
+## 7. Architecture note: is the current shape optimal? (No — two debts block soon)
+
+The spike methodology — cheapest structure that proves the seam — was right, and the seams it
+produced (per-`Session` state, the value algebra, the registries, the gates) are keepers. But
+the current shape carries five known debts, two of which become **blocking** at near rungs.
+Verified in code, ranked by when they bite:
+
+1. **Eager same-scope analysis (no loading/analysis phase split).** Rule impls run *at target
+   declaration*; a dep on a later-declared target is an error (`dialect.rs` "not analyzed yet —
+   forward references not yet supported"). Bazel loads a whole package before analyzing, and
+   real-world BUILD files (rules_rust's own tests, abseil, TF) freely forward-reference — this
+   breaks on first contact with real corpora, likely **during L2**. Fix is a re-architecture,
+   not a ticket: BUILD eval only *records* declarations; analysis becomes a demand-driven pass
+   over the recorded graph (which also unlocks parallel analysis). The registries/folds survive
+   unchanged; `invoke`/`record_target` do not.
+2. **The DDS is derived, not the store.** `Session.results` (a `BTreeMap` of `AnalyzedTarget`,
+   self-described in `state.rs` as "the embryonic DDS fact store") is the real store; a fresh
+   `Dds` is rebuilt — cloning **every analyzed target** — on *every dep resolution*
+   (`deps.rs:69`, `dialect.rs:151`). Analysis is O(n²) with heavy constants: invisible on
+   3-package corpora, noticeable at abseil scale (**L4**), impossible at TF. Fix: the `Session`
+   owns one `Dds`, facts asserted at `record_target` time, folds read it incrementally — this
+   also collapses the `AnalyzedTarget.providers`/DDS dual representation.
+3. **The language boundary is a convention, not a compilation unit.** Engine core + dialect +
+   all five language modules live in one 3.4k-LOC crate (`razel-loading`), with the C3c gate
+   enforcing by allowlist what a crate boundary would enforce by compiler. Split
+   (`razel-loading-core` + `razel-rules-*`) after L2 deletes the rust shims — mechanical (the
+   C0 method), and it turns the gate from a linter into a type error.
+4. **Stringly-typed labels and files at the seam.** `razel-core::Label` exists but
+   `razel-loading` passes `String`s everywhere (`canon_label` munging, files as path strings,
+   no artifact identity). Perf + label-form correctness cliff at L4 scale; mechanical to fix,
+   cheaper the earlier it's done.
+5. **Two instantiation paths.** Native rules and the `rule()` path still duplicate the
+   gather/record shape (the fold is unified; the rest isn't). Already scheduled: each ladder
+   rung exit deletes the corresponding native/shim path.
+
+**Scheduling implication (amends §4/§5):** items 1–2 are *foundations*, not tickets — grinding
+agent tickets onto the eager-analysis core means building on a structure that must be replaced
+mid-ladder. The supervisor's first epic, before mass ticket rounds, should be the phase split
+(1) with the incremental DDS (2) riding the same rework, both proven by the existing parity
+suite staying green. Items 3–5 are rung-exit chores.
