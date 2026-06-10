@@ -275,11 +275,11 @@ pub(crate) fn flatten_arg(v: Value) -> Vec<String> {
 
 /// A `File` value: a workspace-relative path with Bazel's File fields. razel paths
 /// are already workspace-relative, so `short_path` == `path`.
-#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct File {
-    #[trace(unsafe_ignore)]
     pub(crate) path: String,
 }
+starlark::starlark_simple_value!(File);
 
 
 impl fmt::Display for File {

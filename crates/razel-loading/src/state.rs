@@ -122,6 +122,14 @@ pub(crate) struct Session {
     pub(crate) aliases: RefCell<BTreeMap<String, String>>,
     /// Declared `config_setting` specs by canonical label — what `select()` matches (razelV3).
     pub(crate) config_specs: RefCell<BTreeMap<String, ConfigSpec>>,
+    /// Session-wide `.bzl` module cache (canonical label → frozen module). ONE evaluation per
+    /// `.bzl` per Session — provider identities (`dep[MyInfo]` ptr-eq) hold across packages,
+    /// and TF's macro layer evaluates once, not per-package.
+    pub(crate) bzl_cache: RefCell<std::collections::HashMap<String, starlark::environment::FrozenModule>>,
+    /// Layer 0: harvested provider instances from COMPLETED packages (one frozen dict per
+    /// package: canonical label → [(constructor, instance)]). OwnedFrozenValues keep their
+    /// heaps alive; `dep[P]` falls back here for cross-package instances.
+    pub(crate) cross_captured: RefCell<Vec<starlark::values::OwnedFrozenValue>>,
     /// E0d: the Session's live fact store — the DDS IS the store. `None` until first use (lazy
     /// schema registration); access via [`crate::dds::session_dds`]. Targets assert incrementally
     /// at `record_target`; folds read this directly (no per-dep rebuild — O(n), not O(n²)).

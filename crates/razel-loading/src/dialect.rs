@@ -512,6 +512,70 @@ pub(crate) fn resolve_attr_value<'v>(
 // ---- E0: the phase split — declaration store + demand-driven analysis -------------------------
 
 
+/// The module variable carrying the harvested provider captures across `module.freeze()` —
+/// a plain dict {canonical label: [(constructor, instance)]} (builtin containers freeze natively;
+/// the instances are freeze-generic).
+pub(crate) const CAPTURED_VAR: &str = "__razel_captured";
+
+/// Layer 0 pre-freeze step: copy the decl store's captured map into [`CAPTURED_VAR`] as plain
+/// dict/list/tuples, then unroot the (unfreezable, already-drained) decl store.
+pub(crate) fn stash_captured_for_freeze<'v>(module: &Module<'v>) -> anyhow::Result<()> {
+    let heap = module.heap();
+    let Some(storev) = module.get(DECLS_VAR) else { return Ok(()) };
+    let Some(store) = storev.downcast_ref::<DeclStore<'v>>() else { return Ok(()) };
+    let captured = store.captured.borrow();
+    let entries: Vec<(Value<'v>, Value<'v>)> = captured
+        .iter()
+        .map(|(label, pairs)| {
+            let items: Vec<Value<'v>> =
+                pairs.iter().map(|(c, i)| heap.alloc((*c, *i))).collect();
+            (heap.alloc(label.as_str()), heap.alloc(items))
+        })
+        .collect();
+    drop(captured);
+    module.set(CAPTURED_VAR, heap.alloc(starlark::values::dict::AllocDict(entries)));
+    module.set(DECLS_VAR, Value::new_none());
+    Ok(())
+}
+
+/// Layer 0 lookup: a completed package's harvested instances for `label`, re-viewed in the
+/// consumer's eval (sound: the Session's OwnedFrozenValues keep the source heaps alive).
+pub(crate) fn cross_providers_for<'v>(
+    eval: &Evaluator<'v, '_, '_>,
+    label: &str,
+) -> Vec<(Value<'v>, Value<'v>)> {
+    let sess = session(eval);
+    // `owned_value(frozen_heap)`: the CONSUMER module's frozen heap takes a reference to the
+    // source heap, so the returned values stay alive as long as the consumer module — the
+    // sound cross-heap pattern (buck2's).
+    let owners: Vec<starlark::values::OwnedFrozenValue> = sess.cross_captured.borrow().clone();
+    for owned in &owners {
+        // SAFETY: `owned_frozen_value` registers the source heap on the CONSUMER module's
+        // frozen heap, which outlives every `'v` value of that module — the values stay live
+        // for at least `'v` (the safe `owned_value` wrapper merely picks the shorter `'a`).
+        let fv = unsafe { owned.owned_frozen_value(eval.frozen_heap()) };
+        let dictv: Value<'v> = fv.to_value();
+        let Some(d) = starlark::values::dict::DictRef::from_value(dictv) else { continue };
+        for (k, vlist) in d.iter() {
+            if k.unpack_str() == Some(label) {
+                let mut out = Vec::new();
+                if let Some(l) = ListRef::from_value(vlist) {
+                    for item in l.iter() {
+                        if let Some(t) = starlark::values::tuple::TupleRef::from_value(item) {
+                            let xs: Vec<Value<'v>> = t.iter().collect();
+                            if xs.len() == 2 {
+                                out.push((xs[0], xs[1]));
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// The module variable holding the package's [`DeclStore`] — installed by the analysis entry
 /// points before BUILD eval; not addressable from Starlark source.
 pub(crate) const DECLS_VAR: &str = "__razel_decls";
@@ -757,7 +821,7 @@ fn resolve_label_attr<'v>(
                     if on_disk {
                         let heap = eval.heap();
                         let f = heap.alloc(qualified);
-                        structs.push(heap.alloc_complex_no_freeze(DepTarget {
+                        structs.push(heap.alloc(DepTarget {
                             fields: vec![("files".to_string(), heap.alloc(vec![f]))],
                             providers: Vec::new(),
                         }));
@@ -791,9 +855,15 @@ fn resolve_label_attr<'v>(
                 .get(&dep)
                 .cloned()
                 .unwrap_or_default();
+            // Layer 0: cross-package instances come from the Session harvest.
+            let providers = if providers.is_empty() {
+                cross_providers_for(eval, &dep)
+            } else {
+                providers
+            };
             dep_labels.push(dep);
             structs.push(
-                heap.alloc_complex_no_freeze(DepTarget { fields: dfields, providers }),
+                heap.alloc(DepTarget { fields: dfields, providers }),
             );
         }
         // D1c: a single `attr.label` yields ONE struct; a list yields the list of structs.
@@ -921,7 +991,7 @@ fn analyze_rule_decl<'v>(
     // ctx.outputs.<attr> — string-valued attrs are predeclared output filenames
     // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
     // (qualified). ctx.executable is empty until an executable-label attr is wired.
-    let mk_file = |s: &str| heap.alloc_complex_no_freeze(File { path: qualify(sess, s) });
+    let mk_file = |s: &str| heap.alloc(File { path: qualify(sess, s) });
     let outputs_fields: Vec<(String, Value<'v>)> = kwargs
         .iter()
         .filter_map(|(k, v)| v.unpack_str().map(|s| (k.clone(), mk_file(s))))
@@ -1136,29 +1206,34 @@ pub(crate) fn instance_callable<'v>(item: Value<'v>) -> Option<Value<'v>> {
 /// A resolved dependency as seen by a rule impl (L2a): the plain projected fields (`files`,
 /// `headers`, …) via `get_attr`, plus `dep[MyInfo]` indexing into the dep's captured provider
 /// instances (constructor identity — `Value::ptr_eq`).
-#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
-pub(crate) struct DepTarget<'v> {
-    fields: Vec<(String, Value<'v>)>,
-    providers: Vec<(Value<'v>, Value<'v>)>,
+#[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
+#[repr(C)]
+pub(crate) struct DepTargetGen<V: ValueLifetimeless> {
+    fields: Vec<(String, V)>,
+    providers: Vec<(V, V)>,
 }
+starlark_complex_value!(pub(crate) DepTarget);
 
-impl fmt::Display for DepTarget<'_> {
+impl<V: ValueLifetimeless> fmt::Display for DepTargetGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<dep>")
     }
 }
 
 #[starlark_value(type = "dep_target")]
-impl<'v> StarlarkValue<'v> for DepTarget<'v> {
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for DepTargetGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
     fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
-        self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| *v)
+        self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| v.to_value())
     }
     /// `dep[MyInfo]` — the instance this dep's rule returned for that provider.
     fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
         self.providers
             .iter()
-            .find(|(c, _)| c.ptr_eq(index))
-            .map(|(_, inst)| *inst)
+            .find(|(c, _)| c.to_value().ptr_eq(index))
+            .map(|(_, inst)| inst.to_value())
             .ok_or_else(|| {
                 starlark::Error::new_other(anyhow::anyhow!(
                     "target does not provide the requested provider"

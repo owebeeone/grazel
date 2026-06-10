@@ -21,7 +21,6 @@ use starlark::environment::{
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::{AstModule, Dialect};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 
@@ -159,7 +158,6 @@ pub(crate) struct Ruleset {
 pub(crate) struct BzlLoader<'a> {
     rulesets: &'a [Ruleset],
     globals: &'a Globals,
-    cache: RefCell<HashMap<String, FrozenModule>>,
     session: &'a Session,
     /// The (repo, pkg) of the external module currently being loaded (`None` frames are
     /// workspace modules). Loads written INSIDE `@repo` resolve repo-relatively — Bazel label
@@ -201,7 +199,7 @@ impl BzlLoader<'_> {
 impl FileLoader for BzlLoader<'_> {
     fn load(&self, path: &str) -> starlark::Result<FrozenModule> {
         let path = &self.canonicalize(path);
-        if let Some(m) = self.cache.borrow().get(path) {
+        if let Some(m) = self.session.bzl_cache.borrow().get(path) {
             return Ok(m.clone());
         }
         let err = |m: String| starlark::Error::new_other(anyhow::anyhow!(m));
@@ -266,7 +264,8 @@ impl FileLoader for BzlLoader<'_> {
         self.load_ctx.borrow_mut().pop();
         self.session.current_bzl_repo.borrow_mut().pop();
         let frozen = frozen?;
-        self.cache
+        self.session
+            .bzl_cache
             .borrow_mut()
             .insert(path.to_string(), frozen.clone());
         Ok(frozen)
@@ -337,7 +336,6 @@ pub(crate) fn eval_build_src_in(
     let loader = BzlLoader {
         rulesets: &rulesets,
         globals: &globals,
-        cache: RefCell::new(HashMap::new()),
         session,
         load_ctx: RefCell::new(vec![repo_ctx.clone()]),
     };
@@ -368,10 +366,19 @@ fn eval_build_src_inner(
             eval.eval_module(ast, globals).map_err(|e| format!("{e}"))?;
         }
         // E0 phase 2: analyze the recorded declarations, demand-driven (forward refs resolve).
-        let mut eval = Evaluator::new(&module);
-        eval.set_loader(loader);
-        eval.extra = Some(session);
-        crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.set_loader(loader);
+            eval.extra = Some(session);
+            crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
+        }
+        // Layer 0: stash the captured provider instances as plain dict/list/tuple values,
+        // unroot the (unfreezable) decl store, freeze the module, harvest into the Session.
+        crate::dialect::stash_captured_for_freeze(&module).map_err(|e| format!("{e}"))?;
+        let fm = module.freeze().map_err(|e| format!("freeze: {e:?}"))?;
+        if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
+            session.cross_captured.borrow_mut().push(owned);
+        }
         Ok(())
     })
 }
@@ -496,9 +503,16 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
             eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
         }
         // E0 phase 2: analyze the recorded declarations, demand-driven (forward refs resolve).
-        let mut eval = Evaluator::new(&module);
-        eval.extra = Some(&session);
-        crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.extra = Some(&session);
+            crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
+        }
+        crate::dialect::stash_captured_for_freeze(&module).map_err(|e| format!("{e}"))?;
+        let fm = module.freeze().map_err(|e| format!("freeze: {e:?}"))?;
+        if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
+            session.cross_captured.borrow_mut().push(owned);
+        }
         Ok(())
     });
     res?;
