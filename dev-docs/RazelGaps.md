@@ -168,3 +168,20 @@ output (a regression guard), per the characterization header.
 - **Convergence (Phase C/D):** make the executed graph BE the declared graph — materialize Bazel's
   toolchain so razel-build runs Adopt-Bazel's `cc_wrapper.sh` + `bazel-out` graph (the §7 "adopt the
   toolchain" end state). Then executed == parity-tested. Until then the gap is real and named.
+
+## E0/L2 debt register (razelV3 round 1 — 2026-06-10)
+
+- **Cross-package custom-provider flow (L2a limit).** `dep[MyInfo]` reads the package-local
+  `DeclStore.captured` (heap-resident instances) — a cross-package dep's custom providers are
+  invisible (clear "does not provide" error, but for the wrong reason). The typed-algebra channel
+  (registry providers) crosses fine. Retire when a real corpus deps custom providers across
+  packages (rules_rust internal layering may hit this in L2).
+- **Labels still `String` (E0 deviation; précis §7 item 4).** The E0 declaration structures kept
+  string labels; `razel-core::Label` exists unused at the seam. Retire by L4 scale at the latest.
+- **`ctx` member expansion backlog (L2, post-rules_cc).** rust.bzl's core three files use 16
+  distinct `ctx.*` members; razel has 6. The probe will surface them one-by-one once the
+  `@rules_cc` load resolves — expect a ticket batch: `bin_dir`, `runfiles`, `expand_location`,
+  `toolchains`, `configuration`, `features`/`disabled_features`, `workspace_name`,
+  `genfiles_dir`, `file`, `expand_make_variables`.
+- **`ctx.actions.write` (go-shaped languages + py-launcher cleanup).** Grounded by go importcfg
+  needs (V3 §4) and the py `printf|sh -c` workaround; small generic engine move.

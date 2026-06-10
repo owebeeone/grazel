@@ -186,3 +186,22 @@ agent tickets onto the eager-analysis core means building on a structure that mu
 mid-ladder. The supervisor's first epic, before mass ticket rounds, should be the phase split
 (1) with the incremental DDS (2) riding the same rework, both proven by the existing parity
 suite staying green. Items 3–5 are rung-exit chores.
+
+---
+
+## Round delta — razelV3 round 1 (2026-06-10)
+
+**Landed** (all green-gated): `razelV3/E0b..E0-exit` — the §7 foundations paid: loading/analysis
+phase split (forward refs resolve, Starlark + native, cycle-guarded) and the Session-owned live
+DDS (per-dep rebuild deleted; O(n²)→O(n)). `razelV3/L2a` — provider capture-from-return +
+`dep[P]` indexing (Bazel's provider model; what `dep[CrateInfo]` rides). `razelV3/L2b` —
+`xtask probe` (the classified ticket generator; green rungs are regression sentinels).
+55 test bins; three gates green.
+
+**Debt added:** see `RazelGaps.md` "E0/L2 debt register" (cross-package custom providers,
+String labels deviation, the 16-member `ctx` backlog, `ctx.actions.write`).
+
+**Rung state:** L2 frontier blocked on ONE resource — `rules_cc` not vendored
+(`@rules_cc//cc/common:cc_info.bzl`, rust.bzl:19; the probe classifies it `missing-export`
+because the synthetic shim catches the prefix). Escalated to Gianni. Next after unblock:
+walk rust.bzl's remaining load graph → instantiation (`ctx` ticket batch above).
