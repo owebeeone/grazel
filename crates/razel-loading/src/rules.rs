@@ -151,17 +151,27 @@ impl FileLoader for BzlLoader<'_> {
             return Ok(m.clone());
         }
         let err = |m: String| starlark::Error::new_other(anyhow::anyhow!(m));
-        // D4: a REAL vendored external file (external_base set + the file exists) takes precedence over
-        // the synthetic ruleset shim — so a configured corpus runs upstream `.bzl`, not razel's stand-in.
-        let real_external = self
-            .session
-            .global
-            .external_base
-            .as_deref()
-            .and_then(|base| external_bzl_path(base, path));
-        let ctx = real_external.is_some().then(|| parse_external(path)).flatten();
-        let fs = if let Some(p) = real_external {
-            p
+        // Resolution order: razel's HOST repos (compiled in — `@bazel_tools` etc. are
+        // host-reserved, as in Bazel) → a REAL vendored external file (D4: upstream `.bzl`
+        // beats razel's synthetic shim) → ruleset shim → workspace file.
+        let host = crate::host::host_bzl(path);
+        let real_external = if host.is_some() {
+            None
+        } else {
+            self.session
+                .global
+                .external_base
+                .as_deref()
+                .and_then(|base| external_bzl_path(base, path))
+        };
+        let ctx = (host.is_some() || real_external.is_some())
+            .then(|| parse_external(path))
+            .flatten();
+        let src = if let Some(content) = host {
+            content.to_string()
+        } else if let Some(p) = real_external {
+            std::fs::read_to_string(&p)
+                .map_err(|e| err(format!("cannot read {}: {e}", p.display())))?
         } else if let Some(rs) = self.rulesets.iter().find(|r| path.starts_with(r.prefix)) {
             return Ok(rs.module.clone());
         } else {
@@ -171,10 +181,10 @@ impl FileLoader for BzlLoader<'_> {
                 .clone()
                 .ok_or_else(|| err(format!("load(\"{path}\") needs workspace mode")))?;
             let cur = self.session.current_pkg.borrow().clone();
-            resolve_bzl(&root, path, cur.as_deref()).map_err(err)?
+            let p = resolve_bzl(&root, path, cur.as_deref()).map_err(err)?;
+            std::fs::read_to_string(&p)
+                .map_err(|e| err(format!("cannot read {}: {e}", p.display())))?
         };
-        let src = std::fs::read_to_string(&fs)
-            .map_err(|e| err(format!("cannot read {}: {e}", fs.display())))?;
 
         // The nested eval runs with this module's repo context on the stack (popped even on error).
         self.load_ctx.borrow_mut().push(ctx);

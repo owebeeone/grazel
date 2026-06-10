@@ -12,6 +12,7 @@ pub mod rules;
 pub mod state; // C0 decomposition: per-analysis state + core types + the host-cc tool layer
 mod values;
 mod dialect;
+mod host; // razelV3: compiled-in host repos (@bazel_tools etc.)
 mod glob;
 mod deps;
 mod native_cc;
