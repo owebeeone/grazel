@@ -30,6 +30,7 @@ fn workspace_root() -> PathBuf {
 
 mod probe;
 mod rungold;
+mod tfload;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -41,6 +42,13 @@ fn main() -> ExitCode {
         Some("flags") => flags(check),
         Some("gates") => gates(),
         Some("probe") => probe::probe(workspace_root()),
+        Some("tfload") => match tfload::tfload(&workspace_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("xtask tfload: FAIL — {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some("rungold") => match rungold::rungold(&workspace_root()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

@@ -129,10 +129,18 @@ pub(crate) fn resolve_dep<'v>(
     drop(results);
     // The transitive provider closure via the ONE registry-driven fold (C3a.3b), over the
     // Session's LIVE store (E0d) — no per-dep rebuild, no snapshot clones.
-    let key = crate::dds::target_key(InstanceId::SINGLE, &canon).map_err(|e| anyhow::anyhow!(e))?;
-    let dds = crate::dds::session_dds(sess);
-    let fields = crate::dds::fold_dep_fields(&dds, &key).into_iter().collect();
-    Ok(DepInfo { libs, canon, fields })
+    let fields = if let Some(hit) = sess.fold_cache.borrow().get(&canon) {
+        hit.clone()
+    } else {
+        let key =
+            crate::dds::target_key(InstanceId::SINGLE, &canon).map_err(|e| anyhow::anyhow!(e))?;
+        let dds = crate::dds::session_dds(sess);
+        let f = crate::dds::fold_dep_fields(&dds, &key);
+        drop(dds);
+        sess.fold_cache.borrow_mut().insert(canon.clone(), f.clone());
+        f
+    };
+    Ok(DepInfo { libs, canon, fields: fields.into_iter().collect() })
 }
 
 

@@ -189,8 +189,12 @@ pub(crate) fn cross_providers_for<'v>(
     let sess = session(eval);
     // `owned_value(frozen_heap)`: the CONSUMER module's frozen heap takes a reference to the
     // source heap, so the returned values stay alive as long as the consumer module — the
-    // sound cross-heap pattern (buck2's).
-    let owners: Vec<starlark::values::OwnedFrozenValue> = sess.cross_captured.borrow().clone();
+    // sound cross-heap pattern (buck2's). O(1) via the harvest index.
+    let owners: Vec<starlark::values::OwnedFrozenValue> =
+        match sess.cross_index.borrow().get(label) {
+            Some(&i) => vec![sess.cross_captured.borrow()[i].clone()],
+            None => return Vec::new(),
+        };
     for owned in &owners {
         // SAFETY: `owned_frozen_value` registers the source heap on the CONSUMER module's
         // frozen heap, which outlives every `'v` value of that module — the values stay live
@@ -440,7 +444,12 @@ pub(crate) fn find_deferred<'v>(
     label: &str,
 ) -> Option<(String, Value<'v>, Vec<(String, Value<'v>)>)> {
     let sess = session(eval);
-    let owners: Vec<starlark::values::OwnedFrozenValue> = sess.deferred_decls.borrow().clone();
+    // O(1): the harvest index names the owning package's dict; scan only that one.
+    let owners: Vec<starlark::values::OwnedFrozenValue> =
+        match sess.deferred_index.borrow().get(label) {
+            Some(&i) => vec![sess.deferred_decls.borrow()[i].clone()],
+            None => return None,
+        };
     let mut found: Option<(String, Value<'v>, Vec<(String, Value<'v>)>)> = None;
     'outer: for owned in &owners {
         // SAFETY: as in cross_providers_for — the consumer module's frozen heap keeps the
@@ -862,9 +871,15 @@ fn resolve_label_attr_inner<'v>(
             // registry-driven helper over the Session's LIVE store (E0d — no rebuild).
             let mut sfields: Vec<(String, Vec<String>)> =
                 vec![("files".to_string(), files)];
-            {
-                let dds = crate::dds::session_dds(sess);
-                sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
+            if let Some(hit) = sess.fold_cache.borrow().get(&dep) {
+                sfields.extend(hit.iter().cloned());
+            } else {
+                let folded = {
+                    let dds = crate::dds::session_dds(sess);
+                    crate::dds::fold_dep_fields(&dds, &tkey)
+                };
+                sess.fold_cache.borrow_mut().insert(dep.clone(), folded.clone());
+                sfields.extend(folded);
             }
             // L2a: a dep is a DepTarget — plain projected fields by attr, plus the dep's
             // returned provider instances indexable by constructor (`dep[MyInfo]`).

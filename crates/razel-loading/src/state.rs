@@ -137,6 +137,16 @@ pub(crate) struct Session {
     /// Harvested UNDRIVEN Starlark declarations (one frozen dict per dependency-loaded
     /// package) — analyzed on demand cross-package ([`crate::dialect`] `analyze_deferred`).
     pub(crate) deferred_decls: RefCell<Vec<starlark::values::OwnedFrozenValue>>,
+    /// label → index into `deferred_decls` (the harvest owner) — O(1) demand lookups; the
+    /// linear all-packages scan was quadratic on tree sweeps.
+    pub(crate) deferred_index: RefCell<std::collections::HashMap<String, usize>>,
+    /// label → index into `cross_captured` (same fix for provider-instance lookups).
+    pub(crate) cross_index: RefCell<std::collections::HashMap<String, usize>>,
+    /// Once-per-session warning keys (tree sweeps turned per-call warnings into log storms).
+    pub(crate) warned: RefCell<std::collections::BTreeSet<String>>,
+    /// Per-target transitive-fold memo (label → folded fields). The DDS fold was the tree-sweep
+    /// hotspot: every dep edge re-walked its transitive closure; diamonds made it quadratic.
+    pub(crate) fold_cache: RefCell<std::collections::HashMap<String, Vec<(String, Vec<String>)>>>,
     /// Layer 0: harvested provider instances from COMPLETED packages (one frozen dict per
     /// package: canonical label → [(constructor, instance)]). OwnedFrozenValues keep their
     /// heaps alive; `dep[P]` falls back here for cross-package instances.

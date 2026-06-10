@@ -5,6 +5,33 @@ use razel_loading::{GlobalFlags, analyze_workspace_with};
 use std::path::Path;
 use std::process::Command;
 
+/// A fresh EXECROOT sandbox: workspace entries symlinked in, `external/` mapping every
+/// vendored repo (both `_`/`-` dir forms). Actions run here; the vendored tree stays clean.
+fn execroot(root: &Path, ws: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    let er = std::env::temp_dir().join(format!("razel-rungold-{name}"));
+    let _ = std::fs::remove_dir_all(&er);
+    std::fs::create_dir_all(er.join("external")).map_err(|e| e.to_string())?;
+    let link = |src: &Path, dst: &Path| -> Result<(), String> {
+        std::os::unix::fs::symlink(src, dst).map_err(|e| format!("{}: {e}", dst.display()))
+    };
+    for e in std::fs::read_dir(ws).map_err(|e| e.to_string())?.flatten() {
+        link(&e.path(), &er.join(e.file_name()))?;
+    }
+    let tp = root.join("../third-party");
+    for e in std::fs::read_dir(&tp).map_err(|e| e.to_string())?.flatten() {
+        if e.path().is_dir() {
+            let n = e.file_name().to_string_lossy().to_string();
+            for alias in [n.clone(), n.replace('-', "_")] {
+                let dst = er.join("external").join(&alias);
+                if !dst.exists() {
+                    let _ = link(&e.path(), &dst);
+                }
+            }
+        }
+    }
+    Ok(er)
+}
+
 pub(crate) fn rungold(root: &Path) -> Result<(), String> {
     // The abseil leaf: real upstream BUILD, real rules_cc impl, razel's host cc_common.compile.
     let ws = root.join("../third-party/com_google_absl");
@@ -30,11 +57,12 @@ pub(crate) fn rungold(root: &Path) -> Result<(), String> {
             &with_actions[..with_actions.len().min(8)]
         ));
     }
+    let er = execroot(root, &ws, "absl")?;
     let mut ran = 0;
     for a in &t.actions {
         for o in &a.outputs {
             if let Some(dir) = Path::new(o).parent() {
-                std::fs::create_dir_all(ws.join(dir)).map_err(|e| e.to_string())?;
+                std::fs::create_dir_all(er.join(dir)).map_err(|e| e.to_string())?;
             }
         }
         // Tool resolution at the RUN boundary: the Constrain config carries Bazel's
@@ -43,7 +71,7 @@ pub(crate) fn rungold(root: &Path) -> Result<(), String> {
         let exe = if a.argv[0].ends_with("cc_wrapper.sh") { "cc" } else { a.argv[0].as_str() };
         let st = Command::new(exe)
             .args(&a.argv[1..])
-            .current_dir(&ws)
+            .current_dir(&er)
             .output()
             .map_err(|e| format!("{} spawn failed: {e}", a.argv[0]))?;
         if !st.status.success() {
@@ -56,7 +84,7 @@ pub(crate) fn rungold(root: &Path) -> Result<(), String> {
             ));
         }
         for o in &a.outputs {
-            if !ws.join(o).exists() {
+            if !er.join(o).exists() {
                 return Err(format!("action `{}` did not produce `{o}`", a.mnemonic));
             }
         }
@@ -78,6 +106,7 @@ pub(crate) fn rungold(root: &Path) -> Result<(), String> {
     if t.actions.is_empty() {
         return Err("no rust actions".into());
     }
+    let er = execroot(root, &ws, "rust")?;
     let mut ran = 0;
     for a in &t.actions {
         // Run-boundary tool resolution: a None bootstrap process_wrapper means DIRECT rustc
@@ -90,12 +119,12 @@ pub(crate) fn rungold(root: &Path) -> Result<(), String> {
         };
         for o in &a.outputs {
             if let Some(dir) = Path::new(o).parent() {
-                std::fs::create_dir_all(ws.join(dir)).map_err(|e| e.to_string())?;
+                std::fs::create_dir_all(er.join(dir)).map_err(|e| e.to_string())?;
             }
         }
         let st = Command::new(argv[0])
             .args(&argv[1..])
-            .current_dir(&ws)
+            .current_dir(&er)
             .output()
             .map_err(|e| format!("{} spawn failed: {e}", argv[0]))?;
         if !st.status.success() {

@@ -424,13 +424,34 @@ fn eval_build_src_inner(
         crate::dialect::stash_captured_for_freeze(&module, session).map_err(|e| format!("{e}"))?;
         let fm = module.freeze().map_err(|e| format!("freeze: {e:?}"))?;
         if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
-            session.cross_captured.borrow_mut().push(owned);
+            index_harvest(&owned, &session.cross_captured, &session.cross_index);
         }
         if let Ok(owned) = fm.get(crate::dialect::DEFERRED_VAR) {
-            session.deferred_decls.borrow_mut().push(owned);
+            index_harvest(&owned, &session.deferred_decls, &session.deferred_index);
         }
         Ok(())
     })
+}
+
+/// Push a harvest dict and index its label keys → owner position (O(1) demand lookups).
+fn index_harvest(
+    owned: &starlark::values::OwnedFrozenValue,
+    store: &std::cell::RefCell<Vec<starlark::values::OwnedFrozenValue>>,
+    index: &std::cell::RefCell<std::collections::HashMap<String, usize>>,
+) {
+    let idx = store.borrow().len();
+    {
+        let v = owned.value();
+        if let Some(d) = starlark::values::dict::DictRef::from_value(v) {
+            let mut ix = index.borrow_mut();
+            for (k, _) in d.iter() {
+                if let Some(k) = k.unpack_str() {
+                    ix.insert(k.to_string(), idx);
+                }
+            }
+        }
+    }
+    store.borrow_mut().push(owned.clone());
 }
 
 
@@ -550,6 +571,21 @@ pub fn analyze_workspace_with(
     Ok(session.take_targets())
 }
 
+/// The TREE-LOAD driver (L6 coverage metric): load every given package in ONE session
+/// (shared .bzl cache / config space — the realistic shape), returning per-package results.
+/// A package failure doesn't stop the sweep; the report is the point.
+pub fn load_tree_report(
+    root: &Path,
+    flags: GlobalFlags,
+    packages: &[String],
+) -> Vec<(String, Result<(), String>)> {
+    let session = Session::new(Some(root.to_path_buf()), flags);
+    packages
+        .iter()
+        .map(|pkg| (pkg.clone(), load_package_entry(&session, pkg)))
+        .collect()
+}
+
 
 /// Evaluate a `BUILD`/`.bzl` that defines and instantiates Starlark rules, running each
 /// rule impl (same-scope analysis); returns the analyzed targets.
@@ -585,7 +621,7 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
         crate::dialect::stash_captured_for_freeze(&module, &session).map_err(|e| format!("{e}"))?;
         let fm = module.freeze().map_err(|e| format!("freeze: {e:?}"))?;
         if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
-            session.cross_captured.borrow_mut().push(owned);
+            index_harvest(&owned, &session.cross_captured, &session.cross_index);
         }
         Ok(())
     });

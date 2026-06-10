@@ -671,10 +671,11 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // loudly on a non-default order rather than silently produce a possibly-wrong sequence (F36).
         if let Some(o) = &order
             && o != "default"
+            && session(eval).warned.borrow_mut().insert(format!("depset-order-{o}"))
         {
             eprintln!(
                 "razel: warning: depset(order={o:?}) — traversal order not yet modeled, treating as \
-                 default (F36; RazelGaps)"
+                 default (F36; RazelGaps; warned once per session)"
             );
         }
         // Dedup by string path; store the live Value so map_each sees File attributes.
