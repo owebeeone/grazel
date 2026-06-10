@@ -53,18 +53,26 @@ starlark::methods_static!(ACTIONS_METHODS = actions_methods);
 
 #[starlark::starlark_module]
 pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
+    /// `declare_file` returns a real `File` (impls read `.path`); the path keeps razel's
+    /// package-computed form (callers pass package-relative or full output paths).
     fn declare_file<'v>(
         #[starlark(this)] _this: Value<'v>,
         filename: String,
-    ) -> anyhow::Result<String> {
-        Ok(filename)
+        #[starlark(require = named)] sibling: Option<Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let path = match sibling.map(file_path).as_deref().and_then(|s| s.rsplit_once('/')) {
+            Some((dir, _)) => format!("{dir}/{filename}"),
+            None => filename,
+        };
+        Ok(eval.heap().alloc(File { path }))
     }
     fn run<'v>(
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = named)] executable: Option<Value<'v>>,
-        #[starlark(require = named)] outputs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] inputs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] arguments: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] outputs: Option<Value<'v>>,
+        #[starlark(require = named)] inputs: Option<Value<'v>>,
+        #[starlark(require = named)] arguments: Option<Value<'v>>,
         #[starlark(require = named)] mnemonic: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -107,21 +115,30 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
     fn declare_directory<'v>(
         #[starlark(this)] _this: Value<'v>,
         filename: String,
-    ) -> anyhow::Result<String> {
-        Ok(filename)
+        #[starlark(require = named)] sibling: Option<Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        // sibling: declare next to an existing file (same directory).
+        let path = match sibling.map(file_path).as_deref().and_then(|s| s.rsplit_once('/')) {
+            Some((dir, _)) => format!("{dir}/{filename}"),
+            None => filename,
+        };
+        Ok(eval.heap().alloc(File { path }))
     }
     fn run_shell<'v>(
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = named)] command: Option<Value<'v>>,
-        #[starlark(require = named)] outputs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] inputs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] outputs: Option<Value<'v>>,
+        #[starlark(require = named)] inputs: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
         let cmd = command.map(file_path).unwrap_or_default();
-        let outs: Vec<String> = outputs.map(|l| l.items.iter().map(|v| file_path(*v)).collect()).unwrap_or_default();
-        let ins: Vec<String> = inputs.map(|l| l.items.iter().map(|v| file_path(*v)).collect()).unwrap_or_default();
+        let outs: Vec<String> =
+            outputs.map(|v| flatten_values(v).into_iter().map(file_path).collect()).unwrap_or_default();
+        let ins: Vec<String> =
+            inputs.map(|v| flatten_values(v).into_iter().map(file_path).collect()).unwrap_or_default();
         with_current(sess, |c| {
             c.actions.push(AnalyzedAction {
                 mnemonic: "RunShell".into(),
@@ -198,17 +215,92 @@ starlark::methods_static!(ARGS_METHODS = args_methods);
 
 #[starlark::starlark_module]
 pub(crate) fn args_methods(b: &mut MethodsBuilder) {
-    /// `add(arg)` or the Bazel two-positional `add("--flag", value)`.
+    /// `add(arg)`, the two-positional `add("--flag", value)`, and `format=` (single-`%s`).
     fn add<'v>(
         #[starlark(this)] this: Value<'v>,
         #[starlark(require = pos)] arg: Value<'v>,
         #[starlark(require = pos)] value: Option<Value<'v>>,
+        #[starlark(require = named)] format: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         if let Some(a) = this.downcast_ref::<Args>() {
-            a.items.borrow_mut().push(file_path(arg));
-            if let Some(v) = value {
-                a.items.borrow_mut().push(file_path(v));
+            let fmt = |s: String| match &format {
+                Some(f) => f.replace("%s", &s),
+                None => s,
+            };
+            match value {
+                // Two-positional: the flag is literal; format applies to the VALUE.
+                Some(v) => {
+                    a.items.borrow_mut().push(file_path(arg));
+                    a.items.borrow_mut().push(fmt(file_path(v)));
+                }
+                None => a.items.borrow_mut().push(fmt(file_path(arg))),
+            }
+        }
+        Ok(NoneType)
+    }
+    /// Param-file surface (analysis-shape: recorded as no-ops; the inline argv is kept — the
+    /// Layer-3 action golden makes @param-files real; registered debt).
+    fn set_param_file_format<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = pos)] _format: String,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn use_param_file<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = pos)] _flag: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    /// `add_joined(values, join_with=...)` — joined-list fidelity.
+    fn add_joined<'v>(
+        #[starlark(this)] this: Value<'v>,
+        #[starlark(require = pos)] arg_or_values: Value<'v>,
+        #[starlark(require = pos)] values_pos: Option<Value<'v>>,
+        #[starlark(require = named)] join_with: Option<String>,
+        #[starlark(require = named)] format_each: Option<String>,
+        #[starlark(require = named)] map_each: Option<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        // Bazel allows add_joined("--flag", values, ...) or add_joined(values, ...).
+        let (flag, values) = match values_pos {
+            Some(v) => (arg_or_values.unpack_str().map(String::from), v),
+            None => (None, arg_or_values),
+        };
+        let map_each = map_each.filter(|v| !v.is_none());
+        let mut strs: Vec<String> = Vec::new();
+        for e in flatten_values(values) {
+            match map_each {
+                Some(f) => {
+                    let r = eval
+                        .eval_function(f, &[e], &[])
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    if r.is_none() {
+                        continue;
+                    }
+                    if let Some(l) = ListRef::from_value(r) {
+                        strs.extend(l.iter().map(file_path));
+                    } else {
+                        strs.push(file_path(r));
+                    }
+                }
+                None => strs.push(file_path(e)),
+            }
+        }
+        if let Some(fmt) = &format_each {
+            strs = strs.iter().map(|s| fmt.replace("%s", s)).collect();
+        }
+        let joined = strs.join(join_with.as_deref().unwrap_or(" "));
+        if let Some(a) = this.downcast_ref::<Args>() {
+            let mut items = a.items.borrow_mut();
+            if let Some(f) = flag {
+                items.push(f);
+            }
+            if !joined.is_empty() {
+                items.push(joined);
             }
         }
         Ok(NoneType)
@@ -225,6 +317,8 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        // An explicit `map_each = None` means no mapping (Bazel allows it).
+        let map_each = map_each.filter(|v| !v.is_none());
         // Map first (on raw element VALUES — File fields etc. stay live), then stringify.
         let mut strs: Vec<String> = Vec::new();
         for e in flatten_values(values) {
@@ -282,20 +376,21 @@ fn flatten_values<'v>(v: Value<'v>) -> Vec<Value<'v>> {
 pub(crate) fn push_run_action<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     executable: Option<Value<'v>>,
-    outputs: Option<UnpackList<Value<'v>>>,
-    inputs: Option<UnpackList<Value<'v>>>,
-    arguments: Option<UnpackList<Value<'v>>>,
+    outputs: Option<Value<'v>>,
+    inputs: Option<Value<'v>>,
+    arguments: Option<Value<'v>>,
     mnemonic: Option<String>,
 ) {
     let sess = session(eval);
     let exe = executable.map(file_path).unwrap_or_else(|| "run".into());
     let mut argv = vec![exe.clone()];
     // arguments may contain plain strings, lists, File values, and args() objects.
-    for a in arguments.map(|l| l.items).unwrap_or_default() {
-        argv.extend(flatten_arg(a));
+    if let Some(args) = arguments {
+        argv.extend(flatten_arg(args));
     }
-    let paths = |l: Option<UnpackList<Value<'v>>>| -> Vec<String> {
-        l.map(|l| l.items.into_iter().map(file_path).collect()).unwrap_or_default()
+    // inputs/outputs accept lists OR depsets (Bazel's `depset|sequence`).
+    let paths = |l: Option<Value<'v>>| -> Vec<String> {
+        l.map(|v| flatten_values(v).into_iter().map(file_path).collect()).unwrap_or_default()
     };
     with_current(sess, |c| {
         c.actions.push(AnalyzedAction {
@@ -349,7 +444,16 @@ impl<'v> StarlarkValue<'v> for File {
             // Source vs generated: razel's loading-grade heuristic — generated paths live under
             // an output prefix (bazel-out/); everything else is a source file.
             "is_source" => Some(Value::new_bool(!p.starts_with("bazel-out/"))),
-            "owner" => Some(Value::new_none()),
+            // The generating label, derived from the path (package = dir, name = base) —
+            // enough for owner.package/owner.name comparisons in real impls.
+            "owner" => {
+                let (pkg, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
+                Some(heap.alloc(crate::labels::LabelV {
+                    repo: None,
+                    package: pkg.to_string(),
+                    name: name.to_string(),
+                }))
+            }
             "root" => Some(heap.alloc(crate::engine::Absorb)),
             "basename" => Some(heap.alloc(base.to_string())),
             "dirname" => {
@@ -412,6 +516,10 @@ where
 {
     fn get_methods() -> Option<&'static Methods> {
         Some(DEPSET_METHODS.methods())
+    }
+    /// Bazel: an empty depset is falsy.
+    fn to_bool(&self) -> bool {
+        !self.items.is_empty()
     }
 }
 

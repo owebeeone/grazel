@@ -177,6 +177,8 @@ pub(crate) fn instance_callable<'v>(item: Value<'v>) -> Option<Value<'v>> {
 #[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
 #[repr(C)]
 pub(crate) struct DepTargetGen<V: ValueLifetimeless> {
+    /// The dep's canonical label string (`.label` synthesizes a Label value from it).
+    pub(crate) label: String,
     pub(crate) fields: Vec<(String, V)>,
     pub(crate) providers: Vec<(V, V)>,
 }
@@ -198,18 +200,57 @@ where
     Self: ProvidesStaticType<'v>,
 {
     fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
+        if attribute == "label" {
+            let (repo, rest) = match self.label.split_once("//") {
+                Some((r, rest)) if r.starts_with('@') => (Some(r.to_string()), rest),
+                Some((_, rest)) => (None, rest),
+                None => (None, self.label.as_str()),
+            };
+            let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
+            return Some(_heap.alloc(crate::labels::LabelV {
+                repo,
+                package: pkg.to_string(),
+                name: name.to_string(),
+            }));
+        }
         self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| v.to_value())
     }
     /// `dep[MyInfo]` — the instance this dep's rule returned for that provider.
+    /// `Provider in dep` — true for registered providers (and the implicit DefaultInfo).
+    fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(self.providers.iter().any(|(c, _)| c.to_value().ptr_eq(other))
+            || other.to_string() == "DefaultInfo")
+    }
     fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
-        self.providers
+        if let Some(v) = self
+            .providers
             .iter()
             .find(|(c, _)| c.to_value().ptr_eq(index))
             .map(|(_, inst)| inst.to_value())
-            .ok_or_else(|| {
-                starlark::Error::new_other(anyhow::anyhow!(
-                    "target does not provide the requested provider"
-                ))
-            })
+        {
+            return Ok(v);
+        }
+        // Every target implicitly provides DefaultInfo (the builtin is a native fn — match by
+        // name): files = the dep's files; runfiles/files_to_run absorb until run-goldens.
+        if index.to_string() == "DefaultInfo" {
+            let files = self
+                .fields
+                .iter()
+                .find(|(k, _)| k == "files")
+                .map(|(_, v)| v.to_value())
+                .unwrap_or_else(|| _heap.alloc(Vec::<Value<'v>>::new()));
+            use starlark::values::structs::AllocStruct;
+            return Ok(_heap.alloc(AllocStruct([
+                ("files".to_string(), files),
+                ("default_runfiles".to_string(), _heap.alloc(crate::engine::Absorb)),
+                ("data_runfiles".to_string(), _heap.alloc(crate::engine::Absorb)),
+                ("files_to_run".to_string(), _heap.alloc(crate::engine::Absorb)),
+            ])));
+        }
+        Err(starlark::Error::new_other(anyhow::anyhow!(
+            "target {} does not provide the requested provider {}",
+            self.label,
+            index.to_string()
+        )))
     }
 }

@@ -248,6 +248,14 @@ impl<'v> starlark::values::StarlarkValue<'v> for Absorb {
     ) -> starlark::Result<Value<'v>> {
         Ok(heap.alloc(Absorb))
     }
+    /// Absorbed values are FALSY (unknowns act empty — `if absorbed:` skips).
+    fn to_bool(&self) -> bool {
+        false
+    }
+    /// Absorbed collections iterate as empty (`for x in absorbed` yields nothing).
+    fn iterate_collect(&self, _heap: starlark::values::Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
+        Ok(Vec::new())
+    }
     /// Absorption flows through operators (`absorbed + s`, `s + absorbed`).
     fn add(&self, _other: Value<'v>, heap: starlark::values::Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
         Some(Ok(heap.alloc(Absorb)))
@@ -384,9 +392,9 @@ pub(crate) fn razel_build_members(b: &mut GlobalsBuilder) {
     /// register through `razel_build`, so cc + java ride one engine surface.
     fn action<'v>(
         #[starlark(require = named)] executable: Option<Value<'v>>,
-        #[starlark(require = named)] outputs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] inputs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] arguments: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] outputs: Option<Value<'v>>,
+        #[starlark(require = named)] inputs: Option<Value<'v>>,
+        #[starlark(require = named)] arguments: Option<Value<'v>>,
         #[starlark(require = named)] mnemonic: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,

@@ -539,7 +539,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// `depset(direct=[], transitive=[depsets], order=…)` — Bazel's transitive set.
     /// razel folds member paths from `direct` + each `transitive` depset, deduped.
     fn depset<'v>(
-        #[starlark(require = pos)] direct: Option<Value<'v>>,
+        direct: Option<Value<'v>>,
         #[starlark(require = named)] transitive: Option<Value<'v>>,
         #[starlark(require = named)] order: Option<String>,
         eval: &mut Evaluator<'v, '_, '_>,

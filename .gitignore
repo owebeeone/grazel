@@ -18,3 +18,4 @@ scratch/
 
 # Bazel convenience symlinks (parity golden capture, anywhere bazel runs)
 bazel-*
+.claude/

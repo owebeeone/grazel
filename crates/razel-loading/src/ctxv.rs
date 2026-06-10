@@ -32,6 +32,8 @@ pub(crate) struct Ctx<'v> {
     pub(crate) build_setting_value: Value<'v>,
     /// `ctx.file.<attr>` — single file of a label attr (first of files; None when absent).
     pub(crate) file: Value<'v>,
+    /// `ctx.var` — the Make-variable dict (COMPILATION_MODE/TARGET_CPU/BINDIR).
+    pub(crate) var: Value<'v>,
 }
 
 
@@ -63,13 +65,14 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
             // goldens; registered debt): file/runfiles/expand_location/expand_make_variables,
             // bin_dir/genfiles_dir/var/workspace_name/features.
             "fragments" | "configuration" | "runfiles" | "expand_location"
-            | "expand_make_variables" | "bin_dir" | "genfiles_dir" | "var" | "coverage_instrumented" => {
+            | "expand_make_variables" | "bin_dir" | "genfiles_dir" | "coverage_instrumented" => {
                 Some(ctx_absorb(_heap))
             }
             "workspace_name" => Some(_heap.alloc("")),
             "features" | "disabled_features" => Some(_heap.alloc(Vec::<Value<'v>>::new())),
             "build_setting_value" => Some(self.build_setting_value),
             "file" => Some(self.file),
+            "var" => Some(self.var),
             _ => None,
         }
     }
@@ -180,5 +183,32 @@ impl<'v> StarlarkValue<'v> for FileNs<'v> {
                 .unwrap_or_else(Value::new_none),
             None => Value::new_none(),
         })
+    }
+}
+
+
+/// `ctx.executable` — executable files of executable-label attrs; MISSING attrs are `None`
+/// (Bazel: the attr exists; non-executable/omitted → None).
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+pub(crate) struct ExecNs<'v> {
+    pub(crate) fields: Vec<(String, Value<'v>)>,
+}
+
+impl fmt::Display for ExecNs<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<ctx.executable>")
+    }
+}
+
+#[starlark_value(type = "ctx_executable")]
+impl<'v> StarlarkValue<'v> for ExecNs<'v> {
+    fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
+        Some(
+            self.fields
+                .iter()
+                .find(|(k, _)| k == attribute)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(Value::new_none),
+        )
     }
 }

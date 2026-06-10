@@ -56,7 +56,7 @@ const PROBES: &[Probe] = &[
                 rust_library(name = \"hello\", srcs = [\"lib.rs\"])\n",
         files: &[("lib.rs", "pub fn hello() {}\n")],
         real: None,
-        must_pass: false,
+        must_pass: true,
     },
     Probe {
         name: "tf-load-leaf",

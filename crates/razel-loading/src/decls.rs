@@ -554,6 +554,7 @@ pub(crate) fn resolve_label_attr<'v>(
                         let heap = eval.heap();
                         let f = heap.alloc(qualified);
                         structs.push(heap.alloc(DepTarget {
+                            label: dep.clone(),
                             fields: vec![("files".to_string(), heap.alloc(vec![f]))],
                             providers: Vec::new(),
                         }));
@@ -593,10 +594,10 @@ pub(crate) fn resolve_label_attr<'v>(
             } else {
                 providers
             };
-            dep_labels.push(dep);
             structs.push(
-                heap.alloc(DepTarget { fields: dfields, providers }),
+                heap.alloc(DepTarget { label: dep.clone(), fields: dfields, providers }),
             );
+            dep_labels.push(dep);
         }
         // D1c: a single `attr.label` yields ONE struct; a list yields the list of structs.
         Ok(if single_label {
@@ -761,7 +762,12 @@ pub(crate) fn analyze_rule_decl<'v>(
                 fields: files_fields.clone(),
             }),
             file: heap.alloc_complex_no_freeze(crate::ctxv::FileNs { fields: files_fields }),
-            executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
+            var: heap.alloc(starlark::values::dict::AllocDict([
+                (heap.alloc("COMPILATION_MODE"), heap.alloc(sess.global.mode())),
+                (heap.alloc("TARGET_CPU"), heap.alloc(crate::state::host_cpu())),
+                (heap.alloc("BINDIR"), heap.alloc("bazel-out/bin")),
+            ])),
+            executable: heap.alloc_complex_no_freeze(crate::ctxv::ExecNs { fields: Vec::new() }),
             toolchains: toolchain_map(heap),
             build_setting_value: kwargs
                 .iter()
