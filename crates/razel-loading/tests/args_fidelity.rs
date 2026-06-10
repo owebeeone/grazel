@@ -31,6 +31,27 @@ r(name = "t")
     assert_eq!(argv, &expect, "Args expansion fidelity");
 }
 
+/// T-001: depset elements reach map_each as LIVE values (File has .path), not strings.
+#[test]
+fn depset_elements_keep_their_type_for_map_each() {
+    let src = r#"
+def _mapper(f):
+    return ["p-" + f.path]
+
+def _impl(ctx):
+    d = depset(ctx.files.srcs)
+    args = ctx.actions.args()
+    args.add_all(d, map_each = _mapper)
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = [args])
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "t", srcs = ["a.c", "b.c"])
+"#;
+    let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
+    let argv = &targets[0].actions[0].argv;
+    assert_eq!(argv, &["tool", "p-a.c", "p-b.c"], "File elements kept .path through the depset");
+}
+
 /// `ctx.actions.write(…, is_executable = True)` chmods the output (the launcher-script shape).
 #[test]
 fn write_is_executable_chmods() {

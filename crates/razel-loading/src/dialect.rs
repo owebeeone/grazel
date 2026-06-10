@@ -1031,17 +1031,21 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                  default (F36; RazelGaps)"
             );
         }
-        let mut items: Vec<String> = Vec::new();
-        let push = |s: String, items: &mut Vec<String>| {
-            if !items.contains(&s) {
-                items.push(s);
+        // Dedup by string path; store the live Value so map_each sees File attributes.
+        let mut seen: Vec<String> = Vec::new();
+        let mut items: Vec<Value<'v>> = Vec::new();
+        let push = |v: Value<'v>, seen: &mut Vec<String>, items: &mut Vec<Value<'v>>| {
+            let key = file_path(v);
+            if !seen.contains(&key) {
+                seen.push(key);
+                items.push(v);
             }
         };
         if let Some(d) = direct
             && let Some(list) = ListRef::from_value(d)
         {
             for it in list.iter() {
-                push(file_path(it), &mut items);
+                push(it, &mut seen, &mut items);
             }
         }
         if let Some(t) = transitive
@@ -1049,8 +1053,8 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         {
             for dep in list.iter() {
                 if let Some(ds) = dep.downcast_ref::<Depset>() {
-                    for s in &ds.items {
-                        push(s.clone(), &mut items);
+                    for v in &ds.items {
+                        push(*v, &mut seen, &mut items);
                     }
                 }
             }

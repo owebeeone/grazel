@@ -175,7 +175,7 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
     ) -> anyhow::Result<NoneType> {
         // Map first (on raw element VALUES — File fields etc. stay live), then stringify.
         let mut strs: Vec<String> = Vec::new();
-        for e in flatten_values(values, eval.heap()) {
+        for e in flatten_values(values) {
             match map_each {
                 Some(f) => {
                     let r = eval
@@ -210,15 +210,14 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
 }
 
 /// The element VALUES of an `add_all` collection (list or depset; a scalar is itself) — kept as
-/// values so `map_each` sees live objects, not pre-stringified paths. (razel's `Depset` stores
-/// path STRINGS today, so its elements reach `map_each` as strings — File-typed depset elements
-/// are registered debt; the probe will surface it at rust instantiation.)
-fn flatten_values<'v>(v: Value<'v>, heap: starlark::values::Heap<'v>) -> Vec<Value<'v>> {
+/// values so `map_each` sees live objects (File fields etc.) rather than pre-stringified paths.
+fn flatten_values<'v>(v: Value<'v>) -> Vec<Value<'v>> {
     if let Some(list) = ListRef::from_value(v) {
-        return list.iter().flat_map(|e| flatten_values(e, heap)).collect();
+        return list.iter().flat_map(flatten_values).collect();
     }
     if let Some(d) = v.downcast_ref::<Depset>() {
-        return d.items.iter().map(|s| heap.alloc(s.as_str())).collect();
+        // Items are live Values — return them directly so map_each sees File/.path etc.
+        return d.items.clone();
     }
     vec![v]
 }
@@ -327,26 +326,28 @@ pub(crate) fn file_path(v: Value) -> String {
 // ---- depset ----------------------------------------------------------------------
 
 
-/// A `depset` — Bazel's deduplicated transitive set. razel stores the flattened
-/// member **paths** (depset members are Files/strings in practice), which keeps it a
-/// plain value and makes `.to_list()` / action wiring trivial. Construction folds in
-/// `direct` members and the members of each `transitive` depset, de-duplicated.
+/// A `depset` — Bazel's deduplicated transitive set. Elements are kept as live
+/// heap Values so `map_each` lambdas can access fields like `.path` on File values.
+/// Construction folds in `direct` members and the elements of each `transitive`
+/// depset, de-duplicated by their string path. Stringification happens at use
+/// (`to_list`, `extract_files`, `Display`), not at construction.
 #[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
-pub(crate) struct Depset {
-    #[trace(unsafe_ignore)]
-    pub(crate) items: Vec<String>,
+pub(crate) struct Depset<'v> {
+    // items holds live GC-visible Values — Trace must NOT be skipped.
+    pub(crate) items: Vec<Value<'v>>,
 }
 
 
-impl fmt::Display for Depset {
+impl fmt::Display for Depset<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "depset({:?})", self.items)
+        let paths: Vec<String> = self.items.iter().map(|v| file_path(*v)).collect();
+        write!(f, "depset({paths:?})")
     }
 }
 
 
 #[starlark_value(type = "depset")]
-impl<'v> StarlarkValue<'v> for Depset {
+impl<'v> StarlarkValue<'v> for Depset<'v> {
     fn get_methods() -> Option<&'static Methods> {
         Some(DEPSET_METHODS.methods())
     }
@@ -361,20 +362,21 @@ pub(crate) fn depset_methods(b: &mut MethodsBuilder) {
         #[starlark(this)] this: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let items = this
+        // Stringify at use: callers that built string-consuming pipelines keep working.
+        let paths: Vec<String> = this
             .downcast_ref::<Depset>()
-            .map(|d| d.items.clone())
+            .map(|d| d.items.iter().map(|v| file_path(*v)).collect())
             .unwrap_or_default();
-        Ok(eval.heap().alloc(items))
+        Ok(eval.heap().alloc(paths))
     }
 }
 
 
 /// Extract member paths from a `DefaultInfo(files=…)` value: a [`Depset`]'s members,
-/// a list's elements (Files/strings), or a single value.
+/// a list's elements (Files/strings), or a single value. Stringifies at use.
 pub(crate) fn extract_files(v: Value) -> Vec<String> {
     if let Some(ds) = v.downcast_ref::<Depset>() {
-        return ds.items.clone();
+        return ds.items.iter().map(|v| file_path(*v)).collect();
     }
     if let Some(list) = ListRef::from_value(v) {
         return list.iter().map(file_path).collect();
