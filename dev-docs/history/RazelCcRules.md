@@ -1,3 +1,5 @@
+> **RETIRED 2026-06-10** — superseded by `dev-docs/RazelV3Plan.md` (the plan of record). Kept for the decision trail.
+
 # RazelCcRules — folded into RazelStarlarkBoundaryPlan
 
 This spec is now **§5–§6 of [`RazelStarlarkBoundaryPlan.md`](./RazelStarlarkBoundaryPlan.md)**,

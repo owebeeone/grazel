@@ -1,3 +1,5 @@
+> **RETIRED 2026-06-10** — superseded by `dev-docs/RazelV3Plan.md` (the plan of record). Kept for the decision trail.
+
 # RazelStarlarkBoundaryPlan — the Starlark ⟷ razel boundary
 
 Status: plan (2026-06; rev. after independent review — `scratch/RazelStarlarkBoundaryPlan-Review48.md`).

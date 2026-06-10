@@ -1,3 +1,5 @@
+> **RETIRED 2026-06-10** — superseded by `dev-docs/RazelV3Plan.md` (the plan of record). Kept for the decision trail.
+
 # Razel V2 — Realization Plan
 
 Actionable plan for `RazelV2FinalArchProposal.md` + `RazelV2Contracts.md` +
