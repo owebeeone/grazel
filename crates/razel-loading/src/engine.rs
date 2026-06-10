@@ -51,14 +51,85 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
         });
         Ok(NoneType)
     }
-    /// `native.alias(name, actual)` — records a target whose files are the actual's (resolved at
-    /// analysis via the dep machinery is Phase-later; loading-grade: name declared).
-    fn alias<'v>(
+    /// `native.package_group` / `native.config_setting` / `native.exports_files` /
+    /// `native.existing_rule(s)` — the BUILD declare-time surface macros reach for.
+    fn package_group<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn exports_files<'v>(
+        #[starlark(args)] _a: starlark::values::tuple::UnpackTuple<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+    fn existing_rule<'v>(
+        #[starlark(require = pos)] name: String,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let sess = session(eval);
+        let canon = crate::state::canon_label(sess, &name);
+        let known = sess.results.borrow().contains_key(&canon)
+            || sess.pending.borrow().contains_key(&canon);
+        // Loading-grade: existence signal only (None ⇒ absent; a dict ⇒ present).
+        if known {
+            Ok(eval.heap().alloc(starlark::values::dict::AllocDict::EMPTY))
+        } else {
+            Ok(Value::new_none())
+        }
+    }
+    fn existing_rules<'v>(
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(eval.heap().alloc(starlark::values::dict::AllocDict::EMPTY))
+    }
+    fn config_setting<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] values: Option<SmallMap<String, String>>,
+        #[starlark(require = named)] define_values: Option<SmallMap<String, String>>,
+        #[starlark(require = named)] flag_values: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
+        let spec = crate::state::ConfigSpec {
+            values: values.map(|m| m.into_iter().collect()).unwrap_or_default(),
+            define_values: define_values.map(|m| m.into_iter().collect()).unwrap_or_default(),
+            group: None,
+            unmodeled: flag_values.is_some_and(|v| !v.is_none()),
+        };
+        sess.config_specs
+            .borrow_mut()
+            .insert(crate::state::canon_label(sess, &name), spec);
+        crate::deps::record_target(sess, crate::state::AnalyzedTarget {
+            name: crate::state::canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+    /// `native.alias(name, actual)` — records a target whose files are the actual's (resolved at
+    /// analysis via the dep machinery is Phase-later; loading-grade: name declared).
+    fn alias<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] actual: Option<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let actual = match actual {
+            Some(v) => {
+                let r = crate::dialect::resolve_attr_value(eval, v)?;
+                r.unpack_str().map(String::from)
+            }
+            None => None,
+        };
+        let sess = session(eval);
+        if let Some(a) = actual {
+            let canon_actual = crate::state::canon_label(sess, &a);
+            sess.aliases
+                .borrow_mut()
+                .insert(crate::state::canon_label(sess, &name), canon_actual);
+        }
         crate::deps::record_target(sess, crate::state::AnalyzedTarget {
             name: crate::state::canon_label(sess, &name),
             ..Default::default()

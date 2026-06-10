@@ -64,7 +64,35 @@ pub(crate) fn bazel_native_rule_globals(b: &mut GlobalsBuilder) {
 /// builtin-namespace stubs (D4) that let real upstream `.bzl` resolve. Shared by both globals builders
 /// (workspace + inline) so the surface is identical in every analysis path.
 pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
-    b.namespace("native", native_members);
+    b.namespace("native", |nb| {
+        native_members(nb);
+        // Real macros wrap the BUILD-global builtins via `native.X` — alias them in wholesale
+        // (the BUILD globals and `native.*` are the same functions in Bazel).
+        let dialect_g = GlobalsBuilder::standard().with(rule_globals).build();
+        for name in [
+            "genrule",
+            "test_suite",
+            "config_setting",
+            "exports_files",
+            "package_group",
+            "licenses",
+            "razel_config_setting_group",
+        ] {
+            if let Some((_, v)) = dialect_g.iter().find(|(n, _)| *n == name) {
+                nb.set(name, v);
+            }
+        }
+        let cc = GlobalsBuilder::standard().with(crate::native_cc::cc_rules).build();
+        for (alias, src) in [
+            ("cc_library", "native_cc_library"),
+            ("cc_binary", "native_cc_binary"),
+            ("cc_test", "native_cc_binary"),
+        ] {
+            if let Some((_, v)) = cc.iter().find(|(n, _)| *n == src) {
+                nb.set(alias, v);
+            }
+        }
+    });
     b.namespace("attr", attr_members);
     b.namespace("razel_build", razel_build_members);
     b.namespace("config", config_members);
@@ -411,6 +439,11 @@ pub(crate) fn load_package(sess: &Session, pkg: &str) -> Result<(), String> {
     let prev = sess.current_pkg.borrow_mut().replace(pkg.to_string());
     let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), &src, repo_ctx);
     *sess.current_pkg.borrow_mut() = prev;
+    // A failed load must not poison the loaded-set (the guard would silently no-op retries
+    // and every later condition/dep in the package would report "not declared").
+    if res.is_err() {
+        sess.loaded.borrow_mut().remove(pkg);
+    }
     res
 }
 

@@ -118,6 +118,8 @@ pub(crate) struct Session {
     /// The repo of the `.bzl` module currently being loaded (BzlLoader-maintained stack;
     /// `None` frames = workspace modules). `Label()` written in `@repo` code resolves against it.
     pub(crate) current_bzl_repo: RefCell<Vec<Option<String>>>,
+    /// `alias()` targets (canonical name → canonical actual) — conditions resolve through them.
+    pub(crate) aliases: RefCell<BTreeMap<String, String>>,
     /// Declared `config_setting` specs by canonical label — what `select()` matches (razelV3).
     pub(crate) config_specs: RefCell<BTreeMap<String, ConfigSpec>>,
     /// E0d: the Session's live fact store — the DDS IS the store. `None` until first use (lazy
@@ -204,6 +206,17 @@ impl GlobalFlags {
     }
 }
 
+/// Bazel's name for the host CPU (`--cpu` default): `darwin_arm64`/`darwin_x86_64`/`k8`/`aarch64`.
+pub(crate) fn host_cpu() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "darwin_arm64",
+        ("macos", _) => "darwin_x86_64",
+        ("linux", "x86_64") => "k8",
+        ("linux", "aarch64") => "aarch64",
+        _ => "unknown",
+    }
+}
+
 /// A `config_setting`'s declared constraints — what `select()` matches against the configuration.
 /// `values` keys razel models: `compilation_mode`, `define` (`"k=v"`); an unmodeled key errors
 /// loudly at match time (never a silent non-match).
@@ -211,6 +224,11 @@ impl GlobalFlags {
 pub(crate) struct ConfigSpec {
     pub(crate) values: BTreeMap<String, String>,
     pub(crate) define_values: BTreeMap<String, String>,
+    /// A `config_setting_group` (skylib): (true ⇒ match_all, false ⇒ match_any) over members.
+    pub(crate) group: Option<(bool, Vec<String>)>,
+    /// `flag_values =` constraints reference build-setting values razel doesn't model yet —
+    /// CONSERVATIVE: such a condition never matches (CPU-host posture; registered debt).
+    pub(crate) unmodeled: bool,
 }
 
 impl ConfigSpec {
@@ -225,11 +243,15 @@ impl ConfigSpec {
                     Some((k, v)) => has_define(k, v),
                     None => return Err(format!("config_setting `define` value `{want}` is not k=v")),
                 },
+                "cpu" => want == host_cpu(),
+                // Unmodeled host-config keys (crosstool_top, apple cpus, …): CONSERVATIVE — the
+                // condition doesn't match on this host. Loud once per key (registered debt).
                 other => {
-                    return Err(format!(
-                        "config_setting key `{other}` is not modeled (razel models \
-                         compilation_mode + define)"
-                    ));
+                    eprintln!(
+                        "razel: warning: config_setting key `{other}` not modeled — treating \
+                         condition as non-matching"
+                    );
+                    false
                 }
             };
             if !ok {
@@ -268,9 +290,20 @@ pub enum CcToolchainMode {
 /// Canonicalize a target name/label against the current package. Single-package
 /// mode keeps bare names; workspace mode produces `//pkg:name`.
 pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
+    // Package shorthand: `//a/b` ≡ `//a/b:b` (same for `@repo//a/b`).
+    let expand = |label: String| -> String {
+        if let Some(rest) = label.rsplit("//").next()
+            && !rest.contains(':')
+            && !rest.is_empty()
+        {
+            let last = rest.rsplit('/').next().unwrap_or(rest);
+            return format!("{label}:{last}");
+        }
+        label
+    };
     // An `@repo//…` label is already canonical (external labels don't take the current package).
     if s.starts_with('@') {
-        return s.to_string();
+        return expand(s.to_string());
     }
     match &*sess.current_pkg.borrow() {
         None => s.strip_prefix(':').unwrap_or(s).to_string(),
@@ -279,7 +312,7 @@ pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
         Some(pkg) if pkg.starts_with('@') => {
             let repo = pkg.split("//").next().unwrap_or_default();
             if let Some(rest) = s.strip_prefix("//") {
-                format!("{repo}//{rest}")
+                expand(format!("{repo}//{rest}"))
             } else if let Some(name) = s.strip_prefix(':') {
                 format!("{pkg}:{name}")
             } else {
@@ -288,7 +321,7 @@ pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
         }
         Some(pkg) => {
             if let Some(rest) = s.strip_prefix("//") {
-                format!("//{rest}")
+                expand(format!("//{rest}"))
             } else if let Some(name) = s.strip_prefix(':') {
                 format!("//{pkg}:{name}")
             } else {

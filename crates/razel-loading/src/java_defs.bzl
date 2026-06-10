@@ -87,3 +87,14 @@ def _java_stub_impl(ctx):
 java_test = rule(implementation = _java_stub_impl, attrs = {})
 java_binary = rule(implementation = _java_stub_impl, attrs = {})
 java_import = rule(implementation = _java_stub_impl, attrs = {})
+
+# The provider SYMBOL real rulesets import (protobuf's java_proto_library); razel's java capture
+# itself rides razel_build.info — this is the load-surface identity.
+JavaInfo = provider(fields = ["compile_jars", "runtime_jars", "neverlink"])
+
+# protobuf's java_proto_support imports these (java toolchain internals) — loading-grade stubs.
+def compile(*args, **kwargs):
+    return None
+
+def merge(*args, **kwargs):
+    return None

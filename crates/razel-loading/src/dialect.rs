@@ -349,39 +349,18 @@ fn pick_branch<'v>(
         }
         let sess = session(eval);
         let canon = canon_label(sess, &cond);
-        // Cross-package condition: load its package on demand (the borrow in the condition
-        // drops before the nested eval — the [R1] discipline). A failed load must SURFACE —
-        // otherwise every condition in that package reports "not declared".
-        let mut load_err = None;
-        if allow_load
-            && !sess.config_specs.borrow().contains_key(&canon)
-            && sess.workspace.is_some()
-            && let Some(pkg) = crate::state::pkg_of(&canon)
-        {
-            load_err = crate::rules::load_package(sess, &pkg).err();
-        }
-        if let Some(e) = load_err
-            && !sess.config_specs.borrow().contains_key(&canon)
-        {
-            return Err(anyhow::anyhow!(
-                "select(): loading `{canon}`'s package failed: {e}"
-            ));
-        }
-        // Host-materialized generated repos: their settings are FALSE on the CPU-only host.
-        if crate::host::host_false_condition(&canon) {
-            continue;
-        }
-        let spec = match sess.config_specs.borrow().get(&canon).cloned() {
-            Some(s) => s,
+        match condition_matches(sess, &canon, allow_load, 16)? {
+            Some(true) => {
+                let spec = deref_spec(sess, &canon).unwrap_or_default();
+                matches.push((cond, spec, *v));
+            }
+            Some(false) => {}
             None if defer_on_undeclared => return Ok(None),
             None => {
                 return Err(anyhow::anyhow!(
                     "select(): `{cond}` is not a declared config_setting"
                 ));
             }
-        };
-        if spec.matches(&sess.global).map_err(|e| anyhow::anyhow!(e))? {
-            matches.push((cond, spec, *v));
         }
     }
     if matches.is_empty() {
@@ -404,6 +383,85 @@ fn pick_branch<'v>(
         }
     }
     Ok(Some(matches[0].2))
+}
+
+/// Does a condition label match the configuration? Follows `alias()` chains, answers FALSE for
+/// host-materialized GPU repos and unmodeled (`flag_values`) settings, recurses through
+/// `config_setting_group`s, and (when allowed) loads the condition's package on demand — a failed
+/// load SURFACES. `None` ⇒ undeclared (the caller defers or errors).
+fn condition_matches(
+    sess: &crate::state::Session,
+    canon: &str,
+    allow_load: bool,
+    fuel: u32,
+) -> anyhow::Result<Option<bool>> {
+    if fuel == 0 {
+        return Err(anyhow::anyhow!("condition alias/group nesting too deep at `{canon}`"));
+    }
+    let aliased = sess.aliases.borrow().get(canon).cloned();
+    if let Some(t) = aliased {
+        return condition_matches(sess, &t, allow_load, fuel - 1);
+    }
+    if crate::host::host_false_condition(canon) {
+        return Ok(Some(false));
+    }
+    let spec = sess.config_specs.borrow().get(canon).cloned();
+    let spec = match spec {
+        Some(s) => s,
+        None => {
+            if allow_load
+                && sess.workspace.is_some()
+                && let Some(pkg) = crate::state::pkg_of(canon)
+            {
+                if let Err(e) = crate::rules::load_package(sess, &pkg)
+                    && !sess.config_specs.borrow().contains_key(canon)
+                    && !sess.aliases.borrow().contains_key(canon)
+                {
+                    return Err(anyhow::anyhow!(
+                        "select(): loading `{canon}`'s package failed: {e}"
+                    ));
+                }
+                return condition_matches(sess, canon, false, fuel - 1);
+            }
+            return Ok(None);
+        }
+    };
+    if spec.unmodeled {
+        return Ok(Some(false));
+    }
+    if let Some((all, members)) = &spec.group {
+        for m in members {
+            match condition_matches(sess, m, allow_load, fuel - 1)? {
+                Some(hit) => {
+                    if *all && !hit {
+                        return Ok(Some(false));
+                    }
+                    if !*all && hit {
+                        return Ok(Some(true));
+                    }
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "config_setting_group member `{m}` not declared"
+                    ));
+                }
+            }
+        }
+        return Ok(Some(*all));
+    }
+    spec.matches(&sess.global).map(Some).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// The (alias-dereffed) spec for specialization ordering; groups/undeclared → empty constraints.
+fn deref_spec(sess: &crate::state::Session, canon: &str) -> Option<crate::state::ConfigSpec> {
+    let mut cur = canon.to_string();
+    for _ in 0..16 {
+        match sess.aliases.borrow().get(&cur).cloned() {
+            Some(next) => cur = next,
+            None => break,
+        }
+    }
+    sess.config_specs.borrow().get(&cur).cloned()
 }
 
 /// Resolve any deferred select machinery in an attr VALUE at consumption time (analysis):
@@ -608,6 +666,144 @@ pub(crate) fn record_native<'v>(
     Ok(())
 }
 
+/// Resolve a label/label_list attr VALUE (passed or default) to DepTarget struct(s) — shared by
+/// the kwargs arm and the schema-defaults pass (implicit label attrs like rules_cc's
+/// `_impl_delegate` must resolve exactly like passed ones).
+fn resolve_label_attr<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    v: Value<'v>,
+    single_label: bool,
+    dep_labels: &mut Vec<String>,
+) -> starlark::Result<Value<'v>> {
+    let one = |x: Value<'v>| -> Option<String> {
+        x.unpack_str().map(String::from).or_else(|| {
+    x.downcast_ref::<LabelV>().map(|l| l.to_string())
+        })
+    };
+    let labels: Vec<String> = if let Some(list) = ListRef::from_value(v) {
+        list.iter().filter_map(one).collect()
+    } else if let Some(s) = one(v) {
+        vec![s]
+    } else {
+        Vec::new()
+    };
+        let mut structs: Vec<Value<'v>> = Vec::new();
+        for label in &labels {
+            // Canonical label — bare in single-package mode, //pkg:name in a workspace.
+            let dep = canon_label(session(eval), label);
+            // E0: a forward-referenced local declaration analyzes on demand, first.
+            ensure_analyzed(eval, &dep)?;
+            let sess = session(eval);
+            // Cross-package dep: load its package on demand (mirrors resolve_dep);
+            // a failed load SURFACES (silence turns into bogus "not declared").
+            let mut dep_load_err = None;
+            if !sess.results.borrow().contains_key(&dep)
+                && sess.workspace.is_some()
+                && let Some(pkg) = crate::state::pkg_of(&dep)
+            {
+                dep_load_err = crate::rules::load_package(sess, &pkg).err();
+            }
+            if let Some(e) = dep_load_err
+                && !sess.results.borrow().contains_key(&dep)
+            {
+                return Err(anyhow::anyhow!(
+                    "loading dep `{dep}`'s package failed: {e}"
+                )
+                .into());
+            }
+            let resolved = {
+                let results = sess.results.borrow();
+                results.get(&dep).map(|t| t.default_info.clone())
+            };
+            let files = match resolved {
+                Some(files) => files,
+                None => {
+                    // Bazel file-label semantics (L2): a label naming no declared target
+                    // resolves to a SOURCE FILE in the package when that file exists
+                    // (`srcs = ["lib.rs"]`). Source files are not target deps. External
+                    // file labels check the vendored repo; their path takes Bazel's
+                    // exec-root form (`external/<repo>/…`).
+                    let (on_disk, qualified) = if let Some(rest) = dep.strip_prefix('@') {
+                        match rest.split_once("//").and_then(|(r, pf)| {
+                            pf.split_once(':').map(|(p, f)| (r, p, f))
+                        }) {
+                            Some((repo, pkg, file)) => {
+                                let exists = sess
+                                    .global
+                                    .external_base
+                                    .as_ref()
+                                    .is_some_and(|base| {
+                                        [repo.to_string(), repo.replace('_', "-")]
+                                            .iter()
+                                            .any(|d| {
+                                                base.join(d)
+                                                    .join(pkg)
+                                                    .join(file)
+                                                    .is_file()
+                                            })
+                                    });
+                                (exists, format!("external/{repo}/{pkg}/{file}"))
+                            }
+                            None => (false, dep.clone()),
+                        }
+                    } else {
+                        let q = qualify(sess, label.trim_start_matches(':'));
+                        let exists = sess
+                            .workspace
+                            .as_ref()
+                            .is_some_and(|root| root.join(&q).is_file());
+                        (exists, q)
+                    };
+                    if on_disk {
+                        let heap = eval.heap();
+                        let f = heap.alloc(qualified);
+                        structs.push(heap.alloc_complex_no_freeze(DepTarget {
+                            fields: vec![("files".to_string(), heap.alloc(vec![f]))],
+                            providers: Vec::new(),
+                        }));
+                        continue;
+                    }
+                    return Err(anyhow::anyhow!(
+                        "`{dep}` is neither a declared target nor a source file in \
+                         this package"
+                    )
+                    .into());
+                }
+            };
+            let tkey = crate::dds::target_key(InstanceId::SINGLE, &dep)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            // `files` is own-exposed (DefaultInfo); transitive fields fold via the ONE
+            // registry-driven helper over the Session's LIVE store (E0d — no rebuild).
+            let mut sfields: Vec<(String, Vec<String>)> =
+                vec![("files".to_string(), files)];
+            {
+                let dds = crate::dds::session_dds(sess);
+                sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
+            }
+            // L2a: a dep is a DepTarget — plain projected fields by attr, plus the dep's
+            // returned provider instances indexable by constructor (`dep[MyInfo]`).
+            let heap = eval.heap();
+            let dfields: Vec<(String, Value<'v>)> =
+                sfields.into_iter().map(|(k, xs)| (k, heap.alloc(xs))).collect();
+            let providers = decl_store(eval)?
+                .captured
+                .borrow()
+                .get(&dep)
+                .cloned()
+                .unwrap_or_default();
+            dep_labels.push(dep);
+            structs.push(
+                heap.alloc_complex_no_freeze(DepTarget { fields: dfields, providers }),
+            );
+        }
+        // D1c: a single `attr.label` yields ONE struct; a list yields the list of structs.
+        Ok(if single_label {
+            structs.into_iter().next().unwrap_or_else(Value::new_none)
+        } else {
+            eval.heap().alloc(structs)
+        })
+    }
+
 /// The analysis of one Starlark-rule declaration — dep resolution (demand-driven), schema
 /// defaults/`mandatory`, ctx construction, and the impl call. (Ran inside `invoke()` before E0.)
 fn analyze_rule_decl<'v>(
@@ -654,84 +850,8 @@ fn analyze_rule_decl<'v>(
             // A label attr (legacy `deps` or any `attr.label_list`): resolve each label to its
             // analyzed providers as a `struct(files=…, <folded fields>…)`.
             _ if is_label => {
-                // Collect the label string(s): a list (`label_list`/`deps`) or a single (`label`).
-                let labels: Vec<String> = if let Some(list) = ListRef::from_value(v) {
-                    list.iter().filter_map(|x| x.unpack_str().map(String::from)).collect()
-                } else if let Some(s) = v.unpack_str() {
-                    vec![s.to_string()]
-                } else {
-                    Vec::new()
-                };
-                let mut structs: Vec<Value<'v>> = Vec::new();
-                for label in &labels {
-                    // Canonical label — bare in single-package mode, //pkg:name in a workspace.
-                    let dep = canon_label(session(eval), label);
-                    // E0: a forward-referenced local declaration analyzes on demand, first.
-                    ensure_analyzed(eval, &dep)?;
-                    let sess = session(eval);
-                    let resolved = {
-                        let results = sess.results.borrow();
-                        results.get(&dep).map(|t| t.default_info.clone())
-                    };
-                    let files = match resolved {
-                        Some(files) => files,
-                        None => {
-                            // Bazel file-label semantics (L2): a label naming no declared target
-                            // resolves to a SOURCE FILE in the package when that file exists
-                            // (`srcs = ["lib.rs"]`). Source files are not target deps.
-                            let qualified = qualify(sess, label.trim_start_matches(':'));
-                            let on_disk = sess
-                                .workspace
-                                .as_ref()
-                                .is_some_and(|root| root.join(&qualified).is_file());
-                            if on_disk {
-                                let heap = eval.heap();
-                                let f = heap.alloc(qualified);
-                                structs.push(heap.alloc_complex_no_freeze(DepTarget {
-                                    fields: vec![("files".to_string(), heap.alloc(vec![f]))],
-                                    providers: Vec::new(),
-                                }));
-                                continue;
-                            }
-                            return Err(anyhow::anyhow!(
-                                "`{dep}` is neither a declared target nor a source file in \
-                                 this package"
-                            )
-                            .into());
-                        }
-                    };
-                    let tkey = crate::dds::target_key(InstanceId::SINGLE, &dep)
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                    // `files` is own-exposed (DefaultInfo); transitive fields fold via the ONE
-                    // registry-driven helper over the Session's LIVE store (E0d — no rebuild).
-                    let mut sfields: Vec<(String, Vec<String>)> =
-                        vec![("files".to_string(), files)];
-                    {
-                        let dds = crate::dds::session_dds(sess);
-                        sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
-                    }
-                    // L2a: a dep is a DepTarget — plain projected fields by attr, plus the dep's
-                    // returned provider instances indexable by constructor (`dep[MyInfo]`).
-                    let heap = eval.heap();
-                    let dfields: Vec<(String, Value<'v>)> =
-                        sfields.into_iter().map(|(k, xs)| (k, heap.alloc(xs))).collect();
-                    let providers = decl_store(eval)?
-                        .captured
-                        .borrow()
-                        .get(&dep)
-                        .cloned()
-                        .unwrap_or_default();
-                    dep_labels.push(dep);
-                    structs.push(
-                        heap.alloc_complex_no_freeze(DepTarget { fields: dfields, providers }),
-                    );
-                }
-                // D1c: a single `attr.label` yields ONE struct; a list yields the list of structs.
-                if single_label {
-                    fields.push((key, structs.into_iter().next().unwrap_or_else(Value::new_none)));
-                } else {
-                    fields.push((key, eval.heap().alloc(structs)));
-                }
+                let resolved = resolve_label_attr(eval, v, single_label, &mut dep_labels)?;
+                fields.push((key, resolved));
             }
             _ => fields.push((key, v)),
         }
@@ -749,8 +869,19 @@ fn analyze_rule_decl<'v>(
             }
             let default =
                 descriptor.get_attr("default", eval.heap())?.unwrap_or_else(Value::new_none);
+            let kind = descriptor
+                .get_attr("kind", eval.heap())?
+                .and_then(|k| k.unpack_str().map(String::from))
+                .unwrap_or_default();
             if !default.is_none() {
-                fields.push((an.to_string(), default));
+                // Implicit label attrs (rules_cc `_impl_delegate` etc.) resolve like passed ones.
+                let v = if kind == "label" || kind == "label_list" {
+                    let default = resolve_attr_value(eval, default)?;
+                    resolve_label_attr(eval, default, kind == "label", &mut dep_labels)?
+                } else {
+                    default
+                };
+                fields.push((an.to_string(), v));
             } else if descriptor
                 .get_attr("mandatory", eval.heap())?
                 .and_then(|m| m.unpack_bool())
@@ -762,10 +893,6 @@ fn analyze_rule_decl<'v>(
                 // `ctx.attr.deps` unconditionally). Lists → [], dicts → {}, string → "",
                 // int → 0, bool → False, label/output → None.
                 let heap = eval.heap();
-                let kind = descriptor
-                    .get_attr("kind", heap)?
-                    .and_then(|k| k.unpack_str().map(String::from))
-                    .unwrap_or_default();
                 let v = match kind.as_str() {
                     "label_list" | "string_list" | "output_list" => {
                         heap.alloc(Vec::<Value<'v>>::new())
@@ -1107,6 +1234,39 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
+    /// `razel_config_setting_group(name, match_all=[], match_any=[])` — the host-native backing
+    /// for skylib's `selects.config_setting_group` (Bazel implements groups via native
+    /// alias/ConfigMatchingProvider chains razel doesn't model; the host provides the contract).
+    fn razel_config_setting_group<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] match_all: Option<UnpackList<String>>,
+        #[starlark(require = named)] match_any: Option<UnpackList<String>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        let all_v = match_all.map(|l| l.items).unwrap_or_default();
+        let any_v = match_any.map(|l| l.items).unwrap_or_default();
+        let (all, members) = match (all_v.is_empty(), any_v.is_empty()) {
+            (false, true) => (true, all_v),
+            (true, false) => (false, any_v),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "config_setting_group needs exactly one of match_all/match_any"
+                ));
+            }
+        };
+        let members = members.iter().map(|m| canon_label(sess, m)).collect();
+        sess.config_specs.borrow_mut().insert(
+            canon_label(sess, &name),
+            crate::state::ConfigSpec { group: Some((all, members)), ..Default::default() },
+        );
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+
     /// `repository_rule(implementation, ...)` (compat stub): repo rules DEFINE at load; razel
     /// never fetches (vendored/host repos instead) — invoking one surfaces at analysis. L6/L7.
     fn repository_rule<'v>(
@@ -1213,10 +1373,25 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             ),
         };
         // A label written in `@repo` code resolves against that repo (clean_dep's whole point).
+        // Binding: the CALL-SITE file (Bazel binds Label() to the .bzl containing the literal —
+        // macros run at BUILD eval, so the load-time repo stack alone is not enough).
         let repo = if s.starts_with('@') {
             s.split("//").next().map(|r| r.to_string())
         } else {
-            session(eval).current_bzl_repo.borrow().last().cloned().flatten().map(|r| format!("@{r}"))
+            let call_site = eval
+                .call_stack_top_location()
+                .map(|l| l.file.filename().to_string())
+                .filter(|f| f.starts_with('@'))
+                .and_then(|f| f.split("//").next().map(String::from));
+            call_site.or_else(|| {
+                session(eval)
+                    .current_bzl_repo
+                    .borrow()
+                    .last()
+                    .cloned()
+                    .flatten()
+                    .map(|r| format!("@{r}"))
+            })
         };
         Ok(eval.heap().alloc(LabelV { repo, package: pkg, name }))
     }
@@ -1240,13 +1415,6 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         Ok(NoneType)
     }
-    fn exports_files<'v>(
-        #[starlark(require = pos)] _files: UnpackList<String>,
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        Ok(NoneType)
-    }
-
     /// Native build-graph builtins razel recognizes so real BUILD files evaluate.
     /// `config_setting`/`test_suite`/`alias` carry no buildable output here, so they
     /// record an empty target under their label (analysis-visible, builds to nothing);
@@ -1308,6 +1476,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] values: Option<SmallMap<String, String>>,
         #[starlark(require = named)] define_values: Option<SmallMap<String, String>>,
+        #[starlark(require = named)] flag_values: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
@@ -1315,6 +1484,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let spec = crate::state::ConfigSpec {
             values: values.map(|m| m.into_iter().collect()).unwrap_or_default(),
             define_values: define_values.map(|m| m.into_iter().collect()).unwrap_or_default(),
+            group: None,
+            // flag_values reference build-setting values razel doesn't model — CONSERVATIVE:
+            // the condition never matches (CPU-host posture; registered debt).
+            unmodeled: flag_values.is_some_and(|v| !v.is_none()),
         };
         sess.config_specs.borrow_mut().insert(canon_label(sess, &name), spec);
         record_target(sess, AnalyzedTarget {
@@ -1337,10 +1510,23 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     }
     fn alias<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] actual: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        // Record the actual (selects resolve at consumption) — conditions/`deps` follow aliases.
+        let actual = match actual {
+            Some(v) => {
+                let r = crate::dialect::resolve_attr_value(eval, v)?;
+                r.unpack_str().map(String::from)
+            }
+            None => None,
+        };
         let sess = session(eval);
+        if let Some(a) = actual {
+            let canon_actual = canon_label(sess, &a);
+            sess.aliases.borrow_mut().insert(canon_label(sess, &name), canon_actual);
+        }
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             ..Default::default()
@@ -1463,7 +1649,29 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let Some(d) = starlark::values::dict::DictRef::from_value(branches) else {
             return Err(anyhow::anyhow!("select() takes a dict of conditions"));
         };
-        let pairs: Vec<(Value<'v>, Value<'v>)> = d.iter().collect();
+        // Bazel binds select KEYS at the call site: a string key written in `@repo` code is a
+        // label in THAT repo. Capture the repo now (the context is gone by analysis time).
+        let bzl_repo = session(eval).current_bzl_repo.borrow().last().cloned().flatten();
+        let pairs: Vec<(Value<'v>, Value<'v>)> = d
+            .iter()
+            .map(|(k, v)| {
+                let k = match (k.unpack_str(), &bzl_repo) {
+                    (Some(ks), Some(repo))
+                        if ks.starts_with("//") && ks != "//conditions:default" =>
+                    {
+                        let rest = ks.trim_start_matches("//");
+                        let (pkg, name) = rest.split_once(':').unwrap_or((rest, rest));
+                        eval.heap().alloc(LabelV {
+                            repo: Some(format!("@{repo}")),
+                            package: pkg.to_string(),
+                            name: name.to_string(),
+                        })
+                    }
+                    _ => k,
+                };
+                (k, v)
+            })
+            .collect();
         drop(d);
         // Bazel: select never resolves at LOAD time. The eager path consults only specs already
         // declared (no package loading — that recursed into mid-load packages); everything else

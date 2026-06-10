@@ -198,7 +198,9 @@ pub(crate) fn module() -> Result<FrozenModule, String> {
         let ast = AstModule::parse(
             "@rules_python",
             "py_binary = native_py_binary\npy_library = native_py_library\npy_test = native_py_test\n\
-             PyInfo = provider(fields = [\"transitive_sources\", \"imports\"])\n"
+             PyInfo = provider(fields = [\"transitive_sources\", \"imports\"])\n\
+             def _py_proto_stub_impl(ctx):\n    return [DefaultInfo(files = [])]\n\
+             py_proto_library = rule(implementation = _py_proto_stub_impl, attrs = {})\n"
                 .to_owned(),
             &Dialect::Extended,
         )

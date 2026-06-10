@@ -46,6 +46,10 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
             include_str!("../host-repos/proto_bazel_features/features.bzl"),
         ),
         (
+            "@bazel_skylib//lib:selects.bzl",
+            include_str!("../host-repos/bazel_skylib/lib/selects.bzl"),
+        ),
+        (
             "@cc_compatibility_proxy//:symbols.bzl",
             include_str!("../host-repos/cc_compatibility_proxy/symbols.bzl"),
         ),
