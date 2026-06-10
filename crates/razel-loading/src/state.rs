@@ -111,7 +111,12 @@ pub(crate) struct Session {
     /// The package currently being evaluated (`None` ⇒ single-package mode).
     pub(crate) current_pkg: SyncCell<Option<String>>,
     /// Packages whose BUILD has been loaded (cycle/repeat guard).
-    pub(crate) loaded: SyncCell<HashSet<String>>,
+    /// P3 (worker-pool plan): per-package load state. `InFlight(thread)` lets a demanding
+    /// worker WAIT for the owner instead of duplicating; same-thread re-entry returns
+    /// immediately (today's re-entrancy semantics). Paired Mutex+Condvar (not SyncCell):
+    /// waiting needs the condvar.
+    pub(crate) loaded: std::sync::Mutex<std::collections::HashMap<String, PkgState>>,
+    pub(crate) loaded_cv: std::sync::Condvar,
     /// Workspace root (multi-package mode); `None` ⇒ single-package. Set once.
     pub(crate) workspace: Option<PathBuf>,
     /// CLI flags riding every cc action (`--copt`/`--linkopt`/`-c`). Set once.
@@ -202,6 +207,45 @@ where
     F: for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()> + Send + Sync + 'static,
 {
     Box::new(f)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PkgState {
+    InFlight(std::thread::ThreadId),
+    Done,
+}
+
+/// Begin loading `pkg`. Returns true when THIS caller owns the load; false when it is
+/// already done (or this thread is mid-load on it — re-entry). Cross-thread in-flight: waits.
+pub(crate) fn begin_pkg_load(sess: &Session, pkg: &str) -> bool {
+    let mut m = sess.loaded.lock().expect("loaded poisoned");
+    loop {
+        match m.get(pkg) {
+            Some(PkgState::Done) => return false,
+            Some(PkgState::InFlight(tid)) if *tid == std::thread::current().id() => {
+                return false;
+            }
+            Some(PkgState::InFlight(_)) => {
+                m = sess.loaded_cv.wait(m).expect("loaded poisoned");
+            }
+            None => {
+                m.insert(pkg.to_string(), PkgState::InFlight(std::thread::current().id()));
+                return true;
+            }
+        }
+    }
+}
+
+/// Finish a load this caller owned: mark Done (success) or clear (failure — retryable), and
+/// wake waiters.
+pub(crate) fn finish_pkg_load(sess: &Session, pkg: &str, ok: bool) {
+    let mut m = sess.loaded.lock().expect("loaded poisoned");
+    if ok {
+        m.insert(pkg.to_string(), PkgState::Done);
+    } else {
+        m.remove(pkg);
+    }
+    sess.loaded_cv.notify_all();
 }
 
 impl Session {

@@ -491,10 +491,9 @@ pub(crate) fn load_package_entry(sess: &Session, pkg: &str) -> Result<(), String
 }
 
 fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), String> {
-    if sess.loaded.borrow().contains(pkg) {
+    if !crate::state::begin_pkg_load(sess, pkg) {
         return Ok(());
     }
-    sess.loaded.borrow_mut().insert(pkg.to_string());
     // Host-materialized packages (Bazel built-ins) take precedence over vendoring.
     if let Some(src) = crate::host::host_build(pkg) {
         let repo_ctx = pkg.strip_prefix('@').and_then(|rest| {
@@ -504,9 +503,10 @@ fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), S
         let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), src, repo_ctx, drive_all);
         *sess.current_pkg.borrow_mut() = prev;
         if let Err(e) = res {
-            sess.loaded.borrow_mut().remove(pkg);
+            crate::state::finish_pkg_load(sess, pkg, false);
             return Err(e.to_string());
         }
+        crate::state::finish_pkg_load(sess, pkg, true);
         return Ok(());
     }
     // External package (`@repo//pkg`): its BUILD lives under the vendored repo's root.
@@ -552,9 +552,7 @@ fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), S
     *sess.current_pkg.borrow_mut() = prev;
     // A failed load must not poison the loaded-set (the guard would silently no-op retries
     // and every later condition/dep in the package would report "not declared").
-    if res.is_err() {
-        sess.loaded.borrow_mut().remove(pkg);
-    }
+    crate::state::finish_pkg_load(sess, pkg, res.is_ok());
     res
 }
 

@@ -539,3 +539,13 @@ rungolds green; sweep unchanged at 1:00 (uncontended RwLock is free); NO deadloc
 DerefMut guard shim (RwLockWriteGuard has no stable map API). Next: P2 Send bounds
 (NativeAnalyzeFn + eval.extra), then P3 demand futures, P4 the pool
 (RazelEvalParallelPlan.md).
+
+## Round delta — razelV3 round 21 (2026-06-11)
+
+**P3 LANDED: per-package load state (PkgState::InFlight(thread)|Done + Condvar).**
+begin_pkg_load: Done → skip; same-thread InFlight → re-entry skip (today's semantics);
+OTHER-thread InFlight → wait on the condvar (the P4 pool's coordination primitive).
+finish_pkg_load: Done on success, clear+notify on failure (unpoisoned retries preserved).
+All green: 60 bins, gates, 6 sentinels, 2 rungolds; sweep parity at 1:01 / 270 pkgs.
+Remaining before the pool: cross-thread cycle detection (waits-for check before the condvar
+wait) and the P4 work queue itself.
