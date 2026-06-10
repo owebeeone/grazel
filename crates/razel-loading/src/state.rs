@@ -70,7 +70,24 @@ impl AnalyzedTarget {
 #[derive(Default)]
 pub(crate) struct AnalysisState {
     pub(crate) targets: Vec<AnalyzedTarget>,
+}
+
+/// P4a: ONE WORKER's eval-stack state — the package/repo context, the in-flight target, the
+/// mid-analysis guard set. These mirror a single thread's nested-eval call stack and must
+/// never be shared: round 23 proved that Session-wide copies corrupt every concurrent eval
+/// (labels canonicalize against another worker's package). Keyed by `ThreadId` on the shared
+/// Session (AD2: Session-owned, not a process global; dies with the Session).
+#[derive(Default)]
+pub(crate) struct EvalStack {
+    /// The package this worker is currently evaluating (`None` ⇒ single-package mode).
+    pub(crate) current_pkg: Option<String>,
+    /// The (repo, pkg) of the module this worker is loading/evaluating (lexical binding).
+    pub(crate) bzl_repo: Vec<Option<(String, String)>>,
+    /// The in-flight `AnalyzedTarget` being built by this worker's current rule analysis.
     pub(crate) current: Option<AnalyzedTarget>,
+    /// Targets mid-analysis on THIS worker (cycle detection; cross-worker duplicate analysis
+    /// is allowed — results overwrite by label, the established idempotent re-analysis).
+    pub(crate) analyzing: HashSet<String>,
 }
 
 /// Per-analysis state, threaded explicitly — the precursor of the DDS (RazelV2Contracts §0)
@@ -108,14 +125,15 @@ pub(crate) struct Session {
     pub(crate) results: SyncCell<BTreeMap<String, AnalyzedTarget>>,
     /// Toolchain configs declared via `define_config` (host-config selection, D7).
     pub(crate) configs: SyncCell<Vec<String>>,
-    /// The package currently being evaluated (`None` ⇒ single-package mode).
-    pub(crate) current_pkg: SyncCell<Option<String>>,
-    /// Packages whose BUILD has been loaded (cycle/repeat guard).
-    /// P3 (worker-pool plan): per-package load state. `InFlight(thread)` lets a demanding
-    /// worker WAIT for the owner instead of duplicating; same-thread re-entry returns
-    /// immediately (today's re-entrancy semantics). Paired Mutex+Condvar (not SyncCell):
-    /// waiting needs the condvar.
-    pub(crate) loaded: std::sync::Mutex<std::collections::HashMap<String, PkgState>>,
+    /// P4a: per-worker eval-stack state (see [`EvalStack`]). Access via the `current_pkg()`/
+    /// `set_current_pkg()`/`bzl_repo_*`/`analyzing_*`/`*_current_target` accessors only.
+    pub(crate) eval_stacks:
+        SyncCell<std::collections::HashMap<std::thread::ThreadId, EvalStack>>,
+    /// The single-flight WAIT GRAPH: per-package + per-`.bzl` load state AND the waits-for
+    /// edges (P3 + P4a — see [`acquire_resource`]). `InFlight(thread)` lets a demanding
+    /// worker WAIT for the owner; detected cycles take over instead of deadlocking.
+    /// Paired Mutex+Condvar (not SyncCell): waiting needs the condvar.
+    pub(crate) loaded: std::sync::Mutex<WaitGraph>,
     pub(crate) loaded_cv: std::sync::Condvar,
     /// Workspace root (multi-package mode); `None` ⇒ single-package. Set once.
     pub(crate) workspace: Option<PathBuf>,
@@ -130,8 +148,6 @@ pub(crate) struct Session {
     /// demand-driven analysis pass — this is what makes forward references resolve. Entries belong to
     /// the package currently being driven; a nested `load_package` drains its own before returning.
     pub(crate) pending: SyncCell<BTreeMap<String, usize>>,
-    /// Targets currently mid-analysis (cycle detection for the demand-driven pass).
-    pub(crate) analyzing: SyncCell<HashSet<String>>,
     /// E0c: deferred native-rule analysis bodies, indexed by the declaration store's
     /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
     /// `Value`s — so they need no GC tracing and can live on the Session).
@@ -143,10 +159,6 @@ pub(crate) struct Session {
     /// Output-FILE labels → (producing target, qualified output path). Registered at DECLARE
     /// time (genrule outs are static), so file labels naming generated outputs resolve.
     pub(crate) output_index: SyncCell<std::collections::HashMap<String, (String, String)>>,
-    /// The (repo, pkg) of the module currently being loaded/evaluated (BzlLoader + BUILD-eval
-    /// maintained; repo == "" ⇒ the main workspace). String labels written in module code —
-    /// `Label()`, select keys, attr DEFAULTS — bind against it (Bazel's lexical binding).
-    pub(crate) current_bzl_repo: SyncCell<Vec<Option<(String, String)>>>,
     /// `alias()` targets (canonical name → canonical actual) — conditions resolve through them.
     pub(crate) aliases: SyncCell<BTreeMap<String, String>>,
     /// Declared `config_setting` specs by canonical label — what `select()` matches (razelV3).
@@ -215,54 +227,175 @@ pub(crate) enum PkgState {
     Done,
 }
 
-/// Begin loading `pkg`. Returns true when THIS caller owns the load; false when it is
-/// already done (or this thread is mid-load on it — re-entry). Cross-thread in-flight: waits.
-pub(crate) fn begin_pkg_load(sess: &Session, pkg: &str) -> bool {
-    let mut m = sess.loaded.lock().expect("loaded poisoned");
+/// The single-flight WAIT GRAPH (P4a): packages AND `.bzl` modules in one keyed map (keys are
+/// disjoint — `.bzl` keys carry a `:`, package keys never do), plus the waits-for edges that
+/// make cross-thread demand cycles DETECTABLE. Package↔bzl cycles are real (worker A's package
+/// loads a module owned by worker B whose eval demand-loads A's package), so the two resource
+/// kinds must share one graph and one lock.
+#[derive(Default)]
+pub(crate) struct WaitGraph {
+    pub(crate) res: std::collections::HashMap<String, PkgState>,
+    /// worker → the resource key it is blocked on (one edge per parked worker).
+    pub(crate) waiting: std::collections::HashMap<std::thread::ThreadId, String>,
+    /// CONCURRENT evaluations per key (cycle/timeout takeovers duplicate a load while the
+    /// original owner is still evaluating). Failure cleanup must respect survivors: a failed
+    /// finisher may only purge when it is the LAST live eval and nobody succeeded.
+    pub(crate) live: std::collections::HashMap<String, usize>,
+}
+
+/// What acquiring a resource grants the caller.
+pub(crate) enum Acquire {
+    /// This caller evaluates (and MUST call [`finish_resource`]). Granted for: first claim,
+    /// detected-cycle takeover of a `.bzl` module, and timeout takeover.
+    Own,
+    /// Another worker finished it (Done) — read the relevant cache/state.
+    Ready,
+    /// THIS thread is already mid-load on it (re-entry on the caller's own stack).
+    Reentry,
+    /// A cross-thread PACKAGE demand cycle: proceed against the owner's partial state — the
+    /// exact cross-thread analogue of sequential re-entry (`a→b→a` no-ops and `b` reads `a`'s
+    /// mid-eval declarations). Duplicating instead (the old takeover) bred divergent results
+    /// and stale-owner windows.
+    CycleProceed,
+}
+
+/// Single-flight acquire with DEADLOCK-FREE waiting: before parking, walk the waits-for chain
+/// from the owner; if it reaches a resource THIS thread owns, the wait would deadlock — take
+/// the load over NOW instead (duplicate eval is waste, not wrong: results overwrite by label,
+/// the bzl cache by key). Package-level demand cycles are LEGAL in Bazel's model, and at TF
+/// scale they are dense — the previous 20s-timeout-only takeover degenerated into an
+/// hours-long livelock (every cycle edge cost a 20s sleep). The timeout stays as a backstop
+/// for waits the graph cannot see (it should never fire in practice — it prints loudly).
+pub(crate) fn acquire_resource(sess: &Session, key: &str) -> Acquire {
+    let me = std::thread::current().id();
+    let mut g = sess.loaded.lock().expect("loaded poisoned");
     loop {
-        match m.get(pkg) {
-            Some(PkgState::Done) => return false,
-            Some(PkgState::InFlight(tid)) if *tid == std::thread::current().id() => {
-                return false;
-            }
-            Some(PkgState::InFlight(_)) => {
-                // Bounded wait: package-level demand cycles are LEGAL in Bazel's model, so a
-                // cross-thread wait can cycle. Timeout = take over the load ourselves
-                // (loading is idempotent-by-construction; duplicate eval is waste, not wrong).
-                let (g, t) = sess
+        match g.res.get(key) {
+            Some(PkgState::Done) => return Acquire::Ready,
+            Some(PkgState::InFlight(tid)) if *tid == me => return Acquire::Reentry,
+            Some(PkgState::InFlight(owner)) => {
+                // Cycle check: owner → (what owner waits on) → its owner → … → me?
+                let mut cur = *owner;
+                let mut cycle = false;
+                for _ in 0..128 {
+                    let Some(next_key) = g.waiting.get(&cur) else { break };
+                    match g.res.get(next_key) {
+                        Some(PkgState::InFlight(o2)) => {
+                            if *o2 == me {
+                                cycle = true;
+                                break;
+                            }
+                            cur = *o2;
+                        }
+                        _ => break,
+                    }
+                }
+                if cycle {
+                    // Package keys (no `:`): sequential re-entry semantics — proceed against
+                    // the owner's partial state, no duplicate eval. `.bzl` keys: the module
+                    // VALUE is required, so take the eval over (duplicate; converges — the
+                    // worst case is an illegal load cycle, which the eval reports loudly).
+                    if !key.contains(':') {
+                        return Acquire::CycleProceed;
+                    }
+                    g.res.insert(key.to_string(), PkgState::InFlight(me));
+                    *g.live.entry(key.to_string()).or_default() += 1;
+                    return Acquire::Own;
+                }
+                g.waiting.insert(me, key.to_string());
+                let (g2, t) = sess
                     .loaded_cv
-                    .wait_timeout(m, std::time::Duration::from_secs(20))
+                    .wait_timeout(g, std::time::Duration::from_secs(20))
                     .expect("loaded poisoned");
-                m = g;
+                g = g2;
+                g.waiting.remove(&me);
                 if t.timed_out() {
-                    eprintln!("razel: warning: load wait timed out; duplicating load");
-                    m.insert(pkg.to_string(), PkgState::InFlight(std::thread::current().id()));
-                    return true;
+                    eprintln!(
+                        "razel: warning: load wait timed out (unseen cycle?); duplicating `{key}`"
+                    );
+                    g.res.insert(key.to_string(), PkgState::InFlight(me));
+                    *g.live.entry(key.to_string()).or_default() += 1;
+                    return Acquire::Own;
                 }
             }
             None => {
-                m.insert(pkg.to_string(), PkgState::InFlight(std::thread::current().id()));
-                return true;
+                g.res.insert(key.to_string(), PkgState::InFlight(me));
+                *g.live.entry(key.to_string()).or_default() += 1;
+                return Acquire::Own;
             }
         }
     }
 }
 
-/// Finish a load this caller owned: mark Done (success) or clear (failure — retryable), and
-/// wake waiters.
+/// Finish an owned resource: Done on success (any cache insert MUST precede this — Ready
+/// readers consult it), clear on failure (retryable); wake waiters. Returns whether the
+/// caller may run FAILURE CLEANUP (purge): only the LAST live eval of the key may, and only
+/// when no concurrent eval succeeded — a takeover duplicate failing mid-way must not clobber
+/// the original owner's in-progress (or completed) results.
+pub(crate) fn finish_resource(sess: &Session, key: &str, ok: bool) -> bool {
+    let mut g = sess.loaded.lock().expect("loaded poisoned");
+    let live = g.live.entry(key.to_string()).or_default();
+    *live = live.saturating_sub(1);
+    let last = *live == 0;
+    let may_purge = if ok {
+        g.res.insert(key.to_string(), PkgState::Done);
+        false
+    } else if matches!(g.res.get(key), Some(PkgState::Done)) {
+        // A concurrent eval already succeeded — this failure is moot; keep Done.
+        false
+    } else if last {
+        g.res.remove(key);
+        true
+    } else {
+        // Survivors are still evaluating: leave THEIR InFlight claim in place (last-writer
+        // state may carry our id — restore is impossible without per-owner slots; the
+        // survivors' finish overwrites it) and do NOT purge.
+        false
+    };
+    sess.loaded_cv.notify_all();
+    may_purge
+}
+
+/// Begin loading `pkg`. True when THIS caller owns the load; false when already done or
+/// same-thread re-entry. Cross-thread in-flight: waits (cycle-safe — see [`acquire_resource`]).
+pub(crate) fn begin_pkg_load(sess: &Session, pkg: &str) -> bool {
+    matches!(acquire_resource(sess, pkg), Acquire::Own)
+}
+
+/// Finish a load this caller owned (see [`finish_resource`]); a failure also purges the
+/// package's partial results — but only when this was the LAST live eval of the package
+/// (takeover duplicates must not clobber a surviving owner's rows).
 pub(crate) fn finish_pkg_load(sess: &Session, pkg: &str, ok: bool) {
-    {
-        let mut m = sess.loaded.lock().expect("loaded poisoned");
-        if ok {
-            m.insert(pkg.to_string(), PkgState::Done);
-        } else {
-            m.remove(pkg);
-        }
-        sess.loaded_cv.notify_all();
-    }
-    if !ok {
+    if finish_resource(sess, pkg, ok) {
         purge_partial_package(sess, pkg);
     }
+}
+
+/// What [`begin_bzl_load`] grants the caller.
+pub(crate) enum BzlBegin {
+    /// This caller evaluates the module (and MUST call [`finish_bzl_load`]). Also granted on
+    /// same-thread re-entry (a recursive load — the eval reports the cycle, as before).
+    Own,
+    /// Another worker finished it — the `bzl_cache` has the frozen module.
+    Ready,
+}
+
+/// P4a single-flight for `.bzl` evaluation: ONE eval per module per Session even under the
+/// pool. Concurrent double-eval would mint two PROVIDER IDENTITIES for the same `provider()`
+/// (the cache's "identities hold across packages" contract breaks — `dep[MyInfo]` ptr-eq
+/// fails with "does not provide ... (have 1 pairs)"). Shares the package wait graph (mixed
+/// package↔bzl cycles resolve by takeover instead of deadlocking).
+pub(crate) fn begin_bzl_load(sess: &Session, key: &str) -> BzlBegin {
+    match acquire_resource(sess, key) {
+        Acquire::Own | Acquire::Reentry => BzlBegin::Own,
+        // CycleProceed is unreachable for `:`-keys (acquire takes bzl cycles over).
+        Acquire::Ready | Acquire::CycleProceed => BzlBegin::Ready,
+    }
+}
+
+/// Finish an owned `.bzl` eval (see [`finish_resource`]).
+pub(crate) fn finish_bzl_load(sess: &Session, key: &str, ok: bool) {
+    finish_resource(sess, key, ok);
 }
 
 /// A failed package eval must not poison its RESULTS either (the loaded-set twin): targets
@@ -281,6 +414,68 @@ fn purge_partial_package(sess: &Session, pkg: &str) {
 impl Session {
     pub(crate) fn new(workspace: Option<PathBuf>, global: GlobalFlags) -> Self {
         Session { workspace, global, ..Default::default() }
+    }
+
+    /// THIS worker's eval stack, mutable (write-locks the map — keep `f` tiny, never recurse
+    /// into an eval under it; the [R1] discipline).
+    fn with_stack<R>(&self, f: impl FnOnce(&mut EvalStack) -> R) -> R {
+        let mut m = self.eval_stacks.borrow_mut();
+        f(m.entry(std::thread::current().id()).or_default())
+    }
+
+    /// Read-only view (read lock — the hot path: `canon_label`/`qualify` per label).
+    fn read_stack<R>(&self, f: impl FnOnce(&EvalStack) -> R) -> Option<R> {
+        self.eval_stacks.borrow().get(&std::thread::current().id()).map(f)
+    }
+
+    /// The package THIS worker is evaluating (`None` ⇒ single-package mode).
+    pub(crate) fn current_pkg(&self) -> Option<String> {
+        self.read_stack(|s| s.current_pkg.clone()).flatten()
+    }
+
+    /// Set this worker's current package; returns the previous value (save/restore pairs).
+    pub(crate) fn set_current_pkg(&self, pkg: Option<String>) -> Option<String> {
+        self.with_stack(|s| std::mem::replace(&mut s.current_pkg, pkg))
+    }
+
+    pub(crate) fn bzl_repo_push(&self, ctx: Option<(String, String)>) {
+        self.with_stack(|s| s.bzl_repo.push(ctx));
+    }
+
+    pub(crate) fn bzl_repo_pop(&self) {
+        self.with_stack(|s| {
+            s.bzl_repo.pop();
+        });
+    }
+
+    /// The innermost module context of THIS worker (`None` ⇒ no module on the stack).
+    pub(crate) fn bzl_repo_last(&self) -> Option<Option<(String, String)>> {
+        self.read_stack(|s| s.bzl_repo.last().cloned()).flatten()
+    }
+
+    /// Cycle-guard insert for THIS worker (true = newly inserted, proceed).
+    pub(crate) fn analyzing_insert(&self, label: &str) -> bool {
+        self.with_stack(|s| s.analyzing.insert(label.to_string()))
+    }
+
+    pub(crate) fn analyzing_remove(&self, label: &str) {
+        self.with_stack(|s| {
+            s.analyzing.remove(label);
+        });
+    }
+
+    pub(crate) fn analyzing_contains(&self, label: &str) -> bool {
+        self.read_stack(|s| s.analyzing.contains(label)).unwrap_or(false)
+    }
+
+    /// Install/replace THIS worker's in-flight target.
+    pub(crate) fn set_current_target(&self, t: Option<AnalyzedTarget>) {
+        self.with_stack(|s| s.current = t);
+    }
+
+    /// Commit: take the in-flight target out (post-impl record).
+    pub(crate) fn take_current_target(&self) -> Option<AnalyzedTarget> {
+        self.with_stack(|s| s.current.take())
     }
 
     /// The resolved native (host) cc compiler — walked from `PATH` once per Session (§7 ·iii), cached
@@ -476,7 +671,7 @@ pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
         }
         return expand(s.to_string());
     }
-    match &*sess.current_pkg.borrow() {
+    match sess.current_pkg() {
         None => s.strip_prefix(':').unwrap_or(s).to_string(),
         // Inside an EXTERNAL package (`current_pkg == "@repo//pkg"`): labels resolve within that
         // repo — `//x:y` → `@repo//x:y`; `:n`/`n` → `@repo//pkg:n` (Bazel label semantics).
@@ -504,7 +699,7 @@ pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
 
 /// Package-qualify a source/output path (`x.cc` → `pkg/x.cc` in workspace mode).
 pub(crate) fn qualify(sess: &Session, path: &str) -> String {
-    match &*sess.current_pkg.borrow() {
+    match sess.current_pkg() {
         // External package: FILE paths take Bazel's exec-root form, `external/<repo>/<pkg>/…`
         // (`@repo//pkg` is a label, not a path).
         Some(pkg) => match pkg.strip_prefix('@') {
@@ -535,9 +730,11 @@ pub(crate) fn pkg_of(label: &str) -> Option<String> {
 }
 
 pub(crate) fn with_current<F: FnOnce(&mut AnalyzedTarget)>(sess: &Session, f: F) {
-    if let Some(c) = sess.state.borrow_mut().current.as_mut() {
-        f(c);
-    }
+    sess.with_stack(|s| {
+        if let Some(c) = s.current.as_mut() {
+            f(c);
+        }
+    });
 }
 
 const CXX: &str = "/usr/bin/c++";

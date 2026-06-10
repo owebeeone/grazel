@@ -203,7 +203,12 @@ output (a regression guard), per the characterization header.
 
 ## Worker-pool debt register (razelV3 round 23 — 2026-06-11)
 
-- **P4a — per-worker eval context (the pool's real blocker).** Session carries per-EVAL-STACK
+- **P4a — per-worker eval context: LANDED round 27 (thread-keyed `EvalStack`, not the
+  EvalCtx sketch — see RazelEvalParallelPlan.md P4a for the landed shape + the three
+  follow-on races the parity test caught). Remaining: per-thread `analyzing` allows
+  cross-worker duplicate demand-analysis (waste, not wrongness) — the P3 InFlight treatment
+  for analysis retires it. Historical entry below.**
+- **P4a (historical) — per-worker eval context (the pool's real blocker).** Session carries per-EVAL-STACK
   state as Session-wide fields: `current_pkg` (read by `canon_label`/`qualify` — every label
   resolution), `current_bzl_repo` (load-context stack), `AnalysisState.current` (the in-flight
   target), `analyzing` (re-entrancy guard set). Two workers evaluating concurrently clobber each

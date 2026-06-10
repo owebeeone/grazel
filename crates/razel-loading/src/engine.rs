@@ -21,7 +21,7 @@ use starlark::values::{Freeze, NoSerialize, Trace, Value, ValueLifetimeless};
 #[starlark::starlark_module]
 pub(crate) fn native_members(b: &mut GlobalsBuilder) {
     fn package_name<'v>(eval: &mut Evaluator<'v, '_, '_>) -> anyhow::Result<String> {
-        Ok(session(eval).current_pkg.borrow().clone().unwrap_or_default())
+        Ok(session(eval).current_pkg().unwrap_or_default())
     }
     fn repository_name() -> anyhow::Result<String> {
         Ok("@".to_string())
@@ -452,7 +452,7 @@ fn attr_descriptor<'v>(
         && let Some(ds) = default.unpack_str()
         && (ds.starts_with("//") || ds.starts_with(':'))
         && let Some(Some((repo, pkg))) =
-            session(eval).current_bzl_repo.borrow().last().cloned().map(Some).flatten()
+            session(eval).bzl_repo_last()
     {
         let (p, n) = if let Some(rest) = ds.strip_prefix("//") {
             rest.split_once(':')

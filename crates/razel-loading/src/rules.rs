@@ -289,14 +289,22 @@ impl FileLoader for BzlLoader<'_> {
                 .workspace
                 .clone()
                 .ok_or_else(|| err(format!("load(\"{path}\") needs workspace mode")))?;
-            let cur = self.session.current_pkg.borrow().clone();
+            let cur = self.session.current_pkg();
             let p = resolve_bzl(&root, path, cur.as_deref()).map_err(err)?;
             std::fs::read_to_string(&p)
                 .map_err(|e| err(format!("cannot read {}: {e}", p.display())))?
         };
 
+        // P4a single-flight: ONE eval per module per Session even under the pool — provider
+        // identities are POINTER identities, so a concurrent double-eval mints two `MyInfo`s
+        // and cross-package `dep[P]` ptr-eq breaks. Losers wait, then read the owner's module.
+        if let crate::state::BzlBegin::Ready = crate::state::begin_bzl_load(self.session, path)
+            && let Some(m) = self.session.bzl_cache.borrow().get(path)
+        {
+            return Ok(m.clone());
+        }
         // The nested eval runs with this module's repo context on the stack (popped even on error).
-        self.session.current_bzl_repo.borrow_mut().push(ctx.clone());
+        self.session.bzl_repo_push(ctx.clone());
         self.load_ctx.borrow_mut().push(ctx);
         let frozen = Module::with_temp_heap(|module| -> starlark::Result<FrozenModule> {
             let ast = AstModule::parse(path, src, &Dialect::Extended)?;
@@ -311,12 +319,20 @@ impl FileLoader for BzlLoader<'_> {
                 .map_err(|e| starlark::Error::new_other(anyhow::anyhow!("{e:?}")))
         });
         self.load_ctx.borrow_mut().pop();
-        self.session.current_bzl_repo.borrow_mut().pop();
-        let frozen = frozen?;
+        self.session.bzl_repo_pop();
+        let frozen = match frozen {
+            Ok(f) => f,
+            Err(e) => {
+                crate::state::finish_bzl_load(self.session, path, false);
+                return Err(e);
+            }
+        };
+        // Cache BEFORE Done — Ready readers consult the cache.
         self.session
             .bzl_cache
             .borrow_mut()
             .insert(path.to_string(), frozen.clone());
+        crate::state::finish_bzl_load(self.session, path, true);
         Ok(frozen)
     }
 }
@@ -389,9 +405,9 @@ pub(crate) fn eval_build_src_in(
         session,
         load_ctx: RefCell::new(vec![repo_ctx.clone()]),
     };
-    session.current_bzl_repo.borrow_mut().push(repo_ctx.clone());
+    session.bzl_repo_push(repo_ctx.clone());
     let result = eval_build_src_inner(session, name, src, &loader, &globals, drive_all);
-    session.current_bzl_repo.borrow_mut().pop();
+    session.bzl_repo_pop();
     return result;
 }
 
@@ -438,24 +454,29 @@ fn eval_build_src_inner(
 }
 
 /// Push a harvest dict and index its label keys → owner position (O(1) demand lookups).
+/// P4a: the position is taken from the push UNDER ONE LOCK — a len-then-push across two
+/// acquisitions let concurrent harvesters claim the same slot and index the WRONG dict
+/// (labels then "miss" while present). Index-after-push means a racing reader can miss a
+/// just-harvested label (benign — callers fall back to demand analysis), never mis-map.
 fn index_harvest(
     owned: &starlark::values::OwnedFrozenValue,
     store: &crate::state::SyncCell<Vec<starlark::values::OwnedFrozenValue>>,
     index: &crate::state::SyncCell<std::collections::HashMap<String, usize>>,
 ) {
-    let idx = store.borrow().len();
-    {
-        let v = owned.value();
-        if let Some(d) = starlark::values::dict::DictRef::from_value(v) {
-            let mut ix = index.borrow_mut();
-            for (k, _) in d.iter() {
-                if let Some(k) = k.unpack_str() {
-                    ix.insert(k.to_string(), idx);
-                }
+    let idx = {
+        let mut s = store.borrow_mut();
+        s.push(owned.clone());
+        s.len() - 1
+    };
+    let v = owned.value();
+    if let Some(d) = starlark::values::dict::DictRef::from_value(v) {
+        let mut ix = index.borrow_mut();
+        for (k, _) in d.iter() {
+            if let Some(k) = k.unpack_str() {
+                ix.insert(k.to_string(), idx);
             }
         }
     }
-    store.borrow_mut().push(owned.clone());
 }
 
 
@@ -495,20 +516,27 @@ fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), S
     if !crate::state::begin_pkg_load(sess, pkg) {
         return Ok(());
     }
+    // EVERY exit after an owned begin must finish (P4a): an early `?` between begin and
+    // finish leaked a dead InFlight entry — sequentially masked by re-entry semantics, under
+    // the pool every later waiter parked into the 20s-timeout livelock ("deadlock" at TF
+    // scale: each unvendored-repo demand cost every waiter a 20s quantum, forever).
+    let res = load_package_body(sess, pkg, drive_all);
+    // A failed load must not poison the loaded-set (the guard would silently no-op retries
+    // and every later condition/dep in the package would report "not declared").
+    crate::state::finish_pkg_load(sess, pkg, res.is_ok());
+    res
+}
+
+fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), String> {
     // Host-materialized packages (Bazel built-ins) take precedence over vendoring.
     if let Some(src) = crate::host::host_build(pkg) {
         let repo_ctx = pkg.strip_prefix('@').and_then(|rest| {
             rest.split_once("//").map(|(r, sub)| (r.to_string(), sub.to_string()))
         });
-        let prev = sess.current_pkg.borrow_mut().replace(pkg.to_string());
+        let prev = sess.set_current_pkg(Some(pkg.to_string()));
         let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), src, repo_ctx, drive_all);
-        *sess.current_pkg.borrow_mut() = prev;
-        if let Err(e) = res {
-            crate::state::finish_pkg_load(sess, pkg, false);
-            return Err(e.to_string());
-        }
-        crate::state::finish_pkg_load(sess, pkg, true);
-        return Ok(());
+        sess.set_current_pkg(prev);
+        return res.map_err(|e| e.to_string());
     }
     // External package (`@repo//pkg`): its BUILD lives under the vendored repo's root.
     let pkg_dir = if let Some(rest) = pkg.strip_prefix('@') {
@@ -548,12 +576,9 @@ fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), S
     let repo_ctx = pkg.strip_prefix('@').and_then(|rest| {
         rest.split_once("//").map(|(r, sub)| (r.to_string(), sub.to_string()))
     });
-    let prev = sess.current_pkg.borrow_mut().replace(pkg.to_string());
+    let prev = sess.set_current_pkg(Some(pkg.to_string()));
     let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), &src, repo_ctx, drive_all);
-    *sess.current_pkg.borrow_mut() = prev;
-    // A failed load must not poison the loaded-set (the guard would silently no-op retries
-    // and every later condition/dep in the package would report "not declared").
-    crate::state::finish_pkg_load(sess, pkg, res.is_ok());
+    sess.set_current_pkg(prev);
     res
 }
 
@@ -610,25 +635,26 @@ pub fn load_tree_report_seeded(
     packages: &[String],
     asts: Vec<(String, starlark::syntax::AstModule)>,
 ) -> (Vec<(String, Result<(), String>)>, Vec<String>) {
-    let session = Session::new(Some(root.to_path_buf()), flags);
-    session.ast_cache.borrow_mut().extend(asts);
     // P4: N workers over a shared queue against ONE Session (Send+Sync, P1–P3).
     // RAZEL_LOAD_THREADS=1 reproduces sequential behavior exactly.
-    // UNSOUND at threads>1 (round-23 diagnosis): per-eval-stack state (current_pkg,
-    // current_bzl_repo, AnalysisState.current, analyzing) is Session-wide — concurrent evals
-    // clobber each other's package context and labels misresolve (canon_label/qualify read
-    // current_pkg). Blocked on P4a per-worker eval context (RazelGaps.md). Stays opt-in.
     let threads = std::env::var("RAZEL_LOAD_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1);
-    if threads > 1 {
-        eprintln!(
-            "razel: warning: RAZEL_LOAD_THREADS={threads} — the worker pool is UNSOUND until \
-             P4a (per-worker eval context): labels misresolve across threads and reported \
-             coverage is garbage. Diagnostic use only."
-        );
-    }
+    load_tree_report_with_threads(root, flags, packages, asts, threads)
+}
+
+/// [`load_tree_report_seeded`] with an EXPLICIT worker count (the parity tests' entry —
+/// no env mutation).
+pub fn load_tree_report_with_threads(
+    root: &Path,
+    flags: GlobalFlags,
+    packages: &[String],
+    asts: Vec<(String, starlark::syntax::AstModule)>,
+    threads: usize,
+) -> (Vec<(String, Result<(), String>)>, Vec<String>) {
+    let session = Session::new(Some(root.to_path_buf()), flags);
+    session.ast_cache.borrow_mut().extend(asts);
     if threads <= 1 {
         let report: Vec<(String, Result<(), String>)> = packages
             .iter()
@@ -660,14 +686,16 @@ pub fn load_tree_report_seeded(
     (report, loaded)
 }
 
-/// All packages the session finished loading (deps included) — the spine list.
+/// All packages the session finished loading (deps included) — the spine list. The wait
+/// graph also tracks `.bzl` modules (keys with `:`) — packages only here.
 fn loaded_done(session: &Session) -> Vec<String> {
     session
         .loaded
         .lock()
         .expect("loaded")
+        .res
         .iter()
-        .filter(|(_, st)| matches!(st, crate::state::PkgState::Done))
+        .filter(|(k, st)| !k.contains(':') && matches!(st, crate::state::PkgState::Done))
         .map(|(k, _)| k.clone())
         .collect()
 }

@@ -644,3 +644,27 @@ adopted toolchain lacks a c++-link-executable action_config — a binary golden'
 registered). Link artifacts are file-LIKE absorb values (.path/.short_path/.basename/
 .extension; cc_library's collision check reads short_path). 60 bins; 3 gates; 6 sentinels;
 rungold = cc compile+archive, rust 2 actions.
+
+## Round delta — razelV3 round 27 (2026-06-11, P4a session — "can we debug the threading issue?")
+
+**P4a LANDED: the worker pool is SOUND and DEADLOCK-FREE. Six distinct concurrency bugs,
+each pinned by a failing repro before its fix** (the new 61st bin, parallel_parity.rs — a
+heterogeneous 12-package fixture where any cross-thread context bleed is a hard failure —
+plus TF-scale shakeout): (1) per-eval-stack state was Session-wide → ThreadId-keyed
+`EvalStack` (current_pkg/bzl_repo/in-flight target/analyzing; accessors only; the landed
+shape is the map, not the sketched eval.extra EvalCtx — same isolation, no signature
+cascade); (2) `.bzl` double-eval minted two provider identities → per-module single-flight;
+(3) record-time `results` vs eval-end harvest visibility → wait-load + re-read; (4)
+`index_harvest` len/push under two locks mis-mapped labels → one lock; (5) 20s-timeout-only
+takeover = hours-long livelock at TF scale → real waits-for graph (packages + .bzl in one
+keyed map), package cycles → CycleProceed (sequential re-entry semantics), .bzl cycles →
+takeover; (6) early-`?` exits in load_package_mode leaked dead InFlight entries (sequentially
+masked by re-entry; under the pool a 20s-quantum livelock per unvendored-repo demand) →
+every owned begin now finishes.
+
+**Numbers:** threads=1 parity intact (303/835, ~1:17 — the default, untouched). threads=12:
+30-40s wall (2-2.6×, 229-400% CPU), 0 timeout warnings, coverage 283-286/835 (~94% of
+sequential; the gap is cycle partial-state reads + order-sensitive classes, same walls,
+different error shapes — NOT corruption). Pool stays OPT-IN until coverage parity per the
+acceptance bar. Next levers: per-declaration demand futures (P3's analyzing treatment),
+then scheduling (spine seeding / waiters-work). 61 bins; 3 gates; 6 sentinels; 2 rungolds.

@@ -289,12 +289,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 .filter(|f| f.starts_with('@'))
                 .and_then(|f| f.split("//").next().map(String::from));
             call_site.or_else(|| {
-                session(eval)
-                    .current_bzl_repo
-                    .borrow()
-                    .last()
-                    .cloned()
-                    .flatten()
+                session(eval).bzl_repo_last().flatten()
                     .filter(|(r, _)| !r.is_empty())
                     .map(|(r, _)| format!("@{r}"))
             })
@@ -344,7 +339,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
         let canon = canon_label(sess, &name);
-        let pkg = sess.current_pkg.borrow().clone().unwrap_or_default();
+        let pkg = sess.current_pkg().unwrap_or_default();
         let host_matches = crate::state::host_constraint_matches(&pkg, &name);
         sess.config_specs.borrow_mut().insert(
             canon.clone(),
@@ -729,10 +724,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // Bazel binds select KEYS at the call site: a string key written in `@repo` code is a
         // label in THAT repo. Capture the repo now (the context is gone by analysis time).
         let bzl_repo = session(eval)
-            .current_bzl_repo
-            .borrow()
-            .last()
-            .cloned()
+            .bzl_repo_last()
             .flatten()
             .filter(|(r, _)| !r.is_empty())
             .map(|(r, _)| r);

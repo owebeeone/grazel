@@ -9,7 +9,7 @@ use std::path::Path;
 /// against the include/exclude patterns, package-relative, sorted.
 pub(crate) fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>) -> anyhow::Result<Vec<String>> {
     // External packages (`@repo//pkg`) glob against the vendored repo's dir.
-    let dir = sess.current_pkg.borrow().clone().and_then(|pkg| {
+    let dir = sess.current_pkg().and_then(|pkg| {
         if let Some(rest) = pkg.strip_prefix('@') {
             let (repo, sub) = rest.split_once("//")?;
             let base = sess.global.external_base.clone()?;

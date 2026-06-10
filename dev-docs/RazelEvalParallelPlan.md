@@ -48,16 +48,47 @@ established profiling recipe (`CARGO_PROFILE_RELEASE_STRIP=none` +
 `CARGO_PROFILE_RELEASE_DEBUG=true`, `sample` + dsymutil). Expect the DDS store and
 `results` to be the contended locks; shard if measured, not before.
 
-**P4a — per-worker eval context (added round 23; the pool's actual blocker).**
+**P4a — per-worker eval context (added round 23; LANDED round 27).**
 P1–P3 made Session's fields *lockable*, but four of them are per-EVAL-STACK state living
 Session-wide: `current_pkg` (read by every `canon_label`/`qualify`), `current_bzl_repo`,
-`AnalysisState.current`, `analyzing`. Concurrent workers clobber each other's package
-context — labels misresolve and coverage collapses (6-7/53 in <1s at threads≥2 vs 10/53
-sequential, sample-16). The "spine seeding vs work-stealing" scheduling question is moot
-until this lands: both are queue-order refinements over a pool that corrupts its own evals.
-Shape: per-worker `EvalCtx` in `eval.extra` with `Deref<Target=Session>`; `analyzing` gets
-the P3 InFlight treatment. Details: `RazelGaps.md` round-23 register. Engine-core,
-supervisor-grade. Scheduling (seed order, work-stealing waits) re-measures only after P4a.
+`AnalysisState.current`, `analyzing`. Concurrent workers clobbered each other's package
+context — labels misresolved and coverage collapsed (6-7/53 in <1s at threads≥2 vs 10/53
+sequential, sample-16).
+
+**Landed shape (round 27):** a ThreadId-keyed `EvalStack` map on the Session (accessors
+only; AD2-clean — Session-owned, dies with it), NOT the sketched `EvalCtx`-in-eval.extra —
+same isolation, no signature threading through ~40 call sites; the eval.extra consolidation
+remains an option at L4 scale. The parity test (parallel_parity.rs: heterogeneous 12-pkg
+fixture, 20 rounds × threads=4) drove out THREE more races the context fix exposed:
+1. `.bzl` double-eval minted two provider identities (ptr-eq broke `dep[P]`) → single-flight
+   per module (`begin_bzl_load`, the `begin_pkg_load` machine).
+2. `results` rows are visible at record-time but the captured-instance HARVEST lands at
+   package-eval end → consumers on other workers read "0 pairs" → wait-load the dep's
+   package (condvar when InFlight) and re-read before demand re-analysis.
+3. `index_harvest` computed len-then-push under two lock acquisitions → concurrent
+   harvesters claimed the same slot and mis-mapped labels → push+index under one lock.
+The TF-scale shakeout then drove three more rounds of the same session:
+4. The 20s-timeout-only takeover livelocked at TF scale (cycles are dense; every edge cost a
+   20s sleep) → a real WAITS-FOR graph: packages + .bzl modules in ONE keyed map + parked-
+   worker edges; cycles detect at acquire time. Package cycles resolve by CycleProceed
+   (sequential re-entry semantics: proceed against the owner's partial state — exactly one
+   partial reader per cycle, like sequential); .bzl cycles take the eval over (the module
+   value is required; a true load cycle errors loudly in the eval).
+5. Takeover duplicates could FAIL and purge the surviving owner's live results → `live`
+   counts per key; only the LAST failing finisher purges, success suppresses.
+6. `load_package_mode` had early-`?` exits between begin and finish — a dead InFlight leak,
+   sequentially masked by re-entry semantics, at TF scale a 20s-quantum livelock per
+   unvendored-repo demand → every exit path now finishes (body extracted).
+
+**Where this lands (round 27):** threads=1 untouched (303/835 @ ~1:17, the default).
+threads=12: SOUND (parity fixture green 35+ consecutive runs; no corruption signatures at TF
+scale) and deadlock-free (0 takeover timeouts), 30-40s wall (2-2.6×, 229-400% CPU), coverage
+283-286/835 = ~94% of sequential. The residual gap is cycle partial-state reads + the
+order-sensitive failure classes ("declare it before its users", eager-select) — NOT
+corruption. Pool stays OPT-IN until coverage parity (the acceptance bar is unchanged).
+Remaining levers, in order: per-declaration demand futures (the P3 InFlight treatment for
+`analyzing` — also retires cross-worker duplicate demand-analysis waste), then scheduling
+(spine seeding / waiters-work) for the wall-clock tail.
 
 ## Risks, ranked
 

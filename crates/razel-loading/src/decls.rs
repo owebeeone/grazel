@@ -152,7 +152,7 @@ pub(crate) fn stash_captured_for_freeze<'v>(
     module.set(CAPTURED_VAR, heap.alloc(starlark::values::dict::AllocDict(entries)));
     // Undriven Starlark decls (dependency-loaded packages defer them): harvest as
     // {label: (pkg, rule, [(k, v)…])} so a later demand analyzes them in the consumer's eval.
-    let pkg = sess.current_pkg.borrow().clone().unwrap_or_default();
+    let pkg = sess.current_pkg().unwrap_or_default();
     let mut deferred: Vec<(Value<'v>, Value<'v>)> = Vec::new();
     for slot in store.decls.borrow_mut().iter_mut() {
         if let Some(d) = slot.take() {
@@ -335,7 +335,7 @@ pub(crate) fn ensure_analyzed<'v>(
         if sess.results.borrow().contains_key(label) {
             return Ok(());
         }
-        if sess.analyzing.borrow().contains(label) {
+        if sess.analyzing_contains(label) {
             return Err(anyhow::anyhow!("dependency cycle detected at `{label}`").into());
         }
         sess.pending.borrow().get(label).copied()
@@ -401,16 +401,16 @@ fn run_native_deferred<'v>(
     f: crate::state::NativeAnalyzeFn,
 ) -> starlark::Result<()> {
     let sess = session(eval);
-    if !sess.analyzing.borrow_mut().insert(label.to_string()) {
+    if !sess.analyzing_insert(label) {
         return Err(anyhow::anyhow!("dependency cycle detected at `{label}`").into());
     }
     let prev = match crate::state::pkg_of(label) {
-        Some(p) => sess.current_pkg.borrow_mut().replace(p),
-        None => sess.current_pkg.borrow().clone(),
+        Some(p) => sess.set_current_pkg(Some(p)),
+        None => sess.current_pkg(),
     };
     let res = f(eval).map_err(Into::into);
-    *session(eval).current_pkg.borrow_mut() = prev;
-    session(eval).analyzing.borrow_mut().remove(label);
+    session(eval).set_current_pkg(prev);
+    session(eval).analyzing_remove(label);
     res
 }
 
@@ -425,14 +425,14 @@ pub(crate) fn analyze_deferred<'v>(
     let found = find_deferred(eval, label);
     let sess = session(eval);
     let Some((pkg, rule, kwargs)) = found else { return Ok(()) };
-    if !sess.analyzing.borrow_mut().insert(label.to_string()) {
+    if !sess.analyzing_insert(label) {
         return Err(anyhow::anyhow!("dependency cycle detected at `{label}`").into());
     }
     // Analyze in the DECL's package context (labels/paths qualify to the origin package).
-    let prev = sess.current_pkg.borrow_mut().replace(pkg);
+    let prev = sess.set_current_pkg(Some(pkg));
     let res = analyze_rule_decl(eval, rule, &kwargs);
-    *session(eval).current_pkg.borrow_mut() = prev;
-    session(eval).analyzing.borrow_mut().remove(label);
+    session(eval).set_current_pkg(prev);
+    session(eval).analyzing_remove(label);
     res
 }
 
@@ -496,7 +496,7 @@ pub(crate) fn analyze_decl<'v>(eval: &mut Evaluator<'v, '_, '_>, idx: usize) -> 
     let Some(decl) = decl else { return Ok(()) };
     {
         let sess = session(eval);
-        if !sess.analyzing.borrow_mut().insert(decl.label.clone()) {
+        if !sess.analyzing_insert(&decl.label) {
             return Err(
                 anyhow::anyhow!("dependency cycle detected at `{}`", decl.label).into()
             );
@@ -508,8 +508,8 @@ pub(crate) fn analyze_decl<'v>(eval: &mut Evaluator<'v, '_, '_>, idx: usize) -> 
     // attrs (`:dep`) must canonicalize against the decl's origin.
     let origin = crate::state::pkg_of(&decl.label);
     let prev = match origin {
-        Some(p) => session(eval).current_pkg.borrow_mut().replace(p),
-        None => session(eval).current_pkg.borrow().clone(),
+        Some(p) => session(eval).set_current_pkg(Some(p)),
+        None => session(eval).current_pkg(),
     };
     let res = match &decl.body {
         DeclBody::Rule { rule, kwargs } => analyze_rule_decl(eval, *rule, kwargs),
@@ -521,8 +521,8 @@ pub(crate) fn analyze_decl<'v>(eval: &mut Evaluator<'v, '_, '_>, idx: usize) -> 
             }
         }
     };
-    *session(eval).current_pkg.borrow_mut() = prev;
-    session(eval).analyzing.borrow_mut().remove(&decl.label);
+    session(eval).set_current_pkg(prev);
+    session(eval).analyzing_remove(&decl.label);
     res
 }
 
@@ -577,11 +577,11 @@ pub(crate) fn apply_aspect<'v>(
         return Ok(());
     }
     let sess = session(eval);
-    if !sess.analyzing.borrow_mut().insert(memo_key.clone()) {
+    if !sess.analyzing_insert(&memo_key) {
         return Ok(()); // cycle: the aspect is being computed up-stack
     }
     let res = apply_aspect_uncached(eval, implementation, asp_attrs, aspectv, label, providers);
-    session(eval).analyzing.borrow_mut().remove(&memo_key);
+    session(eval).analyzing_remove(&memo_key);
     res
 }
 
@@ -600,8 +600,8 @@ fn apply_aspect_uncached<'v>(
     // Aspect work runs in the TARGET's package context (declare_file/labels qualify there).
     let origin = crate::state::pkg_of(label);
     let prev = match origin {
-        Some(p) => session(eval).current_pkg.borrow_mut().replace(p),
-        None => session(eval).current_pkg.borrow().clone(),
+        Some(p) => session(eval).set_current_pkg(Some(p)),
+        None => session(eval).current_pkg(),
     };
     let result = (|| -> starlark::Result<()> {
         let mut rule_fields: Vec<(String, Value<'v>)> = Vec::new();
@@ -711,7 +711,7 @@ fn apply_aspect_uncached<'v>(
         providers.extend(pairs);
         Ok(())
     })();
-    *session(eval).current_pkg.borrow_mut() = prev;
+    session(eval).set_current_pkg(prev);
     result
 }
 
@@ -919,15 +919,28 @@ fn resolve_label_attr_inner<'v>(
             // (unfrozen, mid-load) module — invisible here. Re-analyze the harvested decl in
             // THIS eval (idempotent: results overwrite by label) so instances are local.
             let providers = if providers.is_empty()
-                && !session(eval).analyzing.borrow().contains(&dep)
+                && !session(eval).analyzing_contains(&dep)
             {
-                analyze_deferred(eval, &dep)?;
-                decl_store(eval)?
-                    .captured
-                    .borrow()
-                    .get(&dep)
-                    .cloned()
-                    .unwrap_or_default()
+                // P4a: a results row is visible the moment its producer RECORDS it, but the
+                // producer's captured-instance harvest lands only when its whole package eval
+                // completes. If that package is mid-flight on ANOTHER worker, wait for it
+                // (load_package: no-op when Done, condvar wait when InFlight), then re-read
+                // the harvest before falling back to a local re-analysis.
+                if let Some(pkg) = crate::state::pkg_of(&dep) {
+                    let _ = crate::rules::load_package(session(eval), &pkg);
+                }
+                let waited = cross_providers_for(eval, &dep);
+                if waited.is_empty() {
+                    analyze_deferred(eval, &dep)?;
+                    decl_store(eval)?
+                        .captured
+                        .borrow()
+                        .get(&dep)
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    waited
+                }
             } else {
                 providers
             };
@@ -1088,11 +1101,11 @@ pub(crate) fn analyze_rule_decl<'v>(
 
     let sess = session(eval);
     let heap = eval.heap();
-    sess.state.borrow_mut().current = Some(AnalyzedTarget {
-            name: canon_label(sess, &name),
-            deps: dep_labels,
-            ..Default::default()
-        });
+    sess.set_current_target(Some(AnalyzedTarget {
+        name: canon_label(sess, &name),
+        deps: dep_labels,
+        ..Default::default()
+    }));
 
     // ctx.outputs.<attr> — string-valued attrs are predeclared output filenames
     // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
@@ -1143,7 +1156,7 @@ pub(crate) fn analyze_rule_decl<'v>(
             actions: heap.alloc_complex_no_freeze(Actions),
             // `ctx.label` is a real Label value (.package/.name/.workspace_root; canonical str()).
             label: {
-                let cur = sess.current_pkg.borrow().clone().unwrap_or_default();
+                let cur = sess.current_pkg().unwrap_or_default();
                 let (repo, pkg) = match cur.strip_prefix('@') {
                     Some(rest) => match rest.split_once("//") {
                         Some((r, p)) => (Some(format!("@{r}")), p.to_string()),
@@ -1203,7 +1216,7 @@ pub(crate) fn analyze_rule_decl<'v>(
 
     // Post-impl: commit the analyzed target via record_target (E0d: it also asserts into the
     // Session's live fact store). Take the in-flight target with a short borrow first.
-    let committed = sess.state.borrow_mut().current.take();
+    let committed = sess.take_current_target();
     if let Some(c) = committed {
         record_target(sess, c);
     }
