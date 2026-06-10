@@ -205,3 +205,20 @@ String labels deviation, the 16-member `ctx` backlog, `ctx.actions.write`).
 (`@rules_cc//cc/common:cc_info.bzl`, rust.bzl:19; the probe classifies it `missing-export`
 because the synthetic shim catches the prefix). Escalated to Gianni. Next after unblock:
 walk rust.bzl's remaining load graph → instantiation (`ctx` ticket batch above).
+
+## Round delta — razelV3 round 2 (2026-06-10)
+
+**Landed** (green-gated): `razelV3/L4a-select` — REAL `select()`/`config_setting` resolution
+(structured config: compilation_mode + define; most-specialized wins; loud errors), retiring the
+first-branch stub — the worst silent-wrong behavior for the Bazel-compat goal. `razelV3/genrule`
+— Bazel's most ubiquitous native rule ($@/$</$(SRCS)/$(OUTS)/$(location[s]), $$; unmodeled vars
+error). `razelV3/args-fidelity` — add(name,value) + add_all before_each/format_each/map_each
+(rustc.bzl's 56 call sites; were silently dropped). `razelV3/write-executable`. 58 test bins;
+gates + probe sentinels green.
+
+**Debt added:** deferred select resolution; config_setting breadth (cpu/platforms = L4);
+genrule breadth (RULEDIR/@D/tools=); File-typed depset elements for map_each.
+
+**Rung state:** unchanged — L2 frontier blocked solely on `rules_cc` vendoring. The unblocked
+compatibility lane (configuration + genrule + Args) is exhausted; remaining grounded work is
+behind the resource gate or L4-scale design (runfiles, platforms).
