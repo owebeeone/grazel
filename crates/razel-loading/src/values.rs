@@ -141,28 +141,81 @@ starlark::methods_static!(ARGS_METHODS = args_methods);
 
 #[starlark::starlark_module]
 pub(crate) fn args_methods(b: &mut MethodsBuilder) {
+    /// `add(arg)` or the Bazel two-positional `add("--flag", value)`.
     fn add<'v>(
         #[starlark(this)] this: Value<'v>,
         #[starlark(require = pos)] arg: Value<'v>,
+        #[starlark(require = pos)] value: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         if let Some(a) = this.downcast_ref::<Args>() {
             a.items.borrow_mut().push(file_path(arg));
-        }
-        Ok(NoneType)
-    }
-    fn add_all<'v>(
-        #[starlark(this)] this: Value<'v>,
-        #[starlark(require = pos)] values: Value<'v>,
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
-        if let Some(a) = this.downcast_ref::<Args>() {
-            for s in flatten_arg(values) {
-                a.items.borrow_mut().push(s);
+            if let Some(v) = value {
+                a.items.borrow_mut().push(file_path(v));
             }
         }
         Ok(NoneType)
     }
+    /// `add_all(values, before_each=?, format_each=?, map_each=?)` — D3 fidelity (the rules_rust
+    /// shapes). `map_each` runs per element and may return a string, a list, or `None` (skip);
+    /// `format_each` is Bazel's single-`%s` format; `before_each` interleaves.
+    fn add_all<'v>(
+        #[starlark(this)] this: Value<'v>,
+        #[starlark(require = pos)] values: Value<'v>,
+        #[starlark(require = named)] before_each: Option<String>,
+        #[starlark(require = named)] format_each: Option<String>,
+        #[starlark(require = named)] map_each: Option<Value<'v>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        // Map first (on raw element VALUES — File fields etc. stay live), then stringify.
+        let mut strs: Vec<String> = Vec::new();
+        for e in flatten_values(values, eval.heap()) {
+            match map_each {
+                Some(f) => {
+                    let r = eval
+                        .eval_function(f, &[e], &[])
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    if r.is_none() {
+                        continue;
+                    }
+                    if let Some(l) = ListRef::from_value(r) {
+                        strs.extend(l.iter().map(file_path));
+                    } else {
+                        strs.push(file_path(r));
+                    }
+                }
+                None => strs.push(file_path(e)),
+            }
+        }
+        if let Some(a) = this.downcast_ref::<Args>() {
+            let mut items = a.items.borrow_mut();
+            for s in strs {
+                if let Some(b) = &before_each {
+                    items.push(b.clone());
+                }
+                items.push(match &format_each {
+                    Some(fmt) => fmt.replace("%s", &s),
+                    None => s,
+                });
+            }
+        }
+        Ok(NoneType)
+    }
+}
+
+/// The element VALUES of an `add_all` collection (list or depset; a scalar is itself) — kept as
+/// values so `map_each` sees live objects, not pre-stringified paths. (razel's `Depset` stores
+/// path STRINGS today, so its elements reach `map_each` as strings — File-typed depset elements
+/// are registered debt; the probe will surface it at rust instantiation.)
+fn flatten_values<'v>(v: Value<'v>, heap: starlark::values::Heap<'v>) -> Vec<Value<'v>> {
+    if let Some(list) = ListRef::from_value(v) {
+        return list.iter().flat_map(|e| flatten_values(e, heap)).collect();
+    }
+    if let Some(d) = v.downcast_ref::<Depset>() {
+        return d.items.iter().map(|s| heap.alloc(s.as_str())).collect();
+    }
+    vec![v]
 }
 
 
