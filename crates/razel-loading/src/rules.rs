@@ -455,6 +455,20 @@ fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), S
         return Ok(());
     }
     sess.loaded.borrow_mut().insert(pkg.to_string());
+    // Host-materialized packages (Bazel built-ins) take precedence over vendoring.
+    if let Some(src) = crate::host::host_build(pkg) {
+        let repo_ctx = pkg.strip_prefix('@').and_then(|rest| {
+            rest.split_once("//").map(|(r, sub)| (r.to_string(), sub.to_string()))
+        });
+        let prev = sess.current_pkg.borrow_mut().replace(pkg.to_string());
+        let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), src, repo_ctx, drive_all);
+        *sess.current_pkg.borrow_mut() = prev;
+        if let Err(e) = res {
+            sess.loaded.borrow_mut().remove(pkg);
+            return Err(e.to_string());
+        }
+        return Ok(());
+    }
     // External package (`@repo//pkg`): its BUILD lives under the vendored repo's root.
     let pkg_dir = if let Some(rest) = pkg.strip_prefix('@') {
         let (repo, sub) = rest.split_once("//").ok_or_else(|| format!("bad package `{pkg}`"))?;

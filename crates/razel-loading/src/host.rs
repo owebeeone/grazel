@@ -65,6 +65,16 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
     HOST.iter().find(|(k, _)| *k == label).map(|(_, v)| *v)
 }
 
+/// The host BUILD for a canonical package (`@repo//pkg`), if razel provides one — the
+/// package-level twin of [`host_bzl`] (Bazel built-in packages like @bazel_tools//tools/cpp).
+pub(crate) fn host_build(pkg: &str) -> Option<&'static str> {
+    const HOST: &[(&str, &str)] = &[(
+        "@bazel_tools//tools/cpp",
+        include_str!("../host-repos/bazel_tools/tools/cpp/BUILD"),
+    )];
+    HOST.iter().find(|(k, _)| *k == pkg).map(|(_, v)| *v)
+}
+
 /// Conditions in razel's host-materialized generated repos that are FALSE by construction on the
 /// CPU-only host (`@local_config_cuda//:is_cuda_enabled`, …). `select()` treats them as declared
 /// non-matching config_settings — the same answer the generated repo's BUILD would give.

@@ -345,3 +345,22 @@ LIVE values (was stringifying — the last string/File seam).
 (compilation_context, compilation_outputs) pair** — the absorbed call can't fake a 2-tuple and
 faking would be silent-wrong. This is the cc_common bridge keystone (Constrain §8c): next round
 implements compile/link minimally over the razel cc engine. 60 bins; 3 gates; 5 sentinels.
+
+## Round delta — razelV3 round 10 (2026-06-10)
+
+**`cc_common.compile` LANDED — in host Starlark, on the four-move API.** The cc shim is now a
+.bzl file (`@cc_compatibility_proxy//:symbols.bzl`): compile() emits REAL clang command lines
+via `razel_build.command_line("cc", "c++-compile", …)` (the Constrain engine), one action per
+src, and returns the Bazel-shaped (compilation_context, compilation_outputs) pair —
+`razel_host_absorb_with` structs whose touched fields are real and untouched members absorb.
+merge/create_compilation_contexts + get_artifact_name_for_category ride the same seam.
+CcInfo gained `init=` defaults (empty contexts — `CcInfo().linking_context` traverses).
+"Languages are data": the keystone member of cc_common needed ZERO new Rust value types.
+
+**The TF cc lane is inside `cc_binary_impl` (protoc itself), past compile().** En route:
+provider instances default unset fields to None (declared-field tracking is registered debt);
+host BUILD packages (`host_build` — @bazel_tools//tools/cpp materialized: malloc/empty_lib/
+toolchain_type); bare `@repo` ≡ `@repo//:repo` canon; genrule cmd_bash; @abseil-cpp vendor alias
++ zlib vendored. Frontier: `CcInfo in dep` where a dep item is None (cc_binary's runtimes path)
+— next probe step, then the link-stage members of cc_common as the walk demands them.
+60 bins; 3 gates; 5 sentinels.

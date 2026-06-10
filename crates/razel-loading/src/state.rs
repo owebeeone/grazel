@@ -336,6 +336,11 @@ pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
     };
     // An `@repo//…` label is already canonical (external labels don't take the current package).
     if s.starts_with('@') {
+        // Bare `@repo` shorthand ≡ `@repo//:repo`.
+        if !s.contains("//") {
+            let name = s.trim_start_matches('@');
+            return format!("{s}//:{name}");
+        }
         return expand(s.to_string());
     }
     match &*sess.current_pkg.borrow() {

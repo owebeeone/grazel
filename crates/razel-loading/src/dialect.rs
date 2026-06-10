@@ -401,7 +401,8 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] outs: UnpackList<String>,
-        #[starlark(require = named)] cmd: String,
+        #[starlark(require = named)] cmd: Option<String>,
+        #[starlark(require = named)] cmd_bash: Option<String>,
         #[starlark(require = named)] tools: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] exec_tools: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
@@ -413,6 +414,11 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let mut srcs = crate::values::unpack_strs(srcs);
         srcs.extend(crate::values::unpack_strs(tools));
         srcs.extend(crate::values::unpack_strs(exec_tools));
+        // Bazel: `cmd` or the bash-explicit `cmd_bash` (razel always runs bash).
+        let cmd = match cmd.or(cmd_bash) {
+            Some(c) => c,
+            None => return Err(anyhow::anyhow!("genrule `{name}` needs cmd (or cmd_bash)")),
+        };
         record_native(eval, label, crate::state::native_decl(move |eval| {
             let sess = session(eval);
             // Split srcs: labels resolve to their files (their package loads/analyzes on

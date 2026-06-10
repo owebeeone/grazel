@@ -154,7 +154,16 @@ where
     Self: ProvidesStaticType<'v>,
 {
     fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
-        self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| v.to_value())
+        // Unset fields read as None (razel doesn't track the DECLARED field list, so
+        // partially-constructed instances — `CcInfo().linking_context` — default rather than
+        // error; undeclared-field misuse is not caught. Registered debt.)
+        Some(
+            self.fields
+                .iter()
+                .find(|(k, _)| k == attribute)
+                .map(|(_, v)| v.to_value())
+                .unwrap_or_else(Value::new_none),
+        )
     }
 }
 
