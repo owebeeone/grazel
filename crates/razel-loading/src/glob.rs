@@ -27,6 +27,11 @@ pub(crate) fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>
             "glob() needs a package on disk — use the workspace build path"
         ));
     };
+    // Result memo: identical (dir, patterns) globs repeat across TF's macro layer.
+    let key = (dir.clone(), include.join(","), exclude.join(","));
+    if let Some(hit) = sess.glob_cache.borrow().get(&key) {
+        return Ok(hit.as_ref().clone());
+    }
     let files = crate::state::walk_cached(sess, &dir);
     let mut out: Vec<String> = files
         .iter()
@@ -37,6 +42,7 @@ pub(crate) fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>
         .cloned()
         .collect();
     out.sort();
+    sess.glob_cache.borrow_mut().insert(key, std::sync::Arc::new(out.clone()));
     Ok(out)
 }
 

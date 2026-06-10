@@ -517,3 +517,15 @@ enable_registration_v2 BuildSettingInfo class (55 pkgs), then the eval worker-po
 Tooling note: rounds 17–18's razel edits ran through AIEdit (the new transactional MCP
 editor) — including one atomic 8-edit/4-file transaction for the FS caches. Smoke suite 5/5;
 field verdict in the eval thread.
+
+## Round delta — razelV3 round 19 (2026-06-11, perf cont.)
+
+**Full sweep 1:06 → 1:00; sys steady at ~2s.** Symbolized CPU profile (strip=none +
+CARGO_PROFILE_RELEASE_DEBUG; the workspace release profile strips symbols — override needed
+for sampling): top razel frames were glob PATTERN MATCHING (`star_match`/`seg_match`) over
+llvm-sized cached walks plus allocator churn from per-call path cloning → glob RESULT memo
+keyed (dir, include, exclude). Remaining ~57s user is broad: starlark compile/bytecode,
+allocator pressure, dep-resolution maps — no single >20% frame left. The next order of
+magnitude is the eval worker-pool (freeze-and-harvest already confines cross-package values
+to Send+Sync frozen modules; the blocker is ~20 RefCell Session fields + Send native
+closures + demand futures). Sequential floor reached for cheap fixes.

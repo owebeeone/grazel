@@ -157,6 +157,11 @@ pub(crate) struct Session {
     pub(crate) exists_cache: RefCell<std::collections::HashMap<std::path::PathBuf, bool>>,
     pub(crate) walk_cache:
         RefCell<std::collections::HashMap<std::path::PathBuf, std::sync::Arc<Vec<String>>>>,
+    /// glob() RESULT memo, keyed (package dir, include, exclude) — after the walk cache,
+    /// pattern-matching huge trees per call was the top CPU frame (TF macros repeat globs).
+    pub(crate) glob_cache: RefCell<
+        std::collections::HashMap<(std::path::PathBuf, String, String), std::sync::Arc<Vec<String>>>,
+    >,
     /// Pre-parsed BUILD ASTs (key = the eval name, `{pkg}/BUILD`): read+parse is pure and
     /// parallelizes across files; the sequential eval consumes them (load+parse / execute split).
     pub(crate) ast_cache: RefCell<std::collections::HashMap<String, starlark::syntax::AstModule>>,
