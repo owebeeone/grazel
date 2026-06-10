@@ -185,3 +185,11 @@ output (a regression guard), per the characterization header.
   `genfiles_dir`, `file`, `expand_make_variables`.
 - **`ctx.actions.write` (go-shaped languages + py-launcher cleanup).** Grounded by go importcfg
   needs (V3 §4) and the py `printf|sh -c` workaround; small generic engine move.
+- **Deferred `select()` resolution.** select resolves eagerly at call time — conditions must be
+  declared before use (forward/same-package-later config_settings error clearly). Bazel attaches
+  selects to attrs and resolves at analysis; razel's E0 split makes the deferred model natural —
+  do it when a real corpus declares conditions after selects.
+- **`config_setting` model breadth.** Only `compilation_mode` + `define` are modeled (unmodeled
+  keys error loudly). `cpu`/platform constraints land with L4 platforms.
+- **genrule breadth.** `$(RULEDIR)`/`$(@D)`/`$(BINDIR)` + `tools=`/`exec_tools=` (exec-config)
+  + `toolchains=` make-var sources error loudly today; add as real corpora demand.
