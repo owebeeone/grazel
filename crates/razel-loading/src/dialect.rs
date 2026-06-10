@@ -450,21 +450,22 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// Unmodeled variables (`$(RULEDIR)`, tools=…) error loudly — registered debt, not silence.
     fn genrule<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
         #[starlark(require = named)] outs: UnpackList<String>,
         #[starlark(require = named)] cmd: Option<String>,
         #[starlark(require = named)] cmd_bash: Option<String>,
-        #[starlark(require = named)] tools: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] exec_tools: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] tools: Option<Value<'v>>,
+        #[starlark(require = named)] exec_tools: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
-        // Stringify srcs/tools OUTSIDE the closure (native bodies capture only plain data).
-        // tools/exec_tools join the location table + inputs (their labels resolve like srcs).
-        let mut srcs = crate::values::unpack_strs(srcs);
-        srcs.extend(crate::values::unpack_strs(tools));
-        srcs.extend(crate::values::unpack_strs(exec_tools));
+        // Decompose to PLAIN-DATA parts outside the closure (selects defer to analysis —
+        // the str_attr_parts pattern; top-level `srcs = select({...})` is legal Bazel).
+        // tools/exec_tools join the location table + inputs (labels resolve like srcs).
+        let mut src_parts = crate::values::str_attr_parts(eval, srcs)?;
+        src_parts.extend(crate::values::str_attr_parts(eval, tools)?);
+        src_parts.extend(crate::values::str_attr_parts(eval, exec_tools)?);
         // Bazel: `cmd` or the bash-explicit `cmd_bash` (razel always runs bash).
         let cmd = match cmd.or(cmd_bash) {
             Some(c) => c,
@@ -483,9 +484,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             // Split srcs: labels resolve to their files (their package loads/analyzes on
             // demand); plain names are this package's files. `loc` keys keep the as-written
             // form for `$(location X)`.
+            let srcs = crate::values::resolve_str_parts(eval, &src_parts)?;
             let (mut inputs, mut deps) = (Vec::new(), Vec::new());
             let mut loc: Vec<(String, Vec<String>)> = Vec::new();
-            for s in srcs.clone() {
+            for s in srcs {
                 if s.starts_with(':') || s.starts_with("//") {
                     let dep = crate::deps::resolve_dep(eval, &s)?;
                     loc.push((s.clone(), dep.libs.clone()));

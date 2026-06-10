@@ -549,3 +549,18 @@ finish_pkg_load: Done on success, clear+notify on failure (unpoisoned retries pr
 All green: 60 bins, gates, 6 sentinels, 2 rungolds; sweep parity at 1:01 / 270 pkgs.
 Remaining before the pool: cross-thread cycle detection (waits-for check before the condvar
 wait) and the P4 work queue itself.
+
+## Round delta — razelV3 round 22 (2026-06-11)
+
+**P4 diagnosis: the pool was never broken — order change exposed a pre-existing bug**
+(genrule srcs/tools rejected top-level select(); fixed via str_attr_parts deferral, same as
+native_cc) and a measurement flattery (dep-loaded packages counted "loaded" without being
+driven; parallel order drives more honestly). Sequential repro proved it (same error, same
+package, one thread).
+
+**First honest parallel numbers (sample-16): 54s → 40s wall at 2% CPU** — workers spend the
+run WAITING on one worker that owns the shared dep spine (tensorflow root → llvm). The
+critical path is the spine's sequential eval, exactly the plan's risk #3. Next lever:
+waiters must WORK (steal pending packages) or the queue must run the spine's independent
+sub-packages (llvm/mlir are mutually independent) breadth-first — cooperative scheduling,
+not more threads. Pool stays opt-in until then.
