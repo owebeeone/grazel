@@ -128,14 +128,23 @@ pub(crate) fn stash_captured_for_freeze<'v>(
     let pkg = sess.current_pkg.borrow().clone().unwrap_or_default();
     let mut deferred: Vec<(Value<'v>, Value<'v>)> = Vec::new();
     for slot in store.decls.borrow_mut().iter_mut() {
-        if let Some(d) = slot.take()
-            && let DeclBody::Rule { rule, kwargs } = d.body
-        {
+        if let Some(d) = slot.take() {
             sess.pending.borrow_mut().remove(&d.label);
-            let kw: Vec<Value<'v>> =
-                kwargs.iter().map(|(k, v)| heap.alloc((heap.alloc(k.as_str()), *v))).collect();
-            let tup = heap.alloc((heap.alloc(pkg.as_str()), rule, heap.alloc(kw)));
-            deferred.push((heap.alloc(d.label.as_str()), tup));
+            match d.body {
+                DeclBody::Rule { rule, kwargs } => {
+                    let kw: Vec<Value<'v>> = kwargs
+                        .iter()
+                        .map(|(k, v)| heap.alloc((heap.alloc(k.as_str()), *v)))
+                        .collect();
+                    let tup = heap.alloc((heap.alloc(pkg.as_str()), rule, heap.alloc(kw)));
+                    deferred.push((heap.alloc(d.label.as_str()), tup));
+                }
+                // Undriven natives: bodies are Session-side plain-data closures — demandable
+                // from any later eval.
+                DeclBody::Native(nidx) => {
+                    sess.deferred_natives.borrow_mut().insert(d.label, nidx);
+                }
+            }
         }
     }
     module.set(DEFERRED_VAR, heap.alloc(starlark::values::dict::AllocDict(deferred)));
@@ -266,21 +275,15 @@ pub(crate) fn drive_decls<'v>(
 ) -> starlark::Result<()> {
     let mut i = 0;
     loop {
-        let (n, is_native) = {
-            let decls = decl_store(eval)?.decls.borrow();
-            let is_native = decls
-                .get(i)
-                .and_then(|s| s.as_ref())
-                .is_some_and(|d| matches!(d.body, DeclBody::Native(_)));
-            (decls.len(), is_native)
-        };
+        let n = decl_store(eval)?.decls.borrow().len();
         if i >= n {
             return Ok(());
         }
-        // Bazel analyzes only DEMANDED targets: a dependency-loaded package drives its native
-        // decls (their closures die with the package) but defers Starlark decls to the harvest —
-        // demanded ones analyze later, doc-only ones (bzl_library) never do.
-        if drive_all || is_native {
+        // Bazel analyzes only DEMANDED targets: a dependency-loaded package defers ALL decls —
+        // Starlark ones to the harvest, native ones to `deferred_natives` (their bodies are
+        // Session-side and run in any later eval). Driving natives eagerly manufactured false
+        // cycles (a genrule's `tools=[//:protoc]` resolving while protoc is mid-analysis).
+        if drive_all {
             analyze_decl(eval, i)?;
         }
         i += 1;
@@ -347,7 +350,35 @@ pub(crate) fn ensure_analyzed<'v>(
             return Err(anyhow::anyhow!("loading `{label}`'s package failed: {e}").into());
         }
     }
+    if let Some(f) = {
+        let sess = session(eval);
+        let nidx = sess.deferred_natives.borrow().get(label).copied();
+        nidx.and_then(|i| sess.native_decls.borrow_mut()[i].take())
+    } {
+        return run_native_deferred(eval, label, f);
+    }
     analyze_deferred(eval, label)
+}
+
+
+/// Run a deferred NATIVE body on demand (cycle-guarded, in the decl's package context).
+fn run_native_deferred<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    label: &str,
+    f: crate::state::NativeAnalyzeFn,
+) -> starlark::Result<()> {
+    let sess = session(eval);
+    if !sess.analyzing.borrow_mut().insert(label.to_string()) {
+        return Err(anyhow::anyhow!("dependency cycle detected at `{label}`").into());
+    }
+    let prev = match crate::state::pkg_of(label) {
+        Some(p) => sess.current_pkg.borrow_mut().replace(p),
+        None => sess.current_pkg.borrow().clone(),
+    };
+    let res = f(eval).map_err(Into::into);
+    *session(eval).current_pkg.borrow_mut() = prev;
+    session(eval).analyzing.borrow_mut().remove(label);
+    res
 }
 
 
@@ -422,6 +453,14 @@ pub(crate) fn analyze_decl<'v>(eval: &mut Evaluator<'v, '_, '_>, idx: usize) -> 
         }
         sess.pending.borrow_mut().remove(&decl.label);
     }
+    // Analyze in the DECL's package context — a cross-package demand chain can re-enter this
+    // store while current_pkg points at ANOTHER package (compiler→root→compiler), and string
+    // attrs (`:dep`) must canonicalize against the decl's origin.
+    let origin = crate::state::pkg_of(&decl.label);
+    let prev = match origin {
+        Some(p) => session(eval).current_pkg.borrow_mut().replace(p),
+        None => session(eval).current_pkg.borrow().clone(),
+    };
     let res = match &decl.body {
         DeclBody::Rule { rule, kwargs } => analyze_rule_decl(eval, *rule, kwargs),
         DeclBody::Native(nidx) => {
@@ -432,6 +471,7 @@ pub(crate) fn analyze_decl<'v>(eval: &mut Evaluator<'v, '_, '_>, idx: usize) -> 
             }
         }
     };
+    *session(eval).current_pkg.borrow_mut() = prev;
     session(eval).analyzing.borrow_mut().remove(&decl.label);
     res
 }
@@ -552,7 +592,7 @@ pub(crate) fn resolve_label_attr<'v>(
                     };
                     if on_disk {
                         let heap = eval.heap();
-                        let f = heap.alloc(qualified);
+                        let f = heap.alloc(crate::values::File { path: qualified });
                         structs.push(heap.alloc(DepTarget {
                             label: dep.clone(),
                             fields: vec![("files".to_string(), heap.alloc(vec![f]))],
@@ -580,8 +620,22 @@ pub(crate) fn resolve_label_attr<'v>(
             // L2a: a dep is a DepTarget — plain projected fields by attr, plus the dep's
             // returned provider instances indexable by constructor (`dep[MyInfo]`).
             let heap = eval.heap();
-            let dfields: Vec<(String, Value<'v>)> =
-                sfields.into_iter().map(|(k, xs)| (k, heap.alloc(xs))).collect();
+            // `files` entries become FILE values (impls read .extension/.path on dep files);
+            // folded provider fields (cflags/defines/…) stay plain strings.
+            let dfields: Vec<(String, Value<'v>)> = sfields
+                .into_iter()
+                .map(|(k, xs)| {
+                    if k == "files" {
+                        let files: Vec<Value<'v>> = xs
+                            .into_iter()
+                            .map(|p| heap.alloc(crate::values::File { path: p }))
+                            .collect();
+                        (k, heap.alloc(files))
+                    } else {
+                        (k, heap.alloc(xs))
+                    }
+                })
+                .collect();
             let providers = decl_store(eval)?
                 .captured
                 .borrow()

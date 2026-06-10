@@ -40,7 +40,9 @@ pub(crate) fn expand_genrule_cmd(
                 match inner.split_once(' ') {
                     None if inner == "SRCS" => out.push_str(&srcs.join(" ")),
                     None if inner == "OUTS" => out.push_str(&outs.join(" ")),
-                    Some(("location", x)) => match lookup(x.trim())?.as_slice() {
+                    // rootpath/execpath: runfiles- vs exec-rooted forms — identical in razel's
+                    // single-root model; resolved like location.
+                    Some(("location" | "rootpath" | "execpath", x)) => match lookup(x.trim())?.as_slice() {
                         [one] => out.push_str(one),
                         many => {
                             return Err(anyhow::anyhow!(
@@ -49,7 +51,9 @@ pub(crate) fn expand_genrule_cmd(
                             ));
                         }
                     },
-                    Some(("locations", x)) => out.push_str(&lookup(x.trim())?.join(" ")),
+                    Some(("locations" | "rootpaths" | "execpaths", x)) => {
+                        out.push_str(&lookup(x.trim())?.join(" "))
+                    }
                     _ => {
                         return Err(anyhow::anyhow!(
                             "$({inner}) is not a modeled genrule Make variable \

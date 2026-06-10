@@ -14,7 +14,14 @@ def merge_cc_infos(direct_cc_infos = [], cc_infos = []):
         linking_context = None,
     )
 
-cc_common = razel_host_absorb  # the host absorber: any member resolves (analysis-time surfacing)
+def _toolchain_resolution_enabled(*args, **kwargs):
+    return True
+
+# The host absorber: any member resolves (analysis-time surfacing). Named overrides carry the
+# few members whose VALUE gates real branching (find_cc_toolchain's resolution check).
+cc_common = razel_host_absorb_with({
+    "is_cc_toolchain_resolution_enabled_do_not_use": _toolchain_resolution_enabled,
+})
 CcToolchainConfigInfo = provider(doc = "razel host materialization.", fields = [])
 DebugPackageInfo = provider(doc = "razel host materialization.", fields = [])
 ObjcInfo = provider(doc = "razel host materialization.", fields = [])

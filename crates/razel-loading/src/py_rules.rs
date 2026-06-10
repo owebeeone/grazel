@@ -12,7 +12,7 @@
 
 use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, qualify, session};
 use crate::deps::{record_target, resolve_dep};
-use crate::values::unpack;
+use crate::values::{unpack, unpack_strs};
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
@@ -37,13 +37,13 @@ struct PySources {
 /// (which flow transitively through `DepInfo.hdrs`).
 fn gather(
     eval: &mut Evaluator<'_, '_, '_>,
-    srcs: Option<UnpackList<String>>,
-    deps: Option<UnpackList<String>>,
+    srcs: Vec<String>,
+    deps: Vec<String>,
 ) -> anyhow::Result<PySources> {
     let sess = session(eval);
-    let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
+    let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
     let (mut dep_srcs, mut dep_names) = (Vec::new(), Vec::new());
-    for d in &unpack(deps) {
+    for d in &deps {
         let dep = resolve_dep(eval, d)?;
         dep_srcs.extend(dep.field("py_srcs"));
         dep_names.push(dep.canon);
@@ -67,15 +67,16 @@ fn py_rules(b: &mut GlobalsBuilder) {
     /// `default_info` and the `hdrs` channel (which `resolve_dep` propagates transitively).
     fn native_py_library<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
-        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
+        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
-            let g = gather(eval, srcs, deps)?;
+            let g = gather(eval, srcs.clone(), deps.clone())?;
             let sess = session(eval);
             // Exported sources: own srcs + transitive dep srcs (the PyInfo channel).
             let mut exported = g.srcs.clone();
@@ -101,8 +102,8 @@ fn py_rules(b: &mut GlobalsBuilder) {
     /// present in the sandbox and part of the cache key.
     fn native_py_binary<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
-        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] main: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -113,8 +114,8 @@ fn py_rules(b: &mut GlobalsBuilder) {
     /// `py_test(...)` — same launcher mechanism as `py_binary`.
     fn native_py_test<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
-        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] main: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -124,16 +125,17 @@ fn py_rules(b: &mut GlobalsBuilder) {
 }
 
 /// Shared body of `py_binary`/`py_test`: RECORD the launcher target (E0c — analyzed on demand).
-fn py_executable(
-    eval: &mut Evaluator<'_, '_, '_>,
+fn py_executable<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
     name: String,
-    srcs: Option<UnpackList<String>>,
-    deps: Option<UnpackList<String>>,
+    srcs: Option<UnpackList<Value<'v>>>,
+    deps: Option<UnpackList<Value<'v>>>,
     main: Option<String>,
 ) -> anyhow::Result<NoneType> {
     let label = canon_label(session(eval), &name);
+    let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
     crate::dialect::record_native(eval, label, native_decl(move |eval| {
-    let g = gather(eval, srcs, deps)?;
+    let g = gather(eval, srcs.clone(), deps.clone())?;
     let sess = session(eval);
     // Entrypoint: `main` (package-qualified) or the first src (already qualified).
     let entry = match main {

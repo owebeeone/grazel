@@ -436,6 +436,15 @@ impl fmt::Display for File {
 
 #[starlark_value(type = "File")]
 impl<'v> StarlarkValue<'v> for File {
+    /// Files key dicts in real impls (`artifact_label_map[artifact] = …`): identity = path.
+    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+        use std::hash::Hash;
+        self.path.hash(hasher);
+        Ok(())
+    }
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(other.downcast_ref::<File>().is_some_and(|o| o.path == self.path))
+    }
     fn get_attr(&self, name: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         let p = self.path.as_str();
         let base = p.rsplit('/').next().unwrap_or(p);
@@ -532,12 +541,13 @@ pub(crate) fn depset_methods(b: &mut MethodsBuilder) {
         #[starlark(this)] this: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        // Stringify at use: callers that built string-consuming pipelines keep working.
-        let paths: Vec<String> = this
+        // LIVE members (T-001 semantics): File elements keep .path/.extension; consumers
+        // that want strings go through file_path at use.
+        let items: Vec<Value<'v>> = this
             .downcast_ref::<Depset>()
-            .map(|d| d.items.iter().map(|v| file_path(*v)).collect())
+            .map(|d| d.items.clone())
             .unwrap_or_default();
-        Ok(eval.heap().alloc(paths))
+        Ok(eval.heap().alloc(items))
     }
 }
 
@@ -559,4 +569,16 @@ pub(crate) fn extract_files(v: Value) -> Vec<String> {
 /// `Option<UnpackList<T>>` -> `Vec<T>` (an omitted Starlark list attr means empty). A value helper.
 pub(crate) fn unpack(list: Option<UnpackList<String>>) -> Vec<String> {
     list.map(|l| l.items).unwrap_or_default()
+}
+
+/// Unpack a `srcs`-style list whose elements may be strings OR Label values
+/// (BUILD files pass both); each element stringifies to its label/path form.
+pub(crate) fn unpack_strs<'v>(list: Option<UnpackList<Value<'v>>>) -> Vec<String> {
+    list.map(|l| {
+        l.items
+            .into_iter()
+            .map(|v| v.unpack_str().map(String::from).unwrap_or_else(|| v.to_string()))
+            .collect()
+    })
+    .unwrap_or_default()
 }

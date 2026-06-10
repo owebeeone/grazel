@@ -233,12 +233,28 @@ where
         // Every target implicitly provides DefaultInfo (the builtin is a native fn — match by
         // name): files = the dep's files; runfiles/files_to_run absorb until run-goldens.
         if index.to_string() == "DefaultInfo" {
+            // DefaultInfo.files is a DEPSET (real impls call .to_list()).
             let files = self
                 .fields
                 .iter()
                 .find(|(k, _)| k == "files")
                 .map(|(_, v)| v.to_value())
-                .unwrap_or_else(|| _heap.alloc(Vec::<Value<'v>>::new()));
+                .map(|v| match starlark::values::list::ListRef::from_value(v) {
+                    Some(l) => _heap.alloc(crate::values::Depset {
+                        items: l
+                            .iter()
+                            .map(|it| match it.unpack_str() {
+                                // Stray path STRINGS coerce to File (impls read .extension).
+                                Some(p) => {
+                                    _heap.alloc(crate::values::File { path: p.to_string() })
+                                }
+                                None => it,
+                            })
+                            .collect(),
+                    }),
+                    None => v,
+                })
+                .unwrap_or_else(|| _heap.alloc(crate::values::Depset { items: Vec::new() }));
             use starlark::values::structs::AllocStruct;
             return Ok(_heap.alloc(AllocStruct([
                 ("files".to_string(), files),

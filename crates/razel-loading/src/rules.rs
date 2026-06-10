@@ -19,6 +19,7 @@ use starlark::environment::{
     FrozenModule, Globals, GlobalsBuilder, LibraryExtension, Module,
 };
 use starlark::eval::{Evaluator, FileLoader};
+use starlark::values::Value;
 use starlark::syntax::{AstModule, Dialect};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -103,6 +104,29 @@ pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
     }
     // The absorber itself, for razel's HOST .bzl files (host-repos/) to bind symbols with.
     b.set("razel_host_absorb", crate::engine::Absorb);
+    razel_host_helpers(b);
+}
+
+/// Host-.bzl helper globals: `razel_host_absorb_with({...})` builds an absorber whose NAMED
+/// members are real values (the per-member override seam).
+#[starlark::starlark_module]
+fn razel_host_helpers(b: &mut GlobalsBuilder) {
+    fn razel_host_absorb_with<'v>(
+        #[starlark(require = pos)] overrides: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let d = starlark::values::dict::DictRef::from_value(overrides)
+            .ok_or_else(|| anyhow::anyhow!("razel_host_absorb_with takes a dict"))?;
+        let overrides: Vec<(String, Value<'v>)> = d
+            .iter()
+            .map(|(k, v)| {
+                k.unpack_str()
+                    .map(|k| (k.to_string(), v))
+                    .ok_or_else(|| anyhow::anyhow!("override keys are strings"))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(eval.heap().alloc(crate::engine::AbsorbWith { overrides }))
+    }
 }
 
 
@@ -118,6 +142,10 @@ pub(crate) fn resolve_bzl(root: &Path, label: &str, current_pkg: Option<&str>) -
     } else if let Some(file) = label.strip_prefix(':') {
         let pkg = current_pkg.unwrap_or_default();
         Ok(root.join(pkg).join(file))
+    } else if !label.contains(':') && label.ends_with(".bzl") {
+        // Legacy bare-filename form: `load("f.bzl", …)` = same-package relative path.
+        let pkg = current_pkg.unwrap_or_default();
+        Ok(root.join(pkg).join(label))
     } else {
         Err(format!(
             "unsupported load path `{label}` (only //pkg:f.bzl, :f.bzl, or a vendored @repo)"
@@ -189,6 +217,13 @@ impl BzlLoader<'_> {
                 format!("//{pkg}:{file}")
             } else {
                 format!("@{repo}//{pkg}:{file}")
+            }
+        } else if !path.starts_with('@') && !path.contains(':') && path.ends_with(".bzl") {
+            // Legacy bare-filename form (`load("f.bzl", …)`) = same-package, like `:f.bzl`.
+            if repo.is_empty() {
+                format!("//{pkg}:{path}")
+            } else {
+                format!("@{repo}//{pkg}:{path}")
             }
         } else {
             path.to_string()

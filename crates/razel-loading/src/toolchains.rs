@@ -95,7 +95,7 @@ pub(crate) fn toolchain_rows<'v>(
             heap.alloc(crate::values::File { path: found })
         }),
         ("rust_std".to_string(), heap.alloc(Vec::<starlark::values::Value<'v>>::new())),
-        ("all_files".to_string(), heap.alloc(Vec::<starlark::values::Value<'v>>::new())),
+        ("all_files".to_string(), heap.alloc(crate::values::Depset { items: Vec::new() })),
         ("env".to_string(), heap.alloc(starlark::values::dict::AllocDict::EMPTY)),
         ("extra_rustc_flags".to_string(), heap.alloc(Vec::<starlark::values::Value<'v>>::new())),
         ("extra_exec_rustc_flags".to_string(), heap.alloc(Vec::<starlark::values::Value<'v>>::new())),
@@ -157,9 +157,54 @@ pub(crate) fn toolchain_rows<'v>(
         ("_pipelined_compilation".to_string(), starlark::values::Value::new_bool(false)),
         ("_toolchain_generated_sysroot".to_string(), starlark::values::Value::new_bool(false)),
     ]));
+    // The cc row: REAL scalars where typed builtins demand them (join/compare); callables and
+    // provider-shaped members absorb. Host-true values (clang on this machine).
+    let absorb = heap.alloc(crate::engine::Absorb);
+    let cc = heap.alloc(AllocStruct([
+        ("_legacy_cc_flags_make_variable".to_string(), heap.alloc("")),
+        ("sysroot".to_string(), {
+            // The REAL host sysroot (macOS SDK / linux "/"): grte_top-style checks compare
+            // against None, and later flag assembly reads the path.
+            let sdk = if std::env::consts::OS == "macos" {
+                std::process::Command::new("xcrun")
+                    .args(["--show-sdk-path"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            };
+            heap.alloc(sdk.unwrap_or_else(|| "/".to_string()))
+        }),
+        ("compiler".to_string(), heap.alloc("clang")),
+        ("cpu".to_string(), heap.alloc(std::env::consts::ARCH)),
+        ("libc".to_string(), heap.alloc("macosx")),
+        ("needs_pic_for_dynamic_libraries".to_string(), {
+            // Real Bazel: a method taking feature_configuration; absorbed call → falsy (no PIC
+            // duplication on the analysis walk).
+            absorb
+        }),
+        ("dynamic_runtime_lib".to_string(), absorb),
+        ("static_runtime_lib".to_string(), absorb),
+        ("_tool_paths".to_string(), heap.alloc(starlark::values::dict::AllocDict::EMPTY)),
+        ("_strip_files".to_string(), heap.alloc(crate::values::Depset { items: Vec::new() })),
+        ("_coverage_files".to_string(), heap.alloc(crate::values::Depset { items: Vec::new() })),
+        ("_build_variables".to_string(), absorb),
+        ("_cpp_configuration".to_string(), absorb),
+        ("_crosstool_top_path".to_string(), heap.alloc("")),
+        ("_abi".to_string(), heap.alloc("local")),
+        ("_abi_glibc_version".to_string(), heap.alloc("local")),
+        ("all_files".to_string(), heap.alloc(crate::values::Depset { items: Vec::new() })),
+        ("linker_files".to_string(), heap.alloc(crate::values::Depset { items: Vec::new() })),
+        ("_linker_files".to_string(), heap.alloc(crate::values::Depset { items: Vec::new() })),
+        ("built_in_include_directories".to_string(), heap.alloc(Vec::<starlark::values::Value<'v>>::new())),
+        ("toolchain_id".to_string(), heap.alloc("razel-host-cc")),
+    ]));
     vec![
         ("@rules_rust//rust:toolchain_type".to_string(), rust),
-        ("@bazel_tools//tools/cpp:toolchain_type".to_string(), empty(heap)),
+        ("@bazel_tools//tools/cpp:toolchain_type".to_string(), cc),
         ("@com_google_protobuf//bazel/private:proto_toolchain_type".to_string(), empty(heap)),
         ("@bazel_tools//tools/sh:toolchain_type".to_string(), empty(heap)),
     ]

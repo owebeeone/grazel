@@ -316,3 +316,32 @@ ctx.file/ctx.files-defaulting; symlink/run_shell actions; external-repo glob(); 
 absorption. Frontier: cc_common/cc_toolchain interactions inside collect_inputs (should_use_pic)
 — the Layer-3/cc_common bridge boundary, exactly where the build-path plan begins.
 TF cc lane: protobuf root-package toolchain machinery (unchanged this round).
+
+## Round delta — razelV3 round 9 (2026-06-10)
+
+**MILESTONE: `rules-rust-library` analyzes END-TO-END (sentinel #5, must_pass).** A real upstream
+`rust_library` walks `rustc_compile_action` → `collect_inputs` → `construct_arguments` →
+`establish_cc_info` to completion. What it took: the FULL rust-toolchain field surface
+(triple/semver structs, real host rustc & cc File values, compilation_mode_opts, lto, ~40 flag
+scalars); Args param-file surface (set_param_file_format/use_param_file recorded, add_joined,
+add(format=)); depset(direct=) + FALSY empty depsets; actions.run accepting depsets;
+declare_file/declare_directory returning real File (+sibling=); File.owner as a derived Label +
+File hash/equals (dict keys); implicit DefaultInfo on every dep (files as a LIVE depset) +
+`Provider in dep`; ctx.executable as a None-defaulting namespace; real ctx.var dict; falsy/empty
+Absorb semantics (bool/iterate/in/len/slice).
+
+**The TF cc lane is INSIDE rules_cc's real `cc_library` impl** — find_cc_toolchain passes (host
+cc-toolchain row: real sysroot via xcrun, clang scalars, depset file groups;
+`razel_host_absorb_with` gives host .bzl per-member overrides — cc_common's resolution gate
+returns a real True). En route: legacy bare-filename loads; glob(include=) named; srcs/deps
+accepting Label values across all builtin rules; genrule tools= in the location table;
+$(rootpaths/execpaths); Label.relative/same_package_label; deferred NATIVE decls (dep-loaded
+packages now defer EVERYTHING — eager native drives manufactured false cycles:
+genrule tools=//:protoc while protoc was mid-analysis); analyze_decl runs in the DECL's package
+context (cross-package re-entrancy mis-canonicalized same-package attrs); Depset.to_list returns
+LIVE values (was stringifying — the last string/File seam).
+
+**Frontier (both lanes converge): `cc_common.compile()` returns a real
+(compilation_context, compilation_outputs) pair** — the absorbed call can't fake a 2-tuple and
+faking would be silent-wrong. This is the cc_common bridge keystone (Constrain §8c): next round
+implements compile/link minimally over the razel cc engine. 60 bins; 3 gates; 5 sentinels.

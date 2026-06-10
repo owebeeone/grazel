@@ -2,6 +2,7 @@
 
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
+use starlark::environment::{Methods, MethodsBuilder};
 use starlark::values::{
     Heap, NoSerialize, StarlarkValue, Value, ValueLike,
     starlark_value,
@@ -56,5 +57,68 @@ impl<'v> StarlarkValue<'v> for LabelV {
             "workspace_root" | "workspace_name" => Some(heap.alloc("")),
             _ => None,
         }
+    }
+    fn get_methods() -> Option<&'static Methods> {
+        Some(LABEL_METHODS.methods())
+    }
+}
+
+starlark::methods_static!(LABEL_METHODS = label_methods);
+
+/// Parse `pkg:name` (or the `pkg` shorthand whose name is the last segment).
+fn split_pkg_name(rest: &str) -> (String, String) {
+    match rest.split_once(':') {
+        Some((p, n)) => (p.to_string(), n.to_string()),
+        None => (rest.to_string(), rest.rsplit('/').next().unwrap_or(rest).to_string()),
+    }
+}
+
+#[starlark::starlark_module]
+fn label_methods(b: &mut MethodsBuilder) {
+    /// `label.relative(rel)` — resolve a label string relative to this label's repo/package.
+    fn relative<'v>(
+        #[starlark(this)] this: Value<'v>,
+        #[starlark(require = pos)] rel: String,
+        eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let me = this.downcast_ref::<LabelV>().unwrap();
+        let out = if let Some(rest) = rel.strip_prefix("//") {
+            let (package, name) = split_pkg_name(rest);
+            LabelV { repo: me.repo.clone(), package, name }
+        } else if rel.starts_with('@') {
+            match rel.split_once("//") {
+                Some((r, rest)) => {
+                    let (package, name) = split_pkg_name(rest);
+                    LabelV { repo: Some(r.to_string()), package, name }
+                }
+                // `@repo` shorthand = `@repo//:repo`.
+                None => LabelV {
+                    repo: Some(rel.clone()),
+                    package: String::new(),
+                    name: rel.trim_start_matches('@').to_string(),
+                },
+            }
+        } else {
+            // `:x` or bare `x` — same package.
+            LabelV {
+                repo: me.repo.clone(),
+                package: me.package.clone(),
+                name: rel.trim_start_matches(':').to_string(),
+            }
+        };
+        Ok(eval.heap().alloc(out))
+    }
+    /// `label.same_package_label(name)` — the modern same-package variant.
+    fn same_package_label<'v>(
+        #[starlark(this)] this: Value<'v>,
+        #[starlark(require = pos)] name: String,
+        eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let me = this.downcast_ref::<LabelV>().unwrap();
+        Ok(eval.heap().alloc(LabelV {
+            repo: me.repo.clone(),
+            package: me.package.clone(),
+            name: name.trim_start_matches(':').to_string(),
+        }))
     }
 }

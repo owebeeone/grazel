@@ -10,7 +10,7 @@
 
 use crate::state::{AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, session};
 use crate::deps::record_target;
-use crate::values::unpack;
+use crate::values::{unpack, unpack_strs};
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
@@ -35,12 +35,12 @@ fn install_action(src: &str, out: &str) -> AnalyzedAction {
 /// Analyze a `sh_binary`/`sh_test`: take the single primary script `srcs[0]`, install
 /// it as the executable output `qualify(name)`, and record the target with that output
 /// as its `DefaultInfo`. `data`/`deps` and any unknown kwargs are absorbed.
-fn analyze_sh(
+fn analyze_sh<'v>(
     sess: &Session,
     name: String,
-    srcs: Option<UnpackList<String>>,
+    srcs: Option<UnpackList<Value<'v>>>,
 ) -> anyhow::Result<NoneType> {
-    let srcs = unpack(srcs);
+    let srcs = unpack_strs(srcs);
     let src = srcs
         .first()
         .ok_or_else(|| anyhow::anyhow!("sh rule `{name}` needs a script in srcs"))?;
@@ -60,9 +60,9 @@ fn analyze_sh(
 fn sh_rules(b: &mut GlobalsBuilder) {
     fn native_sh_binary<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
-        #[starlark(require = named)] data: Option<UnpackList<String>>,
-        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] data: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
@@ -72,9 +72,9 @@ fn sh_rules(b: &mut GlobalsBuilder) {
 
     fn native_sh_test<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
-        #[starlark(require = named)] data: Option<UnpackList<String>>,
-        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] data: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {

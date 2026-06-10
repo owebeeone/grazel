@@ -115,6 +115,10 @@ pub(crate) struct Session {
     /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
     /// `Value`s — so they need no GC tracing and can live on the Session).
     pub(crate) native_decls: RefCell<Vec<Option<NativeAnalyzeFn>>>,
+    /// Undriven NATIVE decls of completed packages: label → `native_decls` index. Native
+    /// bodies capture only plain data, so they run on demand in any later eval (the
+    /// cross-package twin of `deferred_decls`).
+    pub(crate) deferred_natives: RefCell<std::collections::HashMap<String, usize>>,
     /// The (repo, pkg) of the module currently being loaded/evaluated (BzlLoader + BUILD-eval
     /// maintained; repo == "" ⇒ the main workspace). String labels written in module code —
     /// `Label()`, select keys, attr DEFAULTS — bind against it (Bazel's lexical binding).

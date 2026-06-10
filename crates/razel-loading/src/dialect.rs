@@ -71,6 +71,22 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
         Ok(eval.heap().alloc(AllocStruct(fields)))
     }
+    fn AnalysisFailureInfo<'v>(
+        #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let fields: Vec<(String, Value<'v>)> =
+            kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        Ok(eval.heap().alloc(AllocStruct(fields)))
+    }
+    fn AnalysisTestResultInfo<'v>(
+        #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        let fields: Vec<(String, Value<'v>)> =
+            kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        Ok(eval.heap().alloc(AllocStruct(fields)))
+    }
     fn OutputGroupInfo<'v>(
         #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -156,6 +172,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// transitions + pass them as `rule(cfg=…)`. razel doesn't apply transitions yet — absorb the args
     /// so the rule defines; `rule()` already absorbs the `cfg` kwarg.
     fn transition<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+
+    /// `analysis_test_transition(...)` (compat stub) — skylib unittest machinery.
+    fn analysis_test_transition<'v>(
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
     ) -> anyhow::Result<NoneType> {
         Ok(NoneType)
@@ -376,13 +399,20 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// Unmodeled variables (`$(RULEDIR)`, tools=…) error loudly — registered debt, not silence.
     fn genrule<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] outs: UnpackList<String>,
         #[starlark(require = named)] cmd: String,
+        #[starlark(require = named)] tools: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] exec_tools: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
+        // Stringify srcs/tools OUTSIDE the closure (native bodies capture only plain data).
+        // tools/exec_tools join the location table + inputs (their labels resolve like srcs).
+        let mut srcs = crate::values::unpack_strs(srcs);
+        srcs.extend(crate::values::unpack_strs(tools));
+        srcs.extend(crate::values::unpack_strs(exec_tools));
         record_native(eval, label, crate::state::native_decl(move |eval| {
             let sess = session(eval);
             // Split srcs: labels resolve to their files (their package loads/analyzes on
@@ -390,7 +420,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             // form for `$(location X)`.
             let (mut inputs, mut deps) = (Vec::new(), Vec::new());
             let mut loc: Vec<(String, Vec<String>)> = Vec::new();
-            for s in unpack(srcs) {
+            for s in srcs.clone() {
                 if s.starts_with(':') || s.starts_with("//") {
                     let dep = crate::deps::resolve_dep(eval, &s)?;
                     loc.push((s.clone(), dep.libs.clone()));
@@ -486,12 +516,12 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     }
     fn filegroup<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
-        let files: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
+        let files: Vec<String> = crate::values::unpack_strs(srcs).iter().map(|s| qualify(sess, s)).collect();
         // C3a.5: filegroup provides DefaultInfo only — it no longer fakes CcInfo to push files into
         // the cc header channel (that hack was untested; a real cc-on-filegroup case = cc reading dep
         // DefaultInfo files as inputs, Phase D).
@@ -594,7 +624,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// Keys may be strings or `Label`s; `select + list` concatenation is supported (SelectExpr).
     fn select<'v>(
         branches: Value<'v>,
-        #[starlark(require = named)] _no_match_error: Option<String>,
+        #[starlark(require = named)] #[allow(unused_variables)] no_match_error: Option<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
         let Some(d) = starlark::values::dict::DictRef::from_value(branches) else {
@@ -666,11 +696,11 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// mode) against the patterns, returning package-relative paths. Requires a
     /// package on disk; errors in single-package (no-dir) mode.
     fn glob<'v>(
-        #[starlark(require = pos)] include: UnpackList<String>,
+        include: Option<UnpackList<String>>,
         #[starlark(require = named)] exclude: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<String>> {
-        do_glob(session(eval), include.items, exclude.map(|l| l.items).unwrap_or_default())
+        do_glob(session(eval), include.map(|l| l.items).unwrap_or_default(), exclude.map(|l| l.items).unwrap_or_default())
     }
 }

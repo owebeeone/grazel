@@ -13,7 +13,7 @@
 
 use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, qualify, session};
 use crate::deps::{record_target, resolve_dep};
-use crate::values::unpack;
+use crate::values::{unpack, unpack_strs};
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
@@ -58,10 +58,10 @@ fn crate_name_of(canon: &str) -> String {
 /// Resolve `deps` to `(--extern crate=rlib args, dep rlib inputs, dep canon names)`.
 fn extern_args(
     eval: &mut Evaluator<'_, '_, '_>,
-    deps: Option<UnpackList<String>>,
+    deps: Vec<String>,
 ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let (mut args, mut inputs, mut names) = (Vec::new(), Vec::new(), Vec::new());
-    for d in &unpack(deps) {
+    for d in &deps {
         let dep = resolve_dep(eval, d)?;
         let crate_name = crate_name_of(&dep.canon);
         // A rust_library exports exactly one rlib in default_info → dep.libs.
@@ -81,23 +81,24 @@ fn rust_rules(b: &mut GlobalsBuilder) {
     /// compiling `srcs[0]` to `lib<name>.rlib`, exported to dependents.
     fn native_rust_library<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
-        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] edition: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
+        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
         let sess = session(eval);
-        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
+        let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
         let crate_root = srcs
             .first()
             .ok_or_else(|| anyhow::anyhow!("rust_library `{name}` needs at least one src"))?
             .clone();
         let edition = edition.unwrap_or_else(|| "2021".into());
-        let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps)?;
+        let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
         let sess = session(eval);
 
         let rlib = qualify(sess, &format!("lib{name}.rlib"));
@@ -138,23 +139,24 @@ fn rust_rules(b: &mut GlobalsBuilder) {
     /// compiling `srcs[0]` to the `<name>` executable, linking dep rlibs.
     fn native_rust_binary<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
-        #[starlark(require = named)] deps: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
         #[starlark(require = named)] edition: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
+        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
         let sess = session(eval);
-        let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
+        let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
         let crate_root = srcs
             .first()
             .ok_or_else(|| anyhow::anyhow!("rust_binary `{name}` needs at least one src"))?
             .clone();
         let edition = edition.unwrap_or_else(|| "2021".into());
-        let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps)?;
+        let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
         let sess = session(eval);
 
         let out = qualify(sess, &name);

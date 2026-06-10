@@ -8,7 +8,8 @@ use starlark::eval::Evaluator;
 use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
 use starlark::any::ProvidesStaticType;
-use starlark::values::{NoSerialize, Value};
+use starlark::coerce::Coerce;
+use starlark::values::{Freeze, NoSerialize, Trace, Value, ValueLifetimeless};
 
 
 
@@ -26,24 +27,24 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
         Ok("@".to_string())
     }
     fn glob<'v>(
-        #[starlark(require = pos)] include: UnpackList<String>,
+        include: Option<UnpackList<String>>,
         #[starlark(require = named)] exclude: Option<UnpackList<String>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<String>> {
-        do_glob(session(eval), include.items, exclude.map(|l| l.items).unwrap_or_default())
+        do_glob(session(eval), include.map(|l| l.items).unwrap_or_default(), exclude.map(|l| l.items).unwrap_or_default())
     }
     /// `native.filegroup(...)` — real macros wrap the native rules (`tensorflow.bzl`'s
     /// filegroup macro calls `native.filegroup(**kwargs)`). Mirrors the BUILD-global builtin.
     fn filegroup<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
         let files: Vec<String> =
-            crate::values::unpack(srcs).iter().map(|s| crate::state::qualify(sess, s)).collect();
+            crate::values::unpack_strs(srcs).iter().map(|s| crate::state::qualify(sess, s)).collect();
         crate::deps::record_target(sess, crate::state::AnalyzedTarget {
             name: crate::state::canon_label(sess, &name),
             default_info: files,
@@ -256,12 +257,77 @@ impl<'v> starlark::values::StarlarkValue<'v> for Absorb {
     fn iterate_collect(&self, _heap: starlark::values::Heap<'v>) -> starlark::Result<Vec<Value<'v>>> {
         Ok(Vec::new())
     }
+    /// Absorbed collections measure empty.
+    fn length(&self) -> starlark::Result<i32> {
+        Ok(0)
+    }
+    /// Membership in an absorbed collection is empty-consistent: always false.
+    fn is_in(&self, _other: Value<'v>) -> starlark::Result<bool> {
+        Ok(false)
+    }
+    /// Slicing an absorbed value absorbs.
+    fn slice(
+        &self,
+        _start: Option<Value<'v>>,
+        _stop: Option<Value<'v>>,
+        _stride: Option<Value<'v>>,
+        heap: starlark::values::Heap<'v>,
+    ) -> starlark::Result<Value<'v>> {
+        Ok(heap.alloc(Absorb))
+    }
     /// Absorption flows through operators (`absorbed + s`, `s + absorbed`).
     fn add(&self, _other: Value<'v>, heap: starlark::values::Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
         Some(Ok(heap.alloc(Absorb)))
     }
     fn radd(&self, _lhs: Value<'v>, heap: starlark::values::Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
         Some(Ok(heap.alloc(Absorb)))
+    }
+}
+
+/// An Absorb with NAMED overrides: `razel_host_absorb_with({"member": value})` — host `.bzl`
+/// declare the handful of members that need REAL semantics; everything else absorbs. The
+/// declarative per-member seam (config-as-data, not a new value type per namespace).
+#[derive(Debug, ProvidesStaticType, NoSerialize, allocative::Allocative, Trace, Freeze, Coerce, Clone)]
+#[repr(C)]
+pub(crate) struct AbsorbWithGen<V: ValueLifetimeless> {
+    pub(crate) overrides: Vec<(String, V)>,
+}
+use starlark::starlark_complex_value;
+starlark_complex_value!(pub(crate) AbsorbWith);
+
+impl<V: ValueLifetimeless> std::fmt::Display for AbsorbWithGen<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<host-absorbed+{} overrides>", self.overrides.len())
+    }
+}
+
+#[starlark::values::starlark_value(type = "host_absorbed")]
+impl<'v, V: starlark::values::ValueLike<'v>> starlark::values::StarlarkValue<'v> for AbsorbWithGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
+    fn get_attr(
+        &self,
+        attr: &str,
+        heap: starlark::values::Heap<'v>,
+    ) -> Option<Value<'v>> {
+        Some(
+            self.overrides
+                .iter()
+                .find(|(k, _)| k == attr)
+                .map(|(_, v)| v.to_value())
+                .unwrap_or_else(|| heap.alloc(Absorb)),
+        )
+    }
+    fn at(
+        &self,
+        _index: Value<'v>,
+        heap: starlark::values::Heap<'v>,
+    ) -> starlark::Result<Value<'v>> {
+        Ok(heap.alloc(Absorb))
+    }
+    fn to_bool(&self) -> bool {
+        false
     }
 }
 
