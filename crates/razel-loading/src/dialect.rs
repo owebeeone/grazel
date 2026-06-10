@@ -127,6 +127,74 @@ where
 }
 
 
+/// Expand genrule `cmd` Make-variables: `$$`→`$`, `$@` (exactly one output), `$<` (exactly one
+/// src), `$(SRCS)`/`$(OUTS)` (space-joined), `$(location X)` (exactly one path for the as-written
+/// src/label `X`) / `$(locations X)` (all, space-joined). Anything else `$(…)` errors LOUDLY —
+/// unmodeled Make variables must never pass through silently (Bazel-compat discipline).
+fn expand_genrule_cmd(
+    cmd: &str,
+    srcs: &[String],
+    outs: &[String],
+    loc: &[(String, Vec<String>)],
+) -> anyhow::Result<String> {
+    let lookup = |x: &str| -> anyhow::Result<&Vec<String>> {
+        loc.iter()
+            .find(|(k, _)| k == x)
+            .map(|(_, v)| v)
+            .ok_or_else(|| anyhow::anyhow!("$(location {x}): `{x}` is not in this genrule's srcs"))
+    };
+    let mut out = String::with_capacity(cmd.len());
+    let mut it = cmd.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('$') => out.push('$'),
+            Some('@') => match outs {
+                [one] => out.push_str(one),
+                _ => return Err(anyhow::anyhow!("$@ requires exactly one output (genrule)")),
+            },
+            Some('<') => match srcs {
+                [one] => out.push_str(one),
+                _ => return Err(anyhow::anyhow!("$< requires exactly one src (genrule)")),
+            },
+            Some('(') => {
+                let inner: String = it.by_ref().take_while(|&c| c != ')').collect();
+                match inner.split_once(' ') {
+                    None if inner == "SRCS" => out.push_str(&srcs.join(" ")),
+                    None if inner == "OUTS" => out.push_str(&outs.join(" ")),
+                    Some(("location", x)) => match lookup(x.trim())?.as_slice() {
+                        [one] => out.push_str(one),
+                        many => {
+                            return Err(anyhow::anyhow!(
+                                "$(location {x}) matches {} files — use $(locations …)",
+                                many.len()
+                            ));
+                        }
+                    },
+                    Some(("locations", x)) => out.push_str(&lookup(x.trim())?.join(" ")),
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "$({inner}) is not a modeled genrule Make variable \
+                             (razel models SRCS/OUTS/location/locations)"
+                        ));
+                    }
+                }
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "unsupported `$` escape `${}` in genrule cmd",
+                    other.map(String::from).unwrap_or_default()
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+
 // ---- E0: the phase split — declaration store + demand-driven analysis -------------------------
 
 
@@ -702,6 +770,57 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// `config_setting`/`test_suite`/`alias` carry no buildable output here, so they
     /// record an empty target under their label (analysis-visible, builds to nothing);
     /// `filegroup` forwards its `srcs` as its outputs so dependents resolve them.
+    /// `genrule(name, srcs, outs, cmd)` — Bazel's generic shell rule (razelV3): ONE bash action
+    /// running `cmd` after Make-variable expansion (`$@`/`$<`/`$(SRCS)`/`$(OUTS)`/`$(location)`;
+    /// `$$` escapes). A src that is a label resolves to its files (demand-driven, E0c-deferred).
+    /// Unmodeled variables (`$(RULEDIR)`, tools=…) error loudly — registered debt, not silence.
+    fn genrule<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
+        #[starlark(require = named)] outs: UnpackList<String>,
+        #[starlark(require = named)] cmd: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        record_native(eval, label, crate::state::native_decl(move |eval| {
+            let sess = session(eval);
+            // Split srcs: labels resolve to their files (their package loads/analyzes on
+            // demand); plain names are this package's files. `loc` keys keep the as-written
+            // form for `$(location X)`.
+            let (mut inputs, mut deps) = (Vec::new(), Vec::new());
+            let mut loc: Vec<(String, Vec<String>)> = Vec::new();
+            for s in unpack(srcs) {
+                if s.starts_with(':') || s.starts_with("//") {
+                    let dep = crate::deps::resolve_dep(eval, &s)?;
+                    loc.push((s.clone(), dep.libs.clone()));
+                    inputs.extend(dep.libs);
+                    deps.push(dep.canon);
+                } else {
+                    let q = qualify(sess, &s);
+                    loc.push((s, vec![q.clone()]));
+                    inputs.push(q);
+                }
+            }
+            let outs: Vec<String> = outs.items.iter().map(|o| qualify(sess, o)).collect();
+            let expanded = expand_genrule_cmd(&cmd, &inputs, &outs, &loc)?;
+            record_target(sess, AnalyzedTarget {
+                name: canon_label(sess, &name),
+                deps,
+                actions: vec![crate::state::AnalyzedAction {
+                    mnemonic: "Genrule".into(),
+                    argv: vec!["/bin/bash".into(), "-c".into(), expanded],
+                    inputs,
+                    outputs: outs.clone(),
+                }],
+                default_info: outs,
+                ..Default::default()
+            });
+            Ok(())
+        }))?;
+        Ok(NoneType)
+    }
+
     /// `config_setting(name, values=?, define_values=?)` — declare a constraint spec `select()`
     /// matches against the structured configuration (razelV3: real resolution, not a placeholder).
     fn config_setting<'v>(
