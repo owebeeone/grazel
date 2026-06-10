@@ -111,6 +111,23 @@ pub(crate) struct Session {
     pub(crate) pending: RefCell<BTreeMap<String, usize>>,
     /// Targets currently mid-analysis (cycle detection for the demand-driven pass).
     pub(crate) analyzing: RefCell<HashSet<String>>,
+    /// E0c: deferred native-rule analysis bodies, indexed by the declaration store's
+    /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
+    /// `Value`s — so they need no GC tracing and can live on the Session).
+    pub(crate) native_decls: RefCell<Vec<Option<NativeAnalyzeFn>>>,
+}
+
+/// A deferred native-rule analysis body (E0c): the rule fn's work, run by the demand-driven pass.
+/// MUST capture only plain data (no starlark `Value`s — they would be invisible to the GC).
+pub(crate) type NativeAnalyzeFn =
+    Box<dyn for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()>>;
+
+/// Coerce a closure to [`NativeAnalyzeFn`] (pins the higher-ranked lifetimes for inference).
+pub(crate) fn native_decl<F>(f: F) -> NativeAnalyzeFn
+where
+    F: for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()> + 'static,
+{
+    Box::new(f)
 }
 
 impl Session {

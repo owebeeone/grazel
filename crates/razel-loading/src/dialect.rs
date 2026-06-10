@@ -118,7 +118,7 @@ where
         let store = decl_store(eval)?;
         let idx = {
             let mut decls = store.decls.borrow_mut();
-            decls.push(Some(Decl { label: label.clone(), rule: me, kwargs }));
+            decls.push(Some(Decl { label: label.clone(), body: DeclBody::Rule { rule: me, kwargs } }));
             decls.len() - 1
         };
         sess.pending.borrow_mut().insert(label, idx);
@@ -134,12 +134,19 @@ where
 /// points before BUILD eval; not addressable from Starlark source.
 pub(crate) const DECLS_VAR: &str = "__razel_decls";
 
-/// One recorded rule instantiation: the rule value + raw kwargs, analyzed on demand.
+/// One recorded rule instantiation, analyzed on demand.
 #[derive(Debug, Allocative, Trace)]
 struct Decl<'v> {
     label: String,
-    rule: Value<'v>,
-    kwargs: Vec<(String, Value<'v>)>,
+    body: DeclBody<'v>,
+}
+
+/// What analyzing a declaration means: run a Starlark rule (value + raw kwargs) or a deferred
+/// native body (an index into `Session.native_decls` — the closure lives off-heap, E0c).
+#[derive(Debug, Allocative, Trace)]
+enum DeclBody<'v> {
+    Rule { rule: Value<'v>, kwargs: Vec<(String, Value<'v>)> },
+    Native(usize),
 }
 
 /// The package's recorded declarations — a heap value, so the `'v`-bound rule/kwarg values live on
@@ -234,22 +241,56 @@ fn analyze_decl<'v>(eval: &mut Evaluator<'v, '_, '_>, idx: usize) -> starlark::R
         }
         sess.pending.borrow_mut().remove(&decl.label);
     }
-    let res = analyze_decl_body(eval, &decl);
+    let res = match &decl.body {
+        DeclBody::Rule { rule, kwargs } => analyze_rule_decl(eval, *rule, kwargs),
+        DeclBody::Native(nidx) => {
+            let f = { session(eval).native_decls.borrow_mut()[*nidx].take() };
+            match f {
+                Some(f) => f(eval).map_err(Into::into),
+                None => Ok(()),
+            }
+        }
+    };
     session(eval).analyzing.borrow_mut().remove(&decl.label);
     res
 }
 
-/// The analysis of one declaration — dep resolution (demand-driven), schema defaults/`mandatory`,
-/// ctx construction, and the impl call. (The body that ran inside `invoke()` before E0.)
-fn analyze_decl_body<'v>(
+/// Record a deferred native-rule analysis (E0c): the rule fn extracts its plain attrs at eval time
+/// and hands the body here; the demand-driven pass runs it — so native targets forward-reference
+/// (and interleave with Starlark-rule targets) like everything else.
+pub(crate) fn record_native<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
-    decl: &Decl<'v>,
+    label: String,
+    f: crate::state::NativeAnalyzeFn,
+) -> anyhow::Result<()> {
+    let sess = session(eval);
+    let nidx = {
+        let mut v = sess.native_decls.borrow_mut();
+        v.push(Some(f));
+        v.len() - 1
+    };
+    let store = decl_store(eval)?;
+    let idx = {
+        let mut decls = store.decls.borrow_mut();
+        decls.push(Some(Decl { label: label.clone(), body: DeclBody::Native(nidx) }));
+        decls.len() - 1
+    };
+    sess.pending.borrow_mut().insert(label, idx);
+    Ok(())
+}
+
+/// The analysis of one Starlark-rule declaration — dep resolution (demand-driven), schema
+/// defaults/`mandatory`, ctx construction, and the impl call. (Ran inside `invoke()` before E0.)
+fn analyze_rule_decl<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    rule: Value<'v>,
+    kwargs: &[(String, Value<'v>)],
 ) -> starlark::Result<()> {
-    let (implementation, attrs) = rule_parts(decl.rule)?;
+    let (implementation, attrs) = rule_parts(rule)?;
     let mut name = String::new();
     let mut dep_labels: Vec<String> = Vec::new();
     let mut fields: Vec<(String, Value<'v>)> = Vec::new();
-    for (key, v) in &decl.kwargs {
+    for (key, v) in kwargs {
         let (key, v) = (key.clone(), *v);
         // D1b/c: the schema kind drives label resolution. Look it up once: `label`/`label_list`
         // resolve to provider struct(s); the legacy `deps` is an implicit `label_list`.
@@ -333,7 +374,7 @@ fn analyze_decl_body<'v>(
     // missing `mandatory` one. (A2 discarded the schema; the real upstream rules require it.)
     if let Some(schema) = starlark::values::dict::DictRef::from_value(attrs) {
         let passed: std::collections::BTreeSet<&str> =
-            decl.kwargs.iter().map(|(k, _)| k.as_str()).collect();
+            kwargs.iter().map(|(k, _)| k.as_str()).collect();
         for (aname, descriptor) in schema.iter() {
             let Some(an) = aname.unpack_str() else { continue };
             if an == "name" || passed.contains(an) {
@@ -365,13 +406,11 @@ fn analyze_decl_body<'v>(
     // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
     // (qualified). ctx.executable is empty until an executable-label attr is wired.
     let mk_file = |s: &str| heap.alloc_complex_no_freeze(File { path: qualify(sess, s) });
-    let outputs_fields: Vec<(String, Value<'v>)> = decl
-        .kwargs
+    let outputs_fields: Vec<(String, Value<'v>)> = kwargs
         .iter()
         .filter_map(|(k, v)| v.unpack_str().map(|s| (k.clone(), mk_file(s))))
         .collect();
-    let files_fields: Vec<(String, Value<'v>)> = decl
-        .kwargs
+    let files_fields: Vec<(String, Value<'v>)> = kwargs
         .iter()
         .filter_map(|(k, v)| {
             ListRef::from_value(*v).map(|list| {

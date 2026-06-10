@@ -10,7 +10,7 @@
 //! `unpack`, `AnalyzedTarget`/`AnalyzedAction`) live in `crate::rules`; modelled on
 //! `rules::cc_rules`.
 
-use crate::state::{AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, session};
+use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, qualify, session};
 use crate::deps::{record_target, resolve_dep};
 use crate::values::unpack;
 use starlark::collections::SmallMap;
@@ -36,14 +36,15 @@ struct PySources {
 /// Qualify this target's `srcs` and resolve `deps` to their exported source files
 /// (which flow transitively through `DepInfo.hdrs`).
 fn gather(
-    sess: &Session,
+    eval: &mut Evaluator<'_, '_, '_>,
     srcs: Option<UnpackList<String>>,
     deps: Option<UnpackList<String>>,
 ) -> anyhow::Result<PySources> {
+    let sess = session(eval);
     let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
     let (mut dep_srcs, mut dep_names) = (Vec::new(), Vec::new());
     for d in &unpack(deps) {
-        let dep = resolve_dep(sess, d)?;
+        let dep = resolve_dep(eval, d)?;
         dep_srcs.extend(dep.field("py_srcs"));
         dep_names.push(dep.canon);
     }
@@ -71,20 +72,25 @@ fn py_rules(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let sess = session(eval);
-        let g = gather(sess, srcs, deps)?;
-        // Exported sources: own srcs + transitive dep srcs (the `hdrs` channel).
-        let mut exported = g.srcs.clone();
-        exported.extend(g.dep_srcs);
-        let mut t = AnalyzedTarget {
-            name: canon_label(sess, &name),
-            deps: g.dep_names,
-            actions: Vec::new(),
-            default_info: g.srcs,
-            ..Default::default()
-        };
-        t.set_set("PyInfo", "srcs", exported); // C3a.5: py's own channel, not cc's hdrs
-        record_target(sess, t);
+        // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
+        let label = canon_label(session(eval), &name);
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
+            let g = gather(eval, srcs, deps)?;
+            let sess = session(eval);
+            // Exported sources: own srcs + transitive dep srcs (the PyInfo channel).
+            let mut exported = g.srcs.clone();
+            exported.extend(g.dep_srcs);
+            let mut t = AnalyzedTarget {
+                name: canon_label(sess, &name),
+                deps: g.dep_names,
+                actions: Vec::new(),
+                default_info: g.srcs,
+                ..Default::default()
+            };
+            t.set_set("PyInfo", "srcs", exported); // C3a.5: py's own channel, not cc's hdrs
+            record_target(sess, t);
+            Ok(())
+        }))?;
         Ok(NoneType)
     }
 
@@ -101,7 +107,7 @@ fn py_rules(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        py_executable(session(eval), name, srcs, deps, main)
+        py_executable(eval, name, srcs, deps, main)
     }
 
     /// `py_test(...)` — same launcher mechanism as `py_binary`.
@@ -113,19 +119,22 @@ fn py_rules(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        py_executable(session(eval), name, srcs, deps, main)
+        py_executable(eval, name, srcs, deps, main)
     }
 }
 
-/// Shared body of `py_binary`/`py_test`: build the launcher target.
+/// Shared body of `py_binary`/`py_test`: RECORD the launcher target (E0c — analyzed on demand).
 fn py_executable(
-    sess: &Session,
+    eval: &mut Evaluator<'_, '_, '_>,
     name: String,
     srcs: Option<UnpackList<String>>,
     deps: Option<UnpackList<String>>,
     main: Option<String>,
 ) -> anyhow::Result<NoneType> {
-    let g = gather(sess, srcs, deps)?;
+    let label = canon_label(session(eval), &name);
+    crate::dialect::record_native(eval, label, native_decl(move |eval| {
+    let g = gather(eval, srcs, deps)?;
+    let sess = session(eval);
     // Entrypoint: `main` (package-qualified) or the first src (already qualified).
     let entry = match main {
         Some(m) => qualify(sess, &m),
@@ -176,6 +185,8 @@ fn py_executable(
         default_info: vec![out],
         providers: Default::default(),
     });
+    Ok(())
+    }))?;
     Ok(NoneType)
 }
 

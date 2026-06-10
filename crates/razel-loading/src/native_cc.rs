@@ -1,6 +1,8 @@
 //! Native cc rules (host-compiler backend): cc_library/cc_binary actions + flag helpers. C0.
 
-use crate::state::{AR, AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, session};
+use crate::state::{
+    AR, AnalyzedAction, AnalyzedTarget, Session, canon_label, native_decl, qualify, session,
+};
 use crate::deps::{record_target, resolve_dep};
 use crate::values::unpack;
 use starlark::collections::SmallMap;
@@ -27,6 +29,9 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
+        let label = canon_label(session(eval), &name);
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
         let sess = session(eval);
         let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
         let hdrs: Vec<String> = unpack(hdrs).iter().map(|h| qualify(sess, h)).collect();
@@ -34,11 +39,12 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
 
         let (mut dep_names, mut dep_hdrs, mut dep_cflags) = (Vec::new(), Vec::new(), Vec::new());
         for d in &unpack(deps) {
-            let dep = resolve_dep(sess, d)?;
+            let dep = resolve_dep(eval, d)?;
             dep_hdrs.extend(dep.field("headers"));
             dep_cflags.extend(dep.field("cflags"));
             dep_names.push(dep.canon);
         }
+        let sess = session(eval);
 
         // OWN exported flags (defines/includes); the transitive set is the DDS fold for dependents
         // (C2d — store own, fold transitive). dep_cflags is already that transitive closure.
@@ -82,6 +88,8 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
         t.set_set("CcInfo", "hdrs", hdrs);
         t.set_set("CcInfo", "cflags", own_cflags);
         record_target(sess, t);
+        Ok(())
+        }))?;
         Ok(NoneType)
     }
 
@@ -93,17 +101,21 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
+        let label = canon_label(session(eval), &name);
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
         let sess = session(eval);
         let srcs: Vec<String> = unpack(srcs).iter().map(|s| qualify(sess, s)).collect();
         let (mut dep_names, mut dep_libs, mut dep_hdrs, mut dep_cflags) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for d in &unpack(deps) {
-            let dep = resolve_dep(sess, d)?;
+            let dep = resolve_dep(eval, d)?;
             dep_hdrs.extend(dep.field("headers"));
             dep_cflags.extend(dep.field("cflags"));
             dep_libs.extend(dep.libs);
             dep_names.push(dep.canon);
         }
+        let sess = session(eval);
         // Binary compiles see global flags + local copts + the deps' exported flags.
         let mut compile_flags = sess.global.copts.clone();
         compile_flags.extend(unpack(copts));
@@ -137,6 +149,8 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
             default_info: vec![out],
             providers: Default::default(),
         });
+        Ok(())
+        }))?;
         Ok(NoneType)
     }
 }

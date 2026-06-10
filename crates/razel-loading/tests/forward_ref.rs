@@ -30,6 +30,25 @@ r(name = "lib", deps = [])
     );
 }
 
+/// E0c: NATIVE rules forward-reference too — a cc_library deps on a later-declared one
+/// (the deferred-native path: record at eval, analyze on demand).
+#[test]
+fn native_rule_forward_reference_analyzes() {
+    let src = r#"
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+cc_library(name = "app", srcs = ["app.c"], hdrs = ["app.h"], deps = [":lib"])
+cc_library(name = "lib", srcs = [], hdrs = ["lib.h"])
+"#;
+    let targets = razel_loading::analyze_bazel(src).unwrap();
+    let app = targets.iter().find(|t| t.name.ends_with("app")).unwrap();
+    let compile = &app.actions[0];
+    assert!(
+        compile.inputs.contains(&"lib.h".to_string()),
+        "app's compile saw the forward-referenced lib's headers: {:?}",
+        compile.inputs
+    );
+}
+
 /// A dependency cycle is a clear analysis error, not a hang or a silent skip.
 #[test]
 fn dependency_cycle_is_an_error() {

@@ -40,12 +40,19 @@ impl DepInfo {
     }
 }
 
-/// Resolve a dep label to its [`DepInfo`]. In workspace mode a cross-package dep
-/// whose package isn't loaded yet is loaded on demand; otherwise a forward/cross
-/// reference errors clearly.
-pub(crate) fn resolve_dep(sess: &Session, label: &str) -> anyhow::Result<DepInfo> {
+/// Resolve a dep label to its [`DepInfo`]. A same-package pending declaration (E0c) is analyzed
+/// on demand — forward references resolve; in workspace mode a cross-package dep's package loads
+/// on demand; otherwise a missing dep errors clearly.
+pub(crate) fn resolve_dep<'v>(
+    eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
+    label: &str,
+) -> anyhow::Result<DepInfo> {
     use razel_dds::InstanceId;
+    let sess = crate::state::session(eval);
     let canon = canon_label(sess, label);
+    // E0c: a forward-referenced local declaration analyzes first (demand-driven).
+    crate::dialect::ensure_analyzed(eval, &canon).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let sess = crate::state::session(eval);
     // Workspace mode: lazy-load the dep's package if absent. The borrow in the condition is dropped
     // before `load_package` recurses into a nested eval (the [R1] discipline — a held `results`
     // borrow across the nested eval would double-borrow-panic).
