@@ -193,3 +193,10 @@ output (a regression guard), per the characterization header.
   keys error loudly). `cpu`/platform constraints land with L4 platforms.
 - **genrule breadth.** `$(RULEDIR)`/`$(@D)`/`$(BINDIR)` + `tools=`/`exec_tools=` (exec-config)
   + `toolchains=` make-var sources error loudly today; add as real corpora demand.
+- **Absorbing host namespaces (TF-loading).** `cc_common`/`apple_common`/`java_common`/
+  `proto_common`/`coverage_common`/`testing`/`platform_common` absorb ANY member (load-time);
+  absorbed values surface only when used at analysis (`<host-absorbed>` in tracebacks). Each
+  member gains real semantics when a rung needs it. Same for exec_group/aspect/subrule stubs.
+- **Generated-repo defaults.** `@python_version_repo` is host-materialized from its generator's
+  template with no-env defaults (py 3.11, USE_PYWRAP_RULES=False). Snapshot-from-configure is
+  the upgrade path if fidelity bites (L6a decision).
