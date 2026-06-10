@@ -154,6 +154,11 @@ enum DeclBody<'v> {
 #[derive(Debug, Default, ProvidesStaticType, NoSerialize, Allocative, Trace)]
 pub(crate) struct DeclStore<'v> {
     decls: RefCell<Vec<Option<Decl<'v>>>>,
+    /// L2a: the provider instances each analyzed target RETURNED (canonical label →
+    /// `[(constructor, instance)]`) — what `dep[MyInfo]` indexes. Heap-resident like the decls
+    /// (instances are `'v` values), so the flow is same-package; cross-package custom providers
+    /// are a later rung (the typed-algebra channel still crosses).
+    captured: RefCell<SmallMap<String, Vec<(Value<'v>, Value<'v>)>>>,
 }
 
 impl fmt::Display for DeclStore<'_> {
@@ -355,8 +360,21 @@ fn analyze_rule_decl<'v>(
                         let dds = crate::dds::session_dds(sess);
                         sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
                     }
+                    // L2a: a dep is a DepTarget — plain projected fields by attr, plus the dep's
+                    // returned provider instances indexable by constructor (`dep[MyInfo]`).
+                    let heap = eval.heap();
+                    let dfields: Vec<(String, Value<'v>)> =
+                        sfields.into_iter().map(|(k, xs)| (k, heap.alloc(xs))).collect();
+                    let providers = decl_store(eval)?
+                        .captured
+                        .borrow()
+                        .get(&dep)
+                        .cloned()
+                        .unwrap_or_default();
                     dep_labels.push(dep);
-                    structs.push(eval.heap().alloc(AllocStruct(sfields)));
+                    structs.push(
+                        heap.alloc_complex_no_freeze(DepTarget { fields: dfields, providers }),
+                    );
                 }
                 // D1c: a single `attr.label` yields ONE struct; a list yields the list of structs.
                 if single_label {
@@ -437,7 +455,29 @@ fn analyze_rule_decl<'v>(
             files: heap.alloc(AllocStruct(files_fields)),
             executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
         });
-    eval.eval_function(implementation, &[ctx], &[])?;
+    let ret = eval.eval_function(implementation, &[ctx], &[])?;
+
+    // L2a: capture the provider instances the impl RETURNED (keyed by canonical label) — what a
+    // dependent's `dep[MyInfo]` reads. DefaultInfo/razel_build.info side-effect channels unchanged.
+    {
+        let mut captured: Vec<(Value<'v>, Value<'v>)> = Vec::new();
+        let mut grab = |item: Value<'v>| {
+            if let Some(pi) = item.downcast_ref::<ProviderInstance>() {
+                captured.push((pi.callable, item));
+            }
+        };
+        if let Some(list) = ListRef::from_value(ret) {
+            for item in list.iter() {
+                grab(item);
+            }
+        } else {
+            grab(ret);
+        }
+        if !captured.is_empty() {
+            let label = canon_label(session(eval), &name);
+            decl_store(eval)?.captured.borrow_mut().insert(label, captured);
+        }
+    }
 
     // Post-impl: commit the analyzed target via record_target (E0d: it also asserts into the
     // Session's live fact store). Take the in-flight target with a short borrow first.
@@ -468,10 +508,11 @@ impl fmt::Display for ProviderCallable {
 
 #[starlark_value(type = "provider")]
 impl<'v> StarlarkValue<'v> for ProviderCallable {
-    /// `MyInfo(field = value, …)` → a `struct` carrying those fields (the provider instance).
+    /// `MyInfo(field = value, …)` → a [`ProviderInstance`] carrying those fields. The instance
+    /// remembers its constructor (`me`) — that identity is what `dep[MyInfo]` indexes by (L2a).
     fn invoke(
         &self,
-        _me: Value<'v>,
+        me: Value<'v>,
         args: &Arguments<'v, '_>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
@@ -479,7 +520,65 @@ impl<'v> StarlarkValue<'v> for ProviderCallable {
         let named = args.names_map()?;
         let fields: Vec<(String, Value<'v>)> =
             named.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect();
-        Ok(eval.heap().alloc(AllocStruct(fields)))
+        Ok(eval.heap().alloc_complex_no_freeze(ProviderInstance { callable: me, fields }))
+    }
+}
+
+
+/// A constructed provider instance (L2a): the fields plus the constructor's identity. Field reads
+/// (`info.msg`) go through `get_attr`; a rule impl returning instances gets them captured onto the
+/// target, and a dependent retrieves them via `dep[MyInfo]` (identity = same constructor value).
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+pub(crate) struct ProviderInstance<'v> {
+    callable: Value<'v>,
+    fields: Vec<(String, Value<'v>)>,
+}
+
+impl fmt::Display for ProviderInstance<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<provider instance>")
+    }
+}
+
+#[starlark_value(type = "provider_instance")]
+impl<'v> StarlarkValue<'v> for ProviderInstance<'v> {
+    fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
+        self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| *v)
+    }
+}
+
+
+/// A resolved dependency as seen by a rule impl (L2a): the plain projected fields (`files`,
+/// `headers`, …) via `get_attr`, plus `dep[MyInfo]` indexing into the dep's captured provider
+/// instances (constructor identity — `Value::ptr_eq`).
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+pub(crate) struct DepTarget<'v> {
+    fields: Vec<(String, Value<'v>)>,
+    providers: Vec<(Value<'v>, Value<'v>)>,
+}
+
+impl fmt::Display for DepTarget<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<dep>")
+    }
+}
+
+#[starlark_value(type = "dep_target")]
+impl<'v> StarlarkValue<'v> for DepTarget<'v> {
+    fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
+        self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| *v)
+    }
+    /// `dep[MyInfo]` — the instance this dep's rule returned for that provider.
+    fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        self.providers
+            .iter()
+            .find(|(c, _)| c.ptr_eq(index))
+            .map(|(_, inst)| *inst)
+            .ok_or_else(|| {
+                starlark::Error::new_other(anyhow::anyhow!(
+                    "target does not provide the requested provider"
+                ))
+            })
     }
 }
 
