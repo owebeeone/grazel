@@ -195,6 +195,53 @@ fn expand_genrule_cmd(
 }
 
 
+// ---- Label ------------------------------------------------------------------------------------
+
+
+/// A Bazel `Label` value: `.package`/`.name` fields and — critically — `str(label)` is the
+/// canonical `//pkg:name` form (real macros do `str(Label(x))`; a struct repr breaks them).
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
+pub(crate) struct LabelV {
+    /// `Some("@xla")` for an external-repo label; `None` = the main workspace.
+    repo: Option<String>,
+    package: String,
+    name: String,
+}
+starlark::starlark_simple_value!(LabelV);
+
+impl fmt::Display for LabelV {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.repo {
+            Some(r) => write!(f, "{r}//{}:{}", self.package, self.name),
+            None => write!(f, "//{}:{}", self.package, self.name),
+        }
+    }
+}
+
+#[starlark_value(type = "Label")]
+impl<'v> StarlarkValue<'v> for LabelV {
+    /// Labels are dict keys in real `.bzl` (`select({Label(...): …})`).
+    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+        use std::hash::Hash;
+        (&self.repo, &self.package, &self.name).hash(hasher);
+        Ok(())
+    }
+    fn equals(&self, other: Value<'v>) -> starlark::Result<bool> {
+        Ok(other
+            .downcast_ref::<LabelV>()
+            .is_some_and(|o| o.repo == self.repo && o.package == self.package && o.name == self.name))
+    }
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
+        match attribute {
+            "package" => Some(heap.alloc(self.package.as_str())),
+            "name" => Some(heap.alloc(self.name.as_str())),
+            "workspace_root" | "workspace_name" => Some(heap.alloc("")),
+            _ => None,
+        }
+    }
+}
+
+
 // ---- select: deferred values + resolution (Bazel's select-as-value model) ---------------------
 
 
@@ -220,44 +267,49 @@ where
 {
     /// `select({...}) + x` — a select expression (Bazel's concatenation).
     fn add(&self, other: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
-        let me = heap.alloc_complex_no_freeze(SelectBranches {
+        let me = heap.alloc(SelectBranches {
             branches: self.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect(),
         });
-        Some(Ok(heap.alloc_complex_no_freeze(SelectExpr { parts: vec![me, other] })))
+        Some(Ok(heap.alloc(SelectExpr { parts: vec![me, other] })))
     }
     /// `x + select({...})`.
     fn radd(&self, lhs: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
-        let me = heap.alloc_complex_no_freeze(SelectBranches {
+        let me = heap.alloc(SelectBranches {
             branches: self.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect(),
         });
-        Some(Ok(heap.alloc_complex_no_freeze(SelectExpr { parts: vec![lhs, me] })))
+        Some(Ok(heap.alloc(SelectExpr { parts: vec![lhs, me] })))
     }
 }
 
 /// A select EXPRESSION: ordered parts (plain lists and selects) — `["-a"] + select({…}) + …`.
-/// Lives only within an eval scope (built in BUILD/macro expressions); resolution concatenates.
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Trace)]
-pub(crate) struct SelectExpr<'v> {
-    parts: Vec<Value<'v>>,
+/// Freeze-generic: real `.bzl` build these in module-level default args (XLA's tsl.bzl).
+#[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
+#[repr(C)]
+pub(crate) struct SelectExprGen<V: ValueLifetimeless> {
+    parts: Vec<V>,
 }
+starlark_complex_value!(SelectExpr);
 
-impl fmt::Display for SelectExpr<'_> {
+impl<V: ValueLifetimeless> fmt::Display for SelectExprGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "select-expr({} parts)", self.parts.len())
     }
 }
 
 #[starlark_value(type = "select_expr")]
-impl<'v> StarlarkValue<'v> for SelectExpr<'v> {
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for SelectExprGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
     fn add(&self, other: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
-        let mut parts = self.parts.clone();
+        let mut parts: Vec<Value<'v>> = self.parts.iter().map(|p| p.to_value()).collect();
         parts.push(other);
-        Some(Ok(heap.alloc_complex_no_freeze(SelectExpr { parts })))
+        Some(Ok(heap.alloc(SelectExpr { parts })))
     }
     fn radd(&self, lhs: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
         let mut parts = vec![lhs];
-        parts.extend(self.parts.iter().copied());
-        Some(Ok(heap.alloc_complex_no_freeze(SelectExpr { parts })))
+        parts.extend(self.parts.iter().map(|p| p.to_value()));
+        Some(Ok(heap.alloc(SelectExpr { parts })))
     }
 }
 
@@ -266,6 +318,9 @@ impl<'v> StarlarkValue<'v> for SelectExpr<'v> {
 fn key_string<'v>(heap: Heap<'v>, key: Value<'v>) -> Option<String> {
     if let Some(s) = key.unpack_str() {
         return Some(s.to_string());
+    }
+    if let Some(l) = key.downcast_ref::<LabelV>() {
+        return Some(l.to_string());
     }
     let pkg = key.get_attr("package", heap).ok()??.unpack_str()?.to_string();
     let name = key.get_attr("name", heap).ok()??.unpack_str()?.to_string();
@@ -279,6 +334,7 @@ fn pick_branch<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     pairs: &[(Value<'v>, Value<'v>)],
     defer_on_undeclared: bool,
+    allow_load: bool,
 ) -> anyhow::Result<Option<Value<'v>>> {
     let heap = eval.heap();
     let mut default: Option<Value<'v>> = None;
@@ -294,12 +350,26 @@ fn pick_branch<'v>(
         let sess = session(eval);
         let canon = canon_label(sess, &cond);
         // Cross-package condition: load its package on demand (the borrow in the condition
-        // drops before the nested eval — the [R1] discipline).
-        if !sess.config_specs.borrow().contains_key(&canon)
+        // drops before the nested eval — the [R1] discipline). A failed load must SURFACE —
+        // otherwise every condition in that package reports "not declared".
+        let mut load_err = None;
+        if allow_load
+            && !sess.config_specs.borrow().contains_key(&canon)
             && sess.workspace.is_some()
             && let Some(pkg) = crate::state::pkg_of(&canon)
         {
-            let _ = crate::rules::load_package(sess, &pkg);
+            load_err = crate::rules::load_package(sess, &pkg).err();
+        }
+        if let Some(e) = load_err
+            && !sess.config_specs.borrow().contains_key(&canon)
+        {
+            return Err(anyhow::anyhow!(
+                "select(): loading `{canon}`'s package failed: {e}"
+            ));
+        }
+        // Host-materialized generated repos: their settings are FALSE on the CPU-only host.
+        if crate::host::host_false_condition(&canon) {
+            continue;
         }
         let spec = match sess.config_specs.borrow().get(&canon).cloned() {
             Some(s) => s,
@@ -352,11 +422,18 @@ pub(crate) fn resolve_attr_value<'v>(
             None
         };
     if let Some(pairs) = pairs {
-        let picked = pick_branch(eval, &pairs, false)?.expect("non-deferring pick");
+        let picked = pick_branch(eval, &pairs, false, true)?.expect("non-deferring pick");
         return resolve_attr_value(eval, picked);
     }
-    if let Some(se) = v.downcast_ref::<SelectExpr<'v>>() {
-        let parts = se.parts.clone();
+    let expr_parts: Option<Vec<Value<'v>>> =
+        if let Some(se) = v.downcast_ref::<SelectExpr<'v>>() {
+            Some(se.parts.clone())
+        } else if let Some(se) = v.downcast_ref::<FrozenSelectExpr>() {
+            Some(se.parts.iter().map(|p| p.to_value()).collect())
+        } else {
+            None
+        };
+    if let Some(parts) = expr_parts {
         let mut out: Vec<Value<'v>> = Vec::new();
         for p in parts {
             let r = resolve_attr_value(eval, p)?;
@@ -969,7 +1046,7 @@ impl<'v> StarlarkValue<'v> for DepTarget<'v> {
 pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// `rule(implementation, attrs={})` → a callable rule object.
     fn rule<'v>(
-        #[starlark(require = named)] implementation: Value<'v>,
+        implementation: Value<'v>,
         #[starlark(require = named)] attrs: Option<Value<'v>>,
         // D4: absorb the other rule() kwargs upstream rules pass (build_setting, doc, cfg, toolchains,
         // provides, executable, test, …). Not yet honored — enough to define the rule.
@@ -1135,13 +1212,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 after.rsplit('/').next().unwrap_or(after).to_string(),
             ),
         };
-        let heap = eval.heap();
-        Ok(heap.alloc(AllocStruct([
-            ("package".to_string(), heap.alloc(pkg)),
-            ("name".to_string(), heap.alloc(name)),
-            ("workspace_root".to_string(), heap.alloc(String::new())),
-            ("workspace_name".to_string(), heap.alloc(String::new())),
-        ])))
+        // A label written in `@repo` code resolves against that repo (clean_dep's whole point).
+        let repo = if s.starts_with('@') {
+            s.split("//").next().map(|r| r.to_string())
+        } else {
+            session(eval).current_bzl_repo.borrow().last().cloned().flatten().map(|r| format!("@{r}"))
+        };
+        Ok(eval.heap().alloc(LabelV { repo, package: pkg, name }))
     }
 
     /// BUILD package-declaration builtins. razel doesn't enforce visibility/licenses
@@ -1388,7 +1465,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         };
         let pairs: Vec<(Value<'v>, Value<'v>)> = d.iter().collect();
         drop(d);
-        match pick_branch(eval, &pairs, true)? {
+        // Bazel: select never resolves at LOAD time. The eager path consults only specs already
+        // declared (no package loading — that recursed into mid-load packages); everything else
+        // defers to attr consumption at analysis.
+        match pick_branch(eval, &pairs, true, false)? {
             Some(v) => Ok(v),
             // Defer: a condition isn't declared yet — resolve at attr consumption (analysis).
             None => Ok(eval.heap().alloc(SelectBranches { branches: pairs })),

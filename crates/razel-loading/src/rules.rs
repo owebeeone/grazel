@@ -38,7 +38,25 @@ pub(crate) fn build_globals() -> Globals {
     ])
     .with(rule_globals)
     .with(engine_namespaces)
+    .with(bazel_native_rule_globals)
     .build()
+}
+
+/// Bazel's native rules as BUILD GLOBALS (no `load()` needed — `cc_library` is a builtin in real
+/// BUILD files; TF uses it bare everywhere). Aliased from razel's native cc rules; `cc_test` is
+/// loading-grade (the binary backend).
+pub(crate) fn bazel_native_rule_globals(b: &mut GlobalsBuilder) {
+    let native_cc = GlobalsBuilder::standard().with(crate::native_cc::cc_rules).build();
+    let get = |name: &str| {
+        native_cc
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v)
+            .expect("native cc rule registered")
+    };
+    b.set("cc_library", get("native_cc_library"));
+    b.set("cc_binary", get("native_cc_binary"));
+    b.set("cc_test", get("native_cc_binary"));
 }
 
 
@@ -189,6 +207,10 @@ impl FileLoader for BzlLoader<'_> {
         };
 
         // The nested eval runs with this module's repo context on the stack (popped even on error).
+        self.session
+            .current_bzl_repo
+            .borrow_mut()
+            .push(ctx.as_ref().map(|(r, _)| r.clone()));
         self.load_ctx.borrow_mut().push(ctx);
         let frozen = Module::with_temp_heap(|module| -> starlark::Result<FrozenModule> {
             let ast = AstModule::parse(path, src, &Dialect::Extended)?;
@@ -203,6 +225,7 @@ impl FileLoader for BzlLoader<'_> {
                 .map_err(|e| starlark::Error::new_other(anyhow::anyhow!("{e:?}")))
         });
         self.load_ctx.borrow_mut().pop();
+        self.session.current_bzl_repo.borrow_mut().pop();
         let frozen = frozen?;
         self.cache
             .borrow_mut()
@@ -259,6 +282,17 @@ pub(crate) fn ruleset_modules(cc_toolchain: CcToolchainMode) -> Result<Vec<Rules
 /// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
 /// cross-package load appends, never clears).
 pub(crate) fn eval_build_src(session: &Session, name: &str, src: &str) -> Result<(), String> {
+    eval_build_src_in(session, name, src, None)
+}
+
+/// [`eval_build_src`] with a repo context: an EXTERNAL package's BUILD resolves its loads and
+/// `Label()`s against its own repo (`Some((repo, pkg))` — Bazel label semantics).
+pub(crate) fn eval_build_src_in(
+    session: &Session,
+    name: &str,
+    src: &str,
+    repo_ctx: Option<(String, String)>,
+) -> Result<(), String> {
     let rulesets = ruleset_modules(session.global.cc_toolchain)?;
     let globals = build_globals();
     let loader = BzlLoader {
@@ -266,21 +300,37 @@ pub(crate) fn eval_build_src(session: &Session, name: &str, src: &str) -> Result
         globals: &globals,
         cache: RefCell::new(HashMap::new()),
         session,
-        load_ctx: RefCell::new(Vec::new()),
+        load_ctx: RefCell::new(vec![repo_ctx.clone()]),
     };
+    session
+        .current_bzl_repo
+        .borrow_mut()
+        .push(repo_ctx.as_ref().map(|(r, _)| r.clone()));
+    let result = eval_build_src_inner(session, name, src, &loader, &globals);
+    session.current_bzl_repo.borrow_mut().pop();
+    return result;
+}
+
+fn eval_build_src_inner(
+    session: &Session,
+    name: &str,
+    src: &str,
+    loader: &BzlLoader<'_>,
+    globals: &Globals,
+) -> Result<(), String> {
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
     Module::with_temp_heap(|module| {
         crate::dialect::install_decl_store(&module);
         {
             let mut eval = Evaluator::new(&module);
-            eval.set_loader(&loader);
+            eval.set_loader(loader);
             eval.extra = Some(session); // builtins read the Session via `session(eval)`
-            eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
+            eval.eval_module(ast, globals).map_err(|e| format!("{e}"))?;
         }
         // E0 phase 2: analyze the recorded declarations, demand-driven (forward refs resolve).
         let mut eval = Evaluator::new(&module);
-        eval.set_loader(&loader);
+        eval.set_loader(loader);
         eval.extra = Some(session);
         crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
         Ok(())
@@ -315,21 +365,40 @@ pub(crate) fn load_package(sess: &Session, pkg: &str) -> Result<(), String> {
         return Ok(());
     }
     sess.loaded.borrow_mut().insert(pkg.to_string());
-    let root = sess
-        .workspace
-        .clone()
-        .ok_or("load_package called outside workspace mode")?;
+    // External package (`@repo//pkg`): its BUILD lives under the vendored repo's root.
+    let pkg_dir = if let Some(rest) = pkg.strip_prefix('@') {
+        let (repo, sub) = rest.split_once("//").ok_or_else(|| format!("bad package `{pkg}`"))?;
+        let base = sess
+            .global
+            .external_base
+            .clone()
+            .ok_or_else(|| format!("external package `{pkg}` needs an external base"))?;
+        [repo.to_string(), repo.replace('_', "-")]
+            .iter()
+            .map(|dir| base.join(dir))
+            .find(|p| p.exists())
+            .ok_or_else(|| format!("external repo for `{pkg}` not vendored"))?
+            .join(sub)
+    } else {
+        sess.workspace
+            .clone()
+            .ok_or("load_package called outside workspace mode")?
+            .join(pkg)
+    };
     let build_path = ["BUILD", "BUILD.bazel"]
         .iter()
-        .map(|f| root.join(pkg).join(f))
+        .map(|f| pkg_dir.join(f))
         .find(|p| p.exists())
-        .ok_or_else(|| format!("no BUILD in package `{pkg}` ({})", root.join(pkg).display()))?;
+        .ok_or_else(|| format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))?;
     let src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
 
     // Short borrows around the nested eval (the [R1] discipline): set current_pkg, drop the
     // borrow, recurse, then restore — never hold a Session borrow across `eval_build_src`.
+    let repo_ctx = pkg.strip_prefix('@').and_then(|rest| {
+        rest.split_once("//").map(|(r, sub)| (r.to_string(), sub.to_string()))
+    });
     let prev = sess.current_pkg.borrow_mut().replace(pkg.to_string());
-    let res = eval_build_src(sess, &format!("{pkg}/BUILD"), &src);
+    let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), &src, repo_ctx);
     *sess.current_pkg.borrow_mut() = prev;
     res
 }

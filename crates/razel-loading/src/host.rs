@@ -56,3 +56,16 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
     ];
     HOST.iter().find(|(k, _)| *k == label).map(|(_, v)| *v)
 }
+
+/// Conditions in razel's host-materialized generated repos that are FALSE by construction on the
+/// CPU-only host (`@local_config_cuda//:is_cuda_enabled`, …). `select()` treats them as declared
+/// non-matching config_settings — the same answer the generated repo's BUILD would give.
+pub(crate) fn host_false_condition(canon: &str) -> bool {
+    const FALSE_REPOS: &[&str] = &[
+        "@local_config_cuda//",
+        "@local_config_rocm//",
+        "@local_config_sycl//",
+        "@local_config_tensorrt//",
+    ];
+    FALSE_REPOS.iter().any(|p| canon.starts_with(p))
+}

@@ -33,6 +33,38 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<Vec<String>> {
         do_glob(session(eval), include.items, exclude.map(|l| l.items).unwrap_or_default())
     }
+    /// `native.filegroup(...)` — real macros wrap the native rules (`tensorflow.bzl`'s
+    /// filegroup macro calls `native.filegroup(**kwargs)`). Mirrors the BUILD-global builtin.
+    fn filegroup<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<UnpackList<String>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        let files: Vec<String> =
+            crate::values::unpack(srcs).iter().map(|s| crate::state::qualify(sess, s)).collect();
+        crate::deps::record_target(sess, crate::state::AnalyzedTarget {
+            name: crate::state::canon_label(sess, &name),
+            default_info: files,
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+    /// `native.alias(name, actual)` — records a target whose files are the actual's (resolved at
+    /// analysis via the dep machinery is Phase-later; loading-grade: name declared).
+    fn alias<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        crate::deps::record_target(sess, crate::state::AnalyzedTarget {
+            name: crate::state::canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
 }
 
 

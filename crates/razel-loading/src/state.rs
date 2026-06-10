@@ -115,6 +115,9 @@ pub(crate) struct Session {
     /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
     /// `Value`s — so they need no GC tracing and can live on the Session).
     pub(crate) native_decls: RefCell<Vec<Option<NativeAnalyzeFn>>>,
+    /// The repo of the `.bzl` module currently being loaded (BzlLoader-maintained stack;
+    /// `None` frames = workspace modules). `Label()` written in `@repo` code resolves against it.
+    pub(crate) current_bzl_repo: RefCell<Vec<Option<String>>>,
     /// Declared `config_setting` specs by canonical label — what `select()` matches (razelV3).
     pub(crate) config_specs: RefCell<BTreeMap<String, ConfigSpec>>,
     /// E0d: the Session's live fact store — the DDS IS the store. `None` until first use (lazy
@@ -265,8 +268,24 @@ pub enum CcToolchainMode {
 /// Canonicalize a target name/label against the current package. Single-package
 /// mode keeps bare names; workspace mode produces `//pkg:name`.
 pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
+    // An `@repo//…` label is already canonical (external labels don't take the current package).
+    if s.starts_with('@') {
+        return s.to_string();
+    }
     match &*sess.current_pkg.borrow() {
         None => s.strip_prefix(':').unwrap_or(s).to_string(),
+        // Inside an EXTERNAL package (`current_pkg == "@repo//pkg"`): labels resolve within that
+        // repo — `//x:y` → `@repo//x:y`; `:n`/`n` → `@repo//pkg:n` (Bazel label semantics).
+        Some(pkg) if pkg.starts_with('@') => {
+            let repo = pkg.split("//").next().unwrap_or_default();
+            if let Some(rest) = s.strip_prefix("//") {
+                format!("{repo}//{rest}")
+            } else if let Some(name) = s.strip_prefix(':') {
+                format!("{pkg}:{name}")
+            } else {
+                format!("{pkg}:{s}")
+            }
+        }
         Some(pkg) => {
             if let Some(rest) = s.strip_prefix("//") {
                 format!("//{rest}")
@@ -289,6 +308,12 @@ pub(crate) fn qualify(sess: &Session, path: &str) -> String {
 
 /// The package of a canonical label `//pkg:name`.
 pub(crate) fn pkg_of(label: &str) -> Option<String> {
+    // External: `@repo//pkg:name` → `@repo//pkg` (an external-package key for load_package).
+    if let Some(rest) = label.strip_prefix('@') {
+        let (repo, pkgname) = rest.split_once("//")?;
+        let (pkg, _) = pkgname.split_once(':')?;
+        return Some(format!("@{repo}//{pkg}"));
+    }
     label
         .strip_prefix("//")?
         .split_once(':')
