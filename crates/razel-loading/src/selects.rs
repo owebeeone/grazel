@@ -64,7 +64,7 @@ where
 #[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
 #[repr(C)]
 pub(crate) struct SelectExprGen<V: ValueLifetimeless> {
-    parts: Vec<V>,
+    pub(crate) parts: Vec<V>,
 }
 
 

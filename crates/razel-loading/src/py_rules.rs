@@ -12,7 +12,7 @@
 
 use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, qualify, session};
 use crate::deps::{record_target, resolve_dep};
-use crate::values::{unpack, unpack_strs};
+use crate::values::{unpack, unpack_strs_any};
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
@@ -67,14 +67,14 @@ pub(crate) fn py_rules(b: &mut GlobalsBuilder) {
     /// `default_info` and the `hdrs` channel (which `resolve_dep` propagates transitively).
     fn native_py_library<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
-        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
+        let (srcs, deps) = (unpack_strs_any(srcs), unpack_strs_any(deps));
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
             let g = gather(eval, srcs.clone(), deps.clone())?;
             let sess = session(eval);
@@ -102,24 +102,26 @@ pub(crate) fn py_rules(b: &mut GlobalsBuilder) {
     /// present in the sandbox and part of the cache key.
     fn native_py_binary<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] main: Option<String>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
+        #[starlark(require = named)] main: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        let main = main.and_then(|m| m.unpack_str().map(String::from));
         py_executable(eval, name, srcs, deps, main)
     }
 
     /// `py_test(...)` — same launcher mechanism as `py_binary`.
     fn native_py_test<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] main: Option<String>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
+        #[starlark(require = named)] main: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        let main = main.and_then(|m| m.unpack_str().map(String::from));
         py_executable(eval, name, srcs, deps, main)
     }
 }
@@ -128,12 +130,12 @@ pub(crate) fn py_rules(b: &mut GlobalsBuilder) {
 fn py_executable<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     name: String,
-    srcs: Option<UnpackList<Value<'v>>>,
-    deps: Option<UnpackList<Value<'v>>>,
+    srcs: Option<Value<'v>>,
+    deps: Option<Value<'v>>,
     main: Option<String>,
 ) -> anyhow::Result<NoneType> {
     let label = canon_label(session(eval), &name);
-    let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
+    let (srcs, deps) = (unpack_strs_any(srcs), unpack_strs_any(deps));
     crate::dialect::record_native(eval, label, native_decl(move |eval| {
     let g = gather(eval, srcs.clone(), deps.clone())?;
     let sess = session(eval);

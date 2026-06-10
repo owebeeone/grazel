@@ -107,10 +107,15 @@ pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
     b.namespace("attr", attr_members);
     b.namespace("razel_build", razel_build_members);
     b.namespace("config", config_members);
-    b.namespace("config_common", config_common_members);
+    b.namespace("config_common", |b| {
+        config_common_members(b);
+        // Provider-shaped constants rules reference (feature flags absorb).
+        b.set("FeatureFlagInfo", crate::engine::Absorb);
+        b.set("config_feature_flag_transition", crate::engine::Absorb);
+    });
     // Foreign host namespaces ABSORB (any member resolves; surfaces only at analysis use —
     // registered debt). config/attr/native/razel_build stay explicit + typed.
-    for ns in ["cc_common", "coverage_common", "testing", "apple_common", "java_common", "proto_common", "platform_common", "proto_common_do_not_use", "py_internal"] {
+    for ns in ["cc_common", "coverage_common", "testing", "apple_common", "java_common", "proto_common", "platform_common", "proto_common_do_not_use", "py_internal", "android_common", "ApkInfo", "AndroidIdeInfo"] {
         b.set(ns, crate::engine::Absorb);
     }
     // The absorber itself, for razel's HOST .bzl files (host-repos/) to bind symbols with.

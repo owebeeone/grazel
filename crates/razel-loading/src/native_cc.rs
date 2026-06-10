@@ -20,24 +20,34 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
     #[allow(clippy::too_many_arguments)]
     fn native_cc_library<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] hdrs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] copts: Option<UnpackList<String>>,
-        #[starlark(require = named)] defines: Option<UnpackList<String>>,
-        #[starlark(require = named)] includes: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] hdrs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
+        #[starlark(require = named)] copts: Option<Value<'v>>,
+        #[starlark(require = named)] defines: Option<Value<'v>>,
+        #[starlark(require = named)] includes: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
-        // Stringify list params OUTSIDE the closure (native bodies capture only plain data).
-        let (srcs, hdrs, deps) = (unpack_strs(srcs), unpack_strs(hdrs), unpack_strs(deps));
+        // Decompose attrs to PLAIN-DATA parts (selects defer to analysis — Bazel's model).
+        let srcs = crate::values::str_attr_parts(eval, srcs)?;
+        let hdrs = crate::values::str_attr_parts(eval, hdrs)?;
+        let deps = crate::values::str_attr_parts(eval, deps)?;
+        let copts = crate::values::str_attr_parts(eval, copts)?;
+        let defines = crate::values::str_attr_parts(eval, defines)?;
+        let includes = crate::values::str_attr_parts(eval, includes)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+        let hdrs = crate::values::resolve_str_parts(eval, &hdrs)?;
+        let deps = crate::values::resolve_str_parts(eval, &deps)?;
+        let copts = crate::values::resolve_str_parts(eval, &copts)?;
+        let defines = crate::values::resolve_str_parts(eval, &defines)?;
+        let includes = crate::values::resolve_str_parts(eval, &includes)?;
         let sess = session(eval);
         let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
         let hdrs: Vec<String> = hdrs.iter().map(|h| qualify(sess, h)).collect();
-        let copts = unpack(copts.clone());
 
         let (mut dep_names, mut dep_hdrs, mut dep_cflags) = (Vec::new(), Vec::new(), Vec::new());
         for d in &deps {
@@ -97,16 +107,21 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
 
     fn native_cc_binary<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] copts: Option<UnpackList<String>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
+        #[starlark(require = named)] copts: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
-        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
+        let srcs = crate::values::str_attr_parts(eval, srcs)?;
+        let deps = crate::values::str_attr_parts(eval, deps)?;
+        let copts = crate::values::str_attr_parts(eval, copts)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+        let deps = crate::values::resolve_str_parts(eval, &deps)?;
+        let copts = crate::values::resolve_str_parts(eval, &copts)?;
         let sess = session(eval);
         let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
         let (mut dep_names, mut dep_libs, mut dep_hdrs, mut dep_cflags) =
@@ -121,7 +136,7 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
         let sess = session(eval);
         // Binary compiles see global flags + local copts + the deps' exported flags.
         let mut compile_flags = sess.global.copts.clone();
-        compile_flags.extend(unpack(copts));
+        compile_flags.extend(copts);
         compile_flags.extend(dep_cflags);
 
         let (mut actions, mut objs) = (Vec::new(), Vec::new());
@@ -161,14 +176,14 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
 
 
 /// `defines = ["FOO=1"]` → `["-DFOO=1"]`.
-pub(crate) fn define_flags(defines: Option<UnpackList<String>>) -> Vec<String> {
-    unpack(defines).iter().map(|d| format!("-D{d}")).collect()
+pub(crate) fn define_flags(defines: Vec<String>) -> Vec<String> {
+    defines.iter().map(|d| format!("-D{d}")).collect()
 }
 
 
 /// `includes = ["inc"]` → `["-Ipkg/inc"]` (package-qualified include dirs).
-pub(crate) fn include_flags(sess: &Session, includes: Option<UnpackList<String>>) -> Vec<String> {
-    unpack(includes)
+pub(crate) fn include_flags(sess: &Session, includes: Vec<String>) -> Vec<String> {
+    includes
         .iter()
         .map(|i| format!("-I{}", qualify(sess, i)))
         .collect()

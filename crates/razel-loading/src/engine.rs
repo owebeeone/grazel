@@ -42,14 +42,27 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
-        let sess = session(eval);
-        let files: Vec<String> =
-            crate::values::unpack_strs(srcs).iter().map(|s| crate::state::qualify(sess, s)).collect();
-        crate::deps::record_target(sess, crate::state::AnalyzedTarget {
-            name: crate::state::canon_label(sess, &name),
-            default_info: files,
-            ..Default::default()
-        });
+        let label = crate::state::canon_label(session(eval), &name);
+        let srcs = crate::values::unpack_strs(srcs);
+        // E0c: deferred — label srcs resolve to their files on demand.
+        crate::dialect::record_native(eval, label, crate::state::native_decl(move |eval| {
+            let mut files: Vec<String> = Vec::new();
+            for s in srcs.clone() {
+                if s.starts_with(':') || s.starts_with("//") || s.starts_with('@') {
+                    let dep = crate::deps::resolve_dep(eval, &s)?;
+                    files.extend(dep.libs);
+                } else {
+                    files.push(crate::state::qualify(session(eval), &s));
+                }
+            }
+            let sess = session(eval);
+            crate::deps::record_target(sess, crate::state::AnalyzedTarget {
+                name: crate::state::canon_label(sess, &name),
+                default_info: files,
+                ..Default::default()
+            });
+            Ok(())
+        }))?;
         Ok(NoneType)
     }
     /// `native.label_flag` / `native.label_setting` — build-setting label flags (declare-only;
@@ -140,6 +153,7 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] values: Option<SmallMap<String, String>>,
         #[starlark(require = named)] define_values: Option<SmallMap<String, String>>,
         #[starlark(require = named)] flag_values: Option<Value<'v>>,
+        #[starlark(require = named)] constraint_values: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
@@ -149,6 +163,10 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
             define_values: define_values.map(|m| m.into_iter().collect()).unwrap_or_default(),
             group: None,
             unmodeled: flag_values.is_some_and(|v| !v.is_none()),
+            constraint_values: crate::values::unpack_strs(constraint_values)
+                .iter()
+                .map(|c| crate::state::canon_label(sess, c))
+                .collect(),
         };
         sess.config_specs
             .borrow_mut()

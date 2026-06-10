@@ -408,3 +408,24 @@ throughout); py_library/py_binary/py_test as BUILD globals; objc_library declare
 **Frontier: `@llvm-project`** — the MLIR/LLVM repo (GB-scale; overlay BUILDs reconstructed by
 llvm's utils/bazel script). A vendor-class task, not a semantics gap: the next session starts
 there. 60 bins; 3 gates; 5 sentinels.
+
+## Round delta — razelV3 round 13 (2026-06-11)
+
+**@llvm-project VENDORED (TF's pinned commit 11158cfe, 2.5GB; llvm's utils/bazel overlay
+algorithm ported to a one-shot symlink script) — and the walk went straight through it.**
+The frontier is deep in TF's own tree (tensorflow/core targets, tensorflow.bzl macros).
+Landed: deferred NATIVE-rule selects (StrAttrPart — attrs decompose to plain-data branches at
+declare, resolve via pick_branch at analysis; conditions declared later in the file work — the
+@gif pattern); config_setting(constraint_values=) matched against the REAL host; filegroup-of-
+filegroup (label srcs resolve on demand, both builtins now deferred); cross-package source-file
+labels (//pkg:file on-disk fallback fixed + added to resolve_dep); output-ATTR labels
+(attr.output/output_list register in the output index at declare — tf_gen_options_header);
+depset-tolerant py rules + explicit main=None; rules_java + @compatibility_proxy host repo
+(JavaInfo/JavaPluginInfo host providers, java rules absorb); rules_android vendored +
+android_common absorbs + config_common.FeatureFlagInfo/config_feature_flag_transition;
+File.is_directory; gif vendored (TF overlay).
+
+**Frontier:** `tf_gen_options_header` reads `target[BuildSettingInfo].value` from
+build-setting flag targets — the value is a provider instance where a bool is expected
+(build-setting VALUE flow through label_flag aliases; razel doesn't model flag values yet).
+60 bins; 3 gates; 5 sentinels.

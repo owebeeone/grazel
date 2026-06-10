@@ -265,6 +265,8 @@ pub(crate) struct ConfigSpec {
     /// `flag_values =` constraints reference build-setting values razel doesn't model yet —
     /// CONSERVATIVE: such a condition never matches (CPU-host posture; registered debt).
     pub(crate) unmodeled: bool,
+    /// `constraint_values =` labels (`@platforms//os:x`), matched against the REAL host.
+    pub(crate) constraint_values: Vec<String>,
 }
 
 impl ConfigSpec {
@@ -294,7 +296,17 @@ impl ConfigSpec {
                 return Ok(false);
             }
         }
-        Ok(self.define_values.iter().all(|(k, v)| has_define(k, v)))
+        if !self.define_values.iter().all(|(k, v)| has_define(k, v)) {
+            return Ok(false);
+        }
+        // constraint_values: every listed @platforms constraint must hold on the REAL host.
+        Ok(self.constraint_values.iter().all(|c| {
+            c.strip_prefix("@platforms//")
+                .and_then(|rest| rest.split_once(':'))
+                .map(|(pkg, name)| host_constraint_matches(pkg, name))
+                // Non-@platforms constraint families: conservative non-match.
+                .unwrap_or(false)
+        }))
     }
 
     /// All constraints as one comparable set (for the most-specialized-wins rule).

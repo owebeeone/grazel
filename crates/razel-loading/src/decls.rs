@@ -80,6 +80,30 @@ where
             .unwrap_or_default()
             .to_string();
         let label = canon_label(sess, &name);
+        // Output-file labels resolve statically (Bazel): register `attr.output`/`output_list`
+        // values in the output index at DECLARE time, like genrule outs.
+        if let Ok((_, attrs, _)) = rule_parts(me)
+            && let Some(schema) = starlark::values::dict::DictRef::from_value(attrs)
+        {
+            for (k, v) in &kwargs {
+                let kind = schema
+                    .iter()
+                    .find(|(kk, _)| kk.unpack_str() == Some(k.as_str()))
+                    .and_then(|(_, d)| d.get_attr("kind", eval.heap()).ok().flatten())
+                    .and_then(|x| x.unpack_str().map(String::from))
+                    .unwrap_or_default();
+                if kind == "output" || kind == "output_list" {
+                    let outs: Vec<String> = match v.unpack_str() {
+                        Some(s) => vec![s.to_string()],
+                        None => crate::values::unpack_strs_any(Some(*v)),
+                    };
+                    let mut idx = sess.output_index.borrow_mut();
+                    for o in outs {
+                        idx.insert(canon_label(sess, &o), (label.clone(), qualify(sess, &o)));
+                    }
+                }
+            }
+        }
         let store = decl_store(eval)?;
         let idx = {
             let mut decls = store.decls.borrow_mut();
@@ -799,6 +823,14 @@ fn resolve_label_attr_inner<'v>(
                             }
                             None => (false, dep.clone()),
                         }
+                    } else if let Some(rest) = dep.strip_prefix("//") {
+                        // A workspace file label from ANY package: `//pkg:file` → `pkg/file`.
+                        let q = rest.replacen(':', "/", 1);
+                        let exists = sess
+                            .workspace
+                            .as_ref()
+                            .is_some_and(|root| root.join(&q).is_file());
+                        (exists, q)
                     } else {
                         let q = qualify(sess, label.trim_start_matches(':'));
                         let exists = sess

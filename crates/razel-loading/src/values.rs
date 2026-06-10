@@ -452,6 +452,8 @@ impl<'v> StarlarkValue<'v> for File {
         let base = p.rsplit('/').next().unwrap_or(p);
         match name {
             "path" => Some(heap.alloc(p.to_string())),
+            // Loading-grade: declared outputs/sources are files, not tree artifacts.
+            "is_directory" => Some(Value::new_bool(false)),
             // Bazel short_path: external files are `../<repo>/<pkg>/<file>`.
             "short_path" => Some(match p.strip_prefix("external/") {
                 Some(rest) => heap.alloc(format!("../{rest}")),
@@ -584,6 +586,89 @@ pub(crate) fn extract_files(v: Value) -> Vec<String> {
 /// `Option<UnpackList<T>>` -> `Vec<T>` (an omitted Starlark list attr means empty). A value helper.
 pub(crate) fn unpack(list: Option<UnpackList<String>>) -> Vec<String> {
     list.map(|l| l.items).unwrap_or_default()
+}
+
+/// A native-rule list attr captured as PLAIN DATA (native bodies can't hold Values): either a
+/// stringified list, or select branches deferred to analysis time (Bazel's model — conditions
+/// may be declared later in the file).
+#[derive(Clone, Debug)]
+pub(crate) enum StrAttrPart {
+    Plain(Vec<String>),
+    Branches(Vec<(String, Vec<String>)>),
+}
+
+/// Decompose a native-rule attr value into [`StrAttrPart`]s at DECLARE time.
+pub(crate) fn str_attr_parts<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    v: Option<Value<'v>>,
+) -> anyhow::Result<Vec<StrAttrPart>> {
+    let Some(r) = v else { return Ok(Vec::new()) };
+    let heap = eval.heap();
+    let strs = |xs: Value<'v>| -> Vec<String> { unpack_strs_any(Some(xs)) };
+    let branches = |pairs: &[(Value<'v>, Value<'v>)]| -> anyhow::Result<StrAttrPart> {
+        let mut out = Vec::new();
+        for (k, val) in pairs {
+            let cond = crate::selects::key_string(heap, *k)
+                .ok_or_else(|| anyhow::anyhow!("select(): condition key is not a label"))?;
+            out.push((cond, strs(*val)));
+        }
+        Ok(StrAttrPart::Branches(out))
+    };
+    let decompose_one = |part: Value<'v>| -> anyhow::Result<StrAttrPart> {
+        if let Some(b) = part.downcast_ref::<crate::selects::SelectBranches>() {
+            branches(&b.branches)
+        } else if let Some(b) = part.downcast_ref::<crate::selects::FrozenSelectBranches>() {
+            let pairs: Vec<(Value<'v>, Value<'v>)> =
+                b.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect();
+            branches(&pairs)
+        } else {
+            Ok(StrAttrPart::Plain(strs(part)))
+        }
+    };
+    if let Some(e) = r.downcast_ref::<crate::selects::SelectExpr>() {
+        e.parts.iter().map(|p| decompose_one(*p)).collect()
+    } else if let Some(e) = r.downcast_ref::<crate::selects::FrozenSelectExpr>() {
+        e.parts.iter().map(|p| decompose_one(p.to_value())).collect()
+    } else {
+        Ok(vec![decompose_one(r)?])
+    }
+}
+
+/// Resolve [`StrAttrPart`]s at ANALYSIS time (all conditions declared by now): reconstruct the
+/// branch pairs and reuse `pick_branch` (full Bazel semantics — specialization, default).
+pub(crate) fn resolve_str_parts<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    parts: &[StrAttrPart],
+) -> anyhow::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for part in parts {
+        match part {
+            StrAttrPart::Plain(xs) => out.extend(xs.iter().cloned()),
+            StrAttrPart::Branches(br) => {
+                let heap = eval.heap();
+                let pairs: Vec<(Value<'v>, Value<'v>)> = br
+                    .iter()
+                    .map(|(k, xs)| (heap.alloc(k.as_str()), heap.alloc(xs.clone())))
+                    .collect();
+                let picked = crate::selects::pick_branch(eval, &pairs, false, true)?
+                    .unwrap_or_else(Value::new_none);
+                out.extend(unpack_strs_any(Some(picked)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Unpack a `srcs`-style value that may be a LIST or a DEPSET (TF macros pass both),
+/// elements string|Label|File — each stringifies to its label/path form.
+pub(crate) fn unpack_strs_any<'v>(v: Option<Value<'v>>) -> Vec<String> {
+    v.map(|v| {
+        flatten_values(v)
+            .into_iter()
+            .map(|e| e.unpack_str().map(String::from).unwrap_or_else(|| file_path(e)))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Unpack a `srcs`-style list whose elements may be strings OR Label values

@@ -80,6 +80,35 @@ pub(crate) fn resolve_dep<'v>(
     }
     let results = sess.results.borrow();
     let Some(t) = results.get(&canon) else {
+        drop(results);
+        // Bazel file-label semantics: a label naming no declared target resolves to a SOURCE
+        // FILE when it exists (mirrors the deps-arm fallback). External labels check the
+        // vendored repo (exec-root path form).
+        let on_disk = if let Some(rest) = canon.strip_prefix('@') {
+            rest.split_once("//")
+                .and_then(|(r, pf)| pf.split_once(':').map(|(p, f)| (r, p, f)))
+                .and_then(|(repo, pkg, file)| {
+                    sess.global.external_base.as_ref().and_then(|base| {
+                        [repo.to_string(), repo.replace('_', "-")]
+                            .iter()
+                            .find(|d| base.join(d).join(pkg).join(file).is_file())
+                            .map(|_| format!("external/{repo}/{pkg}/{file}"))
+                    })
+                })
+        } else {
+            canon.strip_prefix("//").and_then(|rest| {
+                rest.split_once(':').and_then(|(p, f)| {
+                    let rel = format!("{p}/{f}");
+                    sess.workspace
+                        .as_ref()
+                        .filter(|root| root.join(&rel).is_file())
+                        .map(|_| rel)
+                })
+            })
+        };
+        if let Some(path) = on_disk {
+            return Ok(DepInfo { libs: vec![path], canon, fields: Default::default() });
+        }
         return Err(anyhow::anyhow!(
             "dep `{label}` not analyzed — declare it before its users (cyclic or missing package)"
         ));
