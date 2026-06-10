@@ -40,6 +40,8 @@ pub(crate) struct Ctx<'v> {
     files: Value<'v>,
     /// `ctx.executable.<name>` — the runnable output of an executable-label attr.
     executable: Value<'v>,
+    /// `ctx.toolchains[type]` — the registered host toolchain stand-ins (Layer 1; L3 resolves).
+    toolchains: Value<'v>,
 }
 
 
@@ -60,6 +62,7 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
             "outputs" => Some(self.outputs),
             "files" => Some(self.files),
             "executable" => Some(self.executable),
+            "toolchains" => Some(self.toolchains),
             _ => None,
         }
     }
@@ -239,6 +242,58 @@ impl<'v> StarlarkValue<'v> for LabelV {
             _ => None,
         }
     }
+}
+
+
+// ---- ctx.toolchains (Layer 1) ------------------------------------------------------------------
+
+
+/// `ctx.toolchains` — type-label → toolchain stand-in (the registered host rows; real
+/// `rule(toolchains=)`-driven RESOLUTION is L3). Supports `ctx.toolchains[type]` and
+/// `type in ctx.toolchains`; keys are strings or `Label`s.
+#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
+pub(crate) struct ToolchainMap<'v> {
+    entries: Vec<(String, Value<'v>)>,
+}
+
+impl fmt::Display for ToolchainMap<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<toolchains>")
+    }
+}
+
+#[starlark_value(type = "toolchain_map")]
+impl<'v> StarlarkValue<'v> for ToolchainMap<'v> {
+    fn at(&self, index: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        let Some(key) = key_string(heap, index) else {
+            return Err(starlark::Error::new_other(anyhow::anyhow!(
+                "toolchain key must be a label"
+            )));
+        };
+        self.entries
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .ok_or_else(|| {
+                starlark::Error::new_other(anyhow::anyhow!(
+                    "no toolchain registered for `{key}` (razel host rows: toolchains.rs)"
+                ))
+            })
+    }
+    fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
+        // `key in ctx.toolchains` — key stringification without a heap: strings + LabelV display.
+        let key = other
+            .unpack_str()
+            .map(String::from)
+            .or_else(|| other.downcast_ref::<LabelV>().map(|l| l.to_string()));
+        Ok(key.is_some_and(|k| self.entries.iter().any(|(e, _)| *e == k)))
+    }
+}
+
+/// Build the ctx.toolchains map from the registered host rows.
+pub(crate) fn toolchain_map<'v>(heap: Heap<'v>) -> Value<'v> {
+    let entries = crate::toolchains::toolchain_rows(heap);
+    heap.alloc_complex_no_freeze(ToolchainMap { entries })
 }
 
 
@@ -1023,6 +1078,7 @@ fn analyze_rule_decl<'v>(
             outputs: heap.alloc(AllocStruct(outputs_fields)),
             files: heap.alloc(AllocStruct(files_fields)),
             executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
+            toolchains: toolchain_map(heap),
         });
     let ret = eval.eval_function(implementation, &[ctx], &[])?;
 

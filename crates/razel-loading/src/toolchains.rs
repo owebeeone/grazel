@@ -22,3 +22,19 @@ pub(crate) fn resolve_toolchain(name: &str) -> Result<FeatureConfig, String> {
         )),
     }
 }
+
+/// The `ctx.toolchains` host rows (Layer 1): type label → a stand-in struct whose fields grow
+/// probe-step by probe-step as real impls touch them. Registration site — naming toolchain types
+/// here is the point (allowlisted). Real `rule(toolchains=)` resolution is L3.
+pub(crate) fn toolchain_rows<'v>(
+    heap: starlark::values::Heap<'v>,
+) -> Vec<(String, starlark::values::Value<'v>)> {
+    use starlark::values::structs::AllocStruct;
+    let empty = |heap: starlark::values::Heap<'v>| {
+        heap.alloc(AllocStruct(Vec::<(String, starlark::values::Value<'v>)>::new()))
+    };
+    vec![
+        ("@rules_rust//rust:toolchain_type".to_string(), empty(heap)),
+        ("@bazel_tools//tools/cpp:toolchain_type".to_string(), empty(heap)),
+    ]
+}
