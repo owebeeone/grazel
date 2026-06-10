@@ -475,3 +475,24 @@ bootstrap process_wrapper resolves to direct rustc at the run boundary (executor
 resolution, same seam as cc_wrapper.sh). Run outputs land in the vendored tree for now —
 an execroot sandbox is the rungold's next hygiene item. 60 bins; 3 gates; 6 sentinels;
 rungold = 2 ecosystems.
+
+## Round delta — razelV3 round 17 (2026-06-11, perf session)
+
+**The load+parse / eval split experiment (Gianni's): parallel read+parse of all 835 BUILD
+files = 28ms on 12 threads; eval = 489s. Hypothesis falsified usefully — parse is 0.006% of
+the sweep; ALL the cost is eval.** Parallelism therefore means parallelizing eval (the
+Skyframe-shaped worker-pool + concurrent-session design), not file loading. Machinery kept:
+Session.ast_cache + prepare_build_asts (pure, parallel) + load_tree_report_prepared.
+
+**Perf history this session:** debug sweep never finished (>14.5min) → profiler (macOS
+`sample`) showed the DDS per-edge transitive refold dominating (BTreeMap composite-key
+compares; diamond quadratic) → fold memo + harvest index + warn-once + RELEASE build →
+2:42 complete. Then the llvm vars.bzl/targets.bzl fixes OPENED deep llvm/mlir walks:
+8:10 total, sys-time ×5 — cost scales with walk depth, not package count (and the sys share
+says glob/stat churn in the llvm tree wants a sample of its own).
+
+**Coverage:** 236/835 (28.3%). Clean top classes now: iter-on-None in the gentbl path (123
+pkgs — one bug), BuildSettingInfo value flow (36), @pypi (35), Label.repo_name (11).
+Round fixes: llvm configure outputs generated (vars/targets/bolt — ported from
+llvm_configure); flatbuffers vendored; $(STACK_FRAME_UNLIMITED); ctx.file single-string
+attrs; ctx.outputs defaulting namespace; tfload classifier + RAZEL_TFLOAD_ONE debug mode.

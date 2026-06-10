@@ -2,7 +2,7 @@
 //! one shared session, and report the coverage curve + the top failure classes — the
 //! checkpoint-3 yardstick. A package = a directory with a BUILD file.
 
-use razel_loading::{GlobalFlags, load_tree_report};
+use razel_loading::{GlobalFlags, load_tree_report, load_tree_report_prepared, prepare_build_asts};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -27,25 +27,39 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     packages.dedup();
     let mut flags = GlobalFlags::default();
     flags.external_base = Some(root.join("../third-party"));
+    // RAZEL_TFLOAD_ONE=<pkg>: print one package's FULL error (debugging a failure class).
+    if let Ok(one) = std::env::var("RAZEL_TFLOAD_ONE") {
+        let report = load_tree_report(&ws, flags, &[one.clone()]);
+        match &report[0].1 {
+            Ok(()) => println!("{one}: OK"),
+            Err(e) => println!("{one}: FAIL
+{e}"),
+        }
+        return Ok(());
+    }
     let total = packages.len();
-    let report = load_tree_report(&ws, flags, &packages);
+    // Load+parse / execute split: the pure half parallelizes; eval consumes the AST cache.
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+    let t0 = std::time::Instant::now();
+    let asts = prepare_build_asts(&ws, &packages, threads);
+    let parse_ms = t0.elapsed().as_millis();
+    let t1 = std::time::Instant::now();
+    let report = load_tree_report_prepared(&ws, flags, &packages, asts);
+    println!(
+        "phases: parallel read+parse {parse_ms}ms ({threads} threads), eval {}ms",
+        t1.elapsed().as_millis()
+    );
     let ok = report.iter().filter(|(_, r)| r.is_ok()).count();
     // Failure classes: first line, trimmed to a coarse signature.
     let mut classes: BTreeMap<String, (usize, String)> = BTreeMap::new();
     for (pkg, r) in &report {
         if let Err(e) = r {
-            // Signature = the LAST `error:`-ish line (the deepest cause), not caret art.
+            // Signature = the LAST line carrying an error message (not caret/source art).
             let line = e
                 .lines()
                 .rev()
-                .find(|l| {
-                    let t = l.trim();
-                    !t.is_empty()
-                        && !t.starts_with('|')
-                        && !t.starts_with('^')
-                        && !t.starts_with("-->")
-                        && !t.chars().all(|c| c.is_ascii_digit() || c == ' ' || c == '|')
-                })
+                .find(|l| l.contains("error") || l.contains("failed") || l.contains("not "))
+                .or_else(|| e.lines().next())
                 .unwrap_or(e)
                 .trim();
             let sig: String = line.chars().take(90).collect();

@@ -402,8 +402,11 @@ fn eval_build_src_inner(
     globals: &Globals,
     drive_all: bool,
 ) -> Result<(), String> {
-    let ast =
-        AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
+    let ast = match session.ast_cache.borrow_mut().remove(name) {
+        Some(ast) => ast,
+        None => AstModule::parse(name, src.to_owned(), &Dialect::Extended)
+            .map_err(|e| format!("{e}"))?,
+    };
     Module::with_temp_heap(|module| {
         crate::dialect::install_decl_store(&module);
         {
@@ -526,12 +529,18 @@ fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), S
             .ok_or("load_package called outside workspace mode")?
             .join(pkg)
     };
-    let build_path = ["BUILD", "BUILD.bazel"]
-        .iter()
-        .map(|f| pkg_dir.join(f))
-        .find(|p| p.exists())
-        .ok_or_else(|| format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))?;
-    let src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
+    // Pre-parsed AST present? Skip BOTH the read and the parse (the parallel pre-pass).
+    let prepared = sess.ast_cache.borrow().contains_key(&format!("{pkg}/BUILD"));
+    let src = if prepared {
+        String::new()
+    } else {
+        let build_path = ["BUILD", "BUILD.bazel"]
+            .iter()
+            .map(|f| pkg_dir.join(f))
+            .find(|p| p.exists())
+            .ok_or_else(|| format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))?;
+        std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?
+    };
 
     // Short borrows around the nested eval (the [R1] discipline): set current_pkg, drop the
     // borrow, recurse, then restore — never hold a Session borrow across `eval_build_src`.
@@ -579,11 +588,61 @@ pub fn load_tree_report(
     flags: GlobalFlags,
     packages: &[String],
 ) -> Vec<(String, Result<(), String>)> {
+    load_tree_report_prepared(root, flags, packages, Vec::new())
+}
+
+/// `load_tree_report` with PRE-PARSED BUILD ASTs (from [`prepare_build_asts`]): the load+parse
+/// half runs in parallel; the eval half stays sequential and consumes the cache.
+pub fn load_tree_report_prepared(
+    root: &Path,
+    flags: GlobalFlags,
+    packages: &[String],
+    asts: Vec<(String, starlark::syntax::AstModule)>,
+) -> Vec<(String, Result<(), String>)> {
     let session = Session::new(Some(root.to_path_buf()), flags);
+    session.ast_cache.borrow_mut().extend(asts);
     packages
         .iter()
         .map(|pkg| (pkg.clone(), load_package_entry(&session, pkg)))
         .collect()
+}
+
+/// PARALLEL read+parse of the packages' BUILD files (pure — no Session state): the
+/// load+parse / execute split. Returns `({pkg}/BUILD, ast)` pairs; unparseable files are
+/// skipped (the sequential path re-reads and surfaces the error properly).
+pub fn prepare_build_asts(
+    root: &Path,
+    packages: &[String],
+    threads: usize,
+) -> Vec<(String, starlark::syntax::AstModule)> {
+    let n = threads.max(1);
+    let chunks: Vec<&[String]> = packages.chunks(packages.len().div_ceil(n)).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut out = Vec::new();
+                    for pkg in chunk {
+                        let Some(path) = ["BUILD", "BUILD.bazel"]
+                            .iter()
+                            .map(|f| root.join(pkg).join(f))
+                            .find(|p| p.exists())
+                        else {
+                            continue;
+                        };
+                        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+                        let name = format!("{pkg}/BUILD");
+                        if let Ok(ast) = AstModule::parse(&name, src, &Dialect::Extended) {
+                            out.push((name, ast));
+                        }
+                    }
+                    out
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    })
 }
 
 

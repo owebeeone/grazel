@@ -147,6 +147,9 @@ pub(crate) struct Session {
     /// Per-target transitive-fold memo (label → folded fields). The DDS fold was the tree-sweep
     /// hotspot: every dep edge re-walked its transitive closure; diamonds made it quadratic.
     pub(crate) fold_cache: RefCell<std::collections::HashMap<String, Vec<(String, Vec<String>)>>>,
+    /// Pre-parsed BUILD ASTs (key = the eval name, `{pkg}/BUILD`): read+parse is pure and
+    /// parallelizes across files; the sequential eval consumes them (load+parse / execute split).
+    pub(crate) ast_cache: RefCell<std::collections::HashMap<String, starlark::syntax::AstModule>>,
     /// Layer 0: harvested provider instances from COMPLETED packages (one frozen dict per
     /// package: canonical label → [(constructor, instance)]). OwnedFrozenValues keep their
     /// heaps alive; `dep[P]` falls back here for cross-package instances.

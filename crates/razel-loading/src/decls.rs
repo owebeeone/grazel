@@ -1118,13 +1118,19 @@ pub(crate) fn analyze_rule_decl<'v>(
     let files_fields: Vec<(String, Value<'v>)> = kwargs
         .iter()
         .filter_map(|(k, v)| {
-            ListRef::from_value(*v).map(|list| {
+            if let Some(list) = ListRef::from_value(*v) {
                 let items: Vec<Value<'v>> = list
                     .iter()
                     .filter_map(|it| it.unpack_str().map(mk_file))
                     .collect();
-                (k.clone(), heap.alloc(items))
-            })
+                Some((k.clone(), heap.alloc(items)))
+            } else {
+                // Single-string label attrs feed ctx.file.<attr> too (gentbl's td_file).
+                v.unpack_str().map(|s| {
+                    let one: Vec<Value<'v>> = vec![mk_file(s)];
+                    (k.clone(), heap.alloc(one))
+                })
+            }
         })
         .collect();
     let ctx = heap.alloc_complex_no_freeze(Ctx {
@@ -1142,7 +1148,11 @@ pub(crate) fn analyze_rule_decl<'v>(
                 };
                 heap.alloc(LabelV { repo, package: pkg, name: name.clone() })
             },
-            outputs: heap.alloc(AllocStruct(outputs_fields)),
+            // Defaulting namespace: an OMITTED output_list attr reads as [] (Bazel: the
+            // declared-outputs view; gentbl's additional_outputs).
+            outputs: heap.alloc_complex_no_freeze(crate::ctxv::FilesNs {
+                fields: outputs_fields,
+            }),
             files: heap.alloc_complex_no_freeze(crate::ctxv::FilesNs {
                 fields: files_fields.clone(),
             }),
@@ -1151,6 +1161,8 @@ pub(crate) fn analyze_rule_decl<'v>(
                 (heap.alloc("COMPILATION_MODE"), heap.alloc(sess.global.mode())),
                 (heap.alloc("TARGET_CPU"), heap.alloc(crate::state::host_cpu())),
                 (heap.alloc("BINDIR"), heap.alloc("bazel-out/bin")),
+                // Standard cc-toolchain Make vars (host-true: empty on this platform).
+                (heap.alloc("STACK_FRAME_UNLIMITED"), heap.alloc("")),
             ])),
             executable: heap.alloc_complex_no_freeze(crate::ctxv::ExecNs { fields: Vec::new() }),
             toolchains: toolchain_map(heap),
