@@ -115,9 +115,10 @@ pub(crate) struct Session {
     /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
     /// `Value`s — so they need no GC tracing and can live on the Session).
     pub(crate) native_decls: RefCell<Vec<Option<NativeAnalyzeFn>>>,
-    /// The repo of the `.bzl` module currently being loaded (BzlLoader-maintained stack;
-    /// `None` frames = workspace modules). `Label()` written in `@repo` code resolves against it.
-    pub(crate) current_bzl_repo: RefCell<Vec<Option<String>>>,
+    /// The (repo, pkg) of the module currently being loaded/evaluated (BzlLoader + BUILD-eval
+    /// maintained; repo == "" ⇒ the main workspace). String labels written in module code —
+    /// `Label()`, select keys, attr DEFAULTS — bind against it (Bazel's lexical binding).
+    pub(crate) current_bzl_repo: RefCell<Vec<Option<(String, String)>>>,
     /// `alias()` targets (canonical name → canonical actual) — conditions resolve through them.
     pub(crate) aliases: RefCell<BTreeMap<String, String>>,
     /// Declared `config_setting` specs by canonical label — what `select()` matches (razelV3).

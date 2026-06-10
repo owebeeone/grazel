@@ -31,7 +31,7 @@ pub(crate) fn rules_cc_module(mode: CcToolchainMode) -> Result<FrozenModule, Str
 
 /// Native: `cc_binary`/`cc_library` are razel's native rules (executable, host compiler).
 pub(crate) fn rules_cc_module_native() -> Result<FrozenModule, String> {
-    let globals = GlobalsBuilder::standard().with(cc_rules).with(crate::dialect::rule_globals).build();
+    let globals = GlobalsBuilder::standard().with(crate::rules::engine_namespaces).with(cc_rules).with(crate::dialect::rule_globals).build();
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse(
             "@rules_cc",
@@ -56,7 +56,7 @@ pub(crate) fn rules_cc_module_native() -> Result<FrozenModule, String> {
 /// golden exists (Phase E). Bundling versions razel's two cc halves (Rust builtins + this `.bzl`)
 /// atomically with the binary.
 pub(crate) fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
-    let globals = GlobalsBuilder::standard()
+    let globals = GlobalsBuilder::standard().with(crate::rules::engine_namespaces)
         .with(cc_rules) // native_cc_binary (cc_binary's backend until Phase E)
         .with(rule_globals) // rule(), CcInfo, DefaultInfo, depset, …
         .with(|b| {
@@ -88,7 +88,7 @@ pub(crate) fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
 /// the golden is Phase D (the structural diff pins the action SHAPE — see tests/java_graph_parity.rs).
 pub(crate) fn rules_java_module() -> Result<FrozenModule, String> {
     // the razel_build namespace so java_defs.bzl can use razel_build.action (C1b — engine surface).
-    let globals = GlobalsBuilder::standard()
+    let globals = GlobalsBuilder::standard().with(crate::rules::engine_namespaces)
         .with(rule_globals)
         .with(|b| {
             b.namespace("razel_build", razel_build_members);
@@ -200,7 +200,7 @@ pub(crate) fn skylib_rules(b: &mut GlobalsBuilder) {
 /// The synthetic `@bazel_skylib` module — re-exports the skylib rules under their
 /// load names.
 pub(crate) fn rules_skylib_module() -> Result<FrozenModule, String> {
-    let globals = GlobalsBuilder::standard().with(skylib_rules).build();
+    let globals = GlobalsBuilder::standard().with(crate::rules::engine_namespaces).with(skylib_rules).build();
     let reexport = "bzl_library = native_bzl_library\n\
 build_test = native_build_test\n\
 diff_test = native_diff_test\n\
@@ -244,7 +244,7 @@ pub(crate) fn auto_config_fns(b: &mut GlobalsBuilder) {
 /// A synthetic auto-config repo module: maps every `if_<x>_is_configured` name to the
 /// not-configured helper.
 pub(crate) fn auto_config_module(reexport: &str) -> Result<FrozenModule, String> {
-    let globals = GlobalsBuilder::standard().with(auto_config_fns).build();
+    let globals = GlobalsBuilder::standard().with(crate::rules::engine_namespaces).with(auto_config_fns).build();
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse("@local_config", reexport.to_owned(), &Dialect::Extended)
             .map_err(|e| format!("{e}"))?;

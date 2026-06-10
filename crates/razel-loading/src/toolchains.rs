@@ -36,5 +36,6 @@ pub(crate) fn toolchain_rows<'v>(
     vec![
         ("@rules_rust//rust:toolchain_type".to_string(), empty(heap)),
         ("@bazel_tools//tools/cpp:toolchain_type".to_string(), empty(heap)),
+        ("@com_google_protobuf//bazel/private:proto_toolchain_type".to_string(), empty(heap)),
     ]
 }

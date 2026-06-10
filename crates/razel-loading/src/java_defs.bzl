@@ -98,3 +98,8 @@ def compile(*args, **kwargs):
 
 def merge(*args, **kwargs):
     return None
+
+# Further load-surface symbols real rulesets import from @rules_java (protobuf, android-adjacent).
+ProguardSpecInfo = provider(fields = ["specs"])
+JavaPluginInfo = provider(fields = ["plugins"])
+java_common = razel_host_absorb

@@ -244,10 +244,7 @@ impl FileLoader for BzlLoader<'_> {
         };
 
         // The nested eval runs with this module's repo context on the stack (popped even on error).
-        self.session
-            .current_bzl_repo
-            .borrow_mut()
-            .push(ctx.as_ref().map(|(r, _)| r.clone()));
+        self.session.current_bzl_repo.borrow_mut().push(ctx.clone());
         self.load_ctx.borrow_mut().push(ctx);
         let frozen = Module::with_temp_heap(|module| -> starlark::Result<FrozenModule> {
             let ast = AstModule::parse(path, src, &Dialect::Extended)?;
@@ -340,10 +337,7 @@ pub(crate) fn eval_build_src_in(
         session,
         load_ctx: RefCell::new(vec![repo_ctx.clone()]),
     };
-    session
-        .current_bzl_repo
-        .borrow_mut()
-        .push(repo_ctx.as_ref().map(|(r, _)| r.clone()));
+    session.current_bzl_repo.borrow_mut().push(repo_ctx.clone());
     let result = eval_build_src_inner(session, name, src, &loader, &globals, drive_all);
     session.current_bzl_repo.borrow_mut().pop();
     return result;

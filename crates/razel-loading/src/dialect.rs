@@ -42,6 +42,8 @@ pub(crate) struct Ctx<'v> {
     executable: Value<'v>,
     /// `ctx.toolchains[type]` — the registered host toolchain stand-ins (Layer 1; L3 resolves).
     toolchains: Value<'v>,
+    /// `ctx.build_setting_value` — the declared `build_setting_default` (no flag overrides yet).
+    build_setting_value: Value<'v>,
 }
 
 /// Absorbed ctx members (`fragments`, …): any access resolves; surfaces only at real use.
@@ -69,6 +71,7 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
             "executable" => Some(self.executable),
             "toolchains" => Some(self.toolchains),
             "fragments" | "configuration" => Some(ctx_absorb(_heap)),
+            "build_setting_value" => Some(self.build_setting_value),
             _ => None,
         }
     }
@@ -212,9 +215,9 @@ fn expand_genrule_cmd(
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct LabelV {
     /// `Some("@xla")` for an external-repo label; `None` = the main workspace.
-    repo: Option<String>,
-    package: String,
-    name: String,
+    pub(crate) repo: Option<String>,
+    pub(crate) package: String,
+    pub(crate) name: String,
 }
 starlark::starlark_simple_value!(LabelV);
 
@@ -1219,6 +1222,11 @@ fn analyze_rule_decl<'v>(
             files: heap.alloc(AllocStruct(files_fields)),
             executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
             toolchains: toolchain_map(heap),
+            build_setting_value: kwargs
+                .iter()
+                .find(|(k, _)| k == "build_setting_default")
+                .map(|(_, v)| *v)
+                .unwrap_or_else(Value::new_none),
         });
     let ret = eval.eval_function(implementation, &[ctx], &[])?;
 
@@ -1661,7 +1669,8 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                     .last()
                     .cloned()
                     .flatten()
-                    .map(|r| format!("@{r}"))
+                    .filter(|(r, _)| !r.is_empty())
+                    .map(|(r, _)| format!("@{r}"))
             })
         };
         Ok(eval.heap().alloc(LabelV { repo, package: pkg, name }))
@@ -1690,6 +1699,59 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// `config_setting`/`test_suite`/`alias` carry no buildable output here, so they
     /// record an empty target under their label (analysis-visible, builds to nothing);
     /// `filegroup` forwards its `srcs` as its outputs so dependents resolve them.
+    /// `toolchain(...)` / `toolchain_type(...)` — toolchain registration targets (declare-only;
+    /// resolution is L3).
+    fn toolchain<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+    fn toolchain_type<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+
+    /// `label_flag`/`label_setting` — build-setting label flags as BUILD globals (declare-only).
+    fn label_flag<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+    fn label_setting<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+
     /// `genrule(name, srcs, outs, cmd)` — Bazel's generic shell rule (razelV3): ONE bash action
     /// running `cmd` after Make-variable expansion (`$@`/`$<`/`$(SRCS)`/`$(OUTS)`/`$(location)`;
     /// `$$` escapes). A src that is a label resolves to its files (demand-driven, E0c-deferred).
@@ -1922,7 +1984,14 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         };
         // Bazel binds select KEYS at the call site: a string key written in `@repo` code is a
         // label in THAT repo. Capture the repo now (the context is gone by analysis time).
-        let bzl_repo = session(eval).current_bzl_repo.borrow().last().cloned().flatten();
+        let bzl_repo = session(eval)
+            .current_bzl_repo
+            .borrow()
+            .last()
+            .cloned()
+            .flatten()
+            .filter(|(r, _)| !r.is_empty())
+            .map(|(r, _)| r);
         let pairs: Vec<(Value<'v>, Value<'v>)> = d
             .iter()
             .map(|(k, v)| {

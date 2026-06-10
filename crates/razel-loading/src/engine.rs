@@ -310,7 +310,25 @@ fn attr_descriptor<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> Value<'v> {
     let heap = eval.heap();
-    let default = kw.get("default").copied().unwrap_or_else(Value::new_none);
+    let mut default = kw.get("default").copied().unwrap_or_else(Value::new_none);
+    // A label-kind STRING default binds lexically — to the module defining the rule (Bazel
+    // semantics; protobuf's proto_library defaults `//bazel/flags:…` mean protobuf's repo).
+    if (kind == "label" || kind == "label_list")
+        && let Some(ds) = default.unpack_str()
+        && (ds.starts_with("//") || ds.starts_with(':'))
+        && let Some(Some((repo, pkg))) =
+            session(eval).current_bzl_repo.borrow().last().cloned().map(Some).flatten()
+    {
+        let (p, n) = if let Some(rest) = ds.strip_prefix("//") {
+            rest.split_once(':')
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .unwrap_or((rest.to_string(), rest.rsplit('/').next().unwrap_or(rest).to_string()))
+        } else {
+            (pkg.clone(), ds.trim_start_matches(':').to_string())
+        };
+        let r = if repo.is_empty() { None } else { Some(format!("@{repo}")) };
+        default = heap.alloc(crate::dialect::LabelV { repo: r, package: p, name: n });
+    }
     let mandatory = kw.get("mandatory").and_then(|v| v.unpack_bool()).unwrap_or(false);
     heap.alloc(starlark::values::structs::AllocStruct([
         ("kind".to_string(), heap.alloc(kind)),
