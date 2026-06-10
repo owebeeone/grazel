@@ -31,11 +31,14 @@ pub(crate) fn rules_cc_module(mode: CcToolchainMode) -> Result<FrozenModule, Str
 
 /// Native: `cc_binary`/`cc_library` are razel's native rules (executable, host compiler).
 pub(crate) fn rules_cc_module_native() -> Result<FrozenModule, String> {
-    let globals = GlobalsBuilder::standard().with(cc_rules).build();
+    let globals = GlobalsBuilder::standard().with(cc_rules).with(crate::dialect::rule_globals).build();
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse(
             "@rules_cc",
-            "cc_binary = native_cc_binary\ncc_library = native_cc_library\n".to_owned(),
+            "cc_binary = native_cc_binary\ncc_library = native_cc_library\n\
+             def _cc_import_impl(ctx):\n    return [DefaultInfo(files = [])]\n\
+             cc_import = rule(implementation = _cc_import_impl, attrs = {})\n"
+                .to_owned(),
             &Dialect::Extended,
         )
         .map_err(|e| format!("{e}"))?;

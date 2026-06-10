@@ -78,3 +78,12 @@ def _java_library_impl(ctx):
     return [DefaultInfo(files = [jar])]
 
 java_library = rule(implementation = _java_library_impl, attrs = {})
+
+# Loading-grade java rules (TF imports the symbols; razel's java fidelity is library-level).
+# Declare-only impls: DefaultInfo, no actions — registered debt (RazelGaps: java breadth).
+def _java_stub_impl(ctx):
+    return [DefaultInfo(files = [])]
+
+java_test = rule(implementation = _java_stub_impl, attrs = {})
+java_binary = rule(implementation = _java_stub_impl, attrs = {})
+java_import = rule(implementation = _java_stub_impl, attrs = {})

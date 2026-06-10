@@ -18,6 +18,30 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
             include_str!("../host-repos/bazel_tools/tools/cpp/toolchain_utils.bzl"),
         ),
         (
+            "@local_config_cuda//cuda:build_defs.bzl",
+            include_str!("../host-repos/local_config_cuda/cuda/build_defs.bzl"),
+        ),
+        (
+            "@tf_wheel_version_suffix//:wheel_version_suffix.bzl",
+            include_str!("../host-repos/tf_wheel_version_suffix/wheel_version_suffix.bzl"),
+        ),
+        (
+            "@local_config_remote_execution//:remote_execution.bzl",
+            include_str!("../host-repos/local_config_remote_execution/remote_execution.bzl"),
+        ),
+        (
+            "@local_config_rocm//rocm:build_defs.bzl",
+            include_str!("../host-repos/local_config_rocm/rocm/build_defs.bzl"),
+        ),
+        (
+            "@local_config_sycl//sycl:build_defs.bzl",
+            include_str!("../host-repos/local_config_sycl/sycl/build_defs.bzl"),
+        ),
+        (
+            "@local_config_tensorrt//:build_defs.bzl",
+            include_str!("../host-repos/local_config_tensorrt/build_defs.bzl"),
+        ),
+        (
             "@cc_compatibility_proxy//:symbols.bzl",
             include_str!("../host-repos/cc_compatibility_proxy/symbols.bzl"),
         ),

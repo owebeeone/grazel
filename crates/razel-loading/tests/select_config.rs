@@ -76,14 +76,35 @@ filegroup(name = "f", srcs = select({":opt": ["a.txt"]}))
     assert!(err.contains("matched no condition"), "no match + no default must error: {err}");
 }
 
+/// DEFERRED select (Bazel's model): a select over a not-yet-declared condition is a VALUE,
+/// resolved when an attr consumes it at analysis — by which time the condition exists (E0).
+/// Real `.bzl` (XLA's tsl.bzl) build module-level `list + select({...})` expressions.
 #[test]
-fn undeclared_condition_errors_clearly() {
-    // Eager resolution: conditions must be declared before the select that uses them (deferred
-    // select resolution is registered debt).
+fn deferred_select_resolves_at_analysis_with_concat() {
     let src = r#"
-filegroup(name = "f", srcs = select({":later": ["a.txt"], "//conditions:default": ["d.txt"]}))
-config_setting(name = "later", values = {"compilation_mode": "opt"})
+def _impl(ctx):
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = ctx.attr.copts)
+
+r = rule(implementation = _impl, attrs = {})
+flags_expr = ["-base"] + select({":opt_mode": ["-opt"], "//conditions:default": ["-noopt"]})
+r(name = "t", copts = flags_expr)
+config_setting(name = "opt_mode", values = {"compilation_mode": "opt"})
+"#;
+    let targets = analyze_bazel_with(src, flags("opt", &[])).unwrap();
+    let t = targets.iter().find(|t| t.name.ends_with("t")).unwrap();
+    assert_eq!(t.actions[0].argv[1..], ["-base".to_string(), "-opt".to_string()],
+        "concat + deferred resolution: {:?}", t.actions[0].argv);
+}
+
+#[test]
+fn truly_undeclared_condition_errors_at_analysis() {
+    let src = r#"
+def _impl(ctx):
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = ctx.attr.copts)
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "t", copts = select({":never": ["-x"], "//conditions:default": ["-d"]}))
 "#;
     let err = analyze_bazel_with(src, flags("opt", &[])).unwrap_err();
-    assert!(err.contains("config_setting"), "undeclared condition must error clearly: {err}");
+    assert!(err.contains("config_setting"), "never-declared condition errors at analysis: {err}");
 }

@@ -195,6 +195,185 @@ fn expand_genrule_cmd(
 }
 
 
+// ---- select: deferred values + resolution (Bazel's select-as-value model) ---------------------
+
+
+/// One deferred `select({...})`: raw (key, value) branch pairs, resolved at attr consumption.
+/// Freeze-generic — module-level selects in `.bzl` freeze with their module.
+#[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
+#[repr(C)]
+pub(crate) struct SelectBranchesGen<V: ValueLifetimeless> {
+    branches: Vec<(V, V)>,
+}
+starlark_complex_value!(SelectBranches);
+
+impl<V: ValueLifetimeless> fmt::Display for SelectBranchesGen<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "select({{…}})")
+    }
+}
+
+#[starlark_value(type = "select")]
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for SelectBranchesGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
+    /// `select({...}) + x` — a select expression (Bazel's concatenation).
+    fn add(&self, other: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
+        let me = heap.alloc_complex_no_freeze(SelectBranches {
+            branches: self.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect(),
+        });
+        Some(Ok(heap.alloc_complex_no_freeze(SelectExpr { parts: vec![me, other] })))
+    }
+    /// `x + select({...})`.
+    fn radd(&self, lhs: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
+        let me = heap.alloc_complex_no_freeze(SelectBranches {
+            branches: self.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect(),
+        });
+        Some(Ok(heap.alloc_complex_no_freeze(SelectExpr { parts: vec![lhs, me] })))
+    }
+}
+
+/// A select EXPRESSION: ordered parts (plain lists and selects) — `["-a"] + select({…}) + …`.
+/// Lives only within an eval scope (built in BUILD/macro expressions); resolution concatenates.
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Trace)]
+pub(crate) struct SelectExpr<'v> {
+    parts: Vec<Value<'v>>,
+}
+
+impl fmt::Display for SelectExpr<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "select-expr({} parts)", self.parts.len())
+    }
+}
+
+#[starlark_value(type = "select_expr")]
+impl<'v> StarlarkValue<'v> for SelectExpr<'v> {
+    fn add(&self, other: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
+        let mut parts = self.parts.clone();
+        parts.push(other);
+        Some(Ok(heap.alloc_complex_no_freeze(SelectExpr { parts })))
+    }
+    fn radd(&self, lhs: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
+        let mut parts = vec![lhs];
+        parts.extend(self.parts.iter().copied());
+        Some(Ok(heap.alloc_complex_no_freeze(SelectExpr { parts })))
+    }
+}
+
+/// A select condition key as a canonical-izable string: a string label or a `Label` struct
+/// (`.package`/`.name` — `clean_dep()` results in real `.bzl`).
+fn key_string<'v>(heap: Heap<'v>, key: Value<'v>) -> Option<String> {
+    if let Some(s) = key.unpack_str() {
+        return Some(s.to_string());
+    }
+    let pkg = key.get_attr("package", heap).ok()??.unpack_str()?.to_string();
+    let name = key.get_attr("name", heap).ok()??.unpack_str()?.to_string();
+    Some(format!("//{pkg}:{name}"))
+}
+
+/// Resolve a select's branches against the configuration. `defer_on_undeclared`: return
+/// `Ok(None)` when a condition isn't a declared config_setting (the caller defers); at analysis
+/// consumption it's `false` and undeclared conditions error loudly.
+fn pick_branch<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    pairs: &[(Value<'v>, Value<'v>)],
+    defer_on_undeclared: bool,
+) -> anyhow::Result<Option<Value<'v>>> {
+    let heap = eval.heap();
+    let mut default: Option<Value<'v>> = None;
+    let mut matches: Vec<(String, crate::state::ConfigSpec, Value<'v>)> = Vec::new();
+    for (k, v) in pairs {
+        let Some(cond) = key_string(heap, *k) else {
+            return Err(anyhow::anyhow!("select(): condition key is not a label"));
+        };
+        if cond == "//conditions:default" {
+            default = Some(*v);
+            continue;
+        }
+        let sess = session(eval);
+        let canon = canon_label(sess, &cond);
+        // Cross-package condition: load its package on demand (the borrow in the condition
+        // drops before the nested eval — the [R1] discipline).
+        if !sess.config_specs.borrow().contains_key(&canon)
+            && sess.workspace.is_some()
+            && let Some(pkg) = crate::state::pkg_of(&canon)
+        {
+            let _ = crate::rules::load_package(sess, &pkg);
+        }
+        let spec = match sess.config_specs.borrow().get(&canon).cloned() {
+            Some(s) => s,
+            None if defer_on_undeclared => return Ok(None),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "select(): `{cond}` is not a declared config_setting"
+                ));
+            }
+        };
+        if spec.matches(&sess.global).map_err(|e| anyhow::anyhow!(e))? {
+            matches.push((cond, spec, *v));
+        }
+    }
+    if matches.is_empty() {
+        return default
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow::anyhow!("select() matched no condition and has no //conditions:default")
+            });
+    }
+    // Most-specialized wins: the winner's constraint set must contain every other match's.
+    matches.sort_by_key(|(_, s, _)| std::cmp::Reverse(s.constraints().len()));
+    let win = matches[0].1.constraints();
+    for (cond, s, _) in &matches[1..] {
+        if !s.constraints().is_subset(&win) {
+            return Err(anyhow::anyhow!(
+                "select() is ambiguous: `{}` and `{cond}` both match and neither specializes \
+                 the other",
+                matches[0].0
+            ));
+        }
+    }
+    Ok(Some(matches[0].2))
+}
+
+/// Resolve any deferred select machinery in an attr VALUE at consumption time (analysis):
+/// a deferred select picks its branch; a select expression resolves each part and concatenates
+/// list parts. Plain values pass through.
+pub(crate) fn resolve_attr_value<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    v: Value<'v>,
+) -> anyhow::Result<Value<'v>> {
+    let pairs: Option<Vec<(Value<'v>, Value<'v>)>> =
+        if let Some(sb) = v.downcast_ref::<SelectBranches<'v>>() {
+            Some(sb.branches.clone())
+        } else if let Some(sb) = v.downcast_ref::<FrozenSelectBranches>() {
+            Some(sb.branches.iter().map(|(k, x)| (k.to_value(), x.to_value())).collect())
+        } else {
+            None
+        };
+    if let Some(pairs) = pairs {
+        let picked = pick_branch(eval, &pairs, false)?.expect("non-deferring pick");
+        return resolve_attr_value(eval, picked);
+    }
+    if let Some(se) = v.downcast_ref::<SelectExpr<'v>>() {
+        let parts = se.parts.clone();
+        let mut out: Vec<Value<'v>> = Vec::new();
+        for p in parts {
+            let r = resolve_attr_value(eval, p)?;
+            if let Some(l) = ListRef::from_value(r) {
+                out.extend(l.iter());
+            } else {
+                return Err(anyhow::anyhow!(
+                    "select concatenation parts must be lists (got `{r}`)"
+                ));
+            }
+        }
+        return Ok(eval.heap().alloc(out));
+    }
+    Ok(v)
+}
+
+
 // ---- E0: the phase split — declaration store + demand-driven analysis -------------------------
 
 
@@ -360,10 +539,16 @@ fn analyze_rule_decl<'v>(
     kwargs: &[(String, Value<'v>)],
 ) -> starlark::Result<()> {
     let (implementation, attrs) = rule_parts(rule)?;
+    // Deferred selects resolve HERE — attr consumption time (Bazel's model); conditions declared
+    // anywhere in the loaded graph are visible by now.
+    let kwargs: Vec<(String, Value<'v>)> = kwargs
+        .iter()
+        .map(|(k, v)| Ok((k.clone(), resolve_attr_value(eval, *v)?)))
+        .collect::<anyhow::Result<_>>()?;
     let mut name = String::new();
     let mut dep_labels: Vec<String> = Vec::new();
     let mut fields: Vec<(String, Value<'v>)> = Vec::new();
-    for (key, v) in kwargs {
+    for (key, v) in &kwargs {
         let (key, v) = (key.clone(), *v);
         // D1b/c: the schema kind drives label resolution. Look it up once: `label`/`label_list`
         // resolve to provider struct(s); the legacy `deps` is an implicit `label_list`.
@@ -845,6 +1030,28 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
+    /// `repository_rule(implementation, ...)` (compat stub): repo rules DEFINE at load; razel
+    /// never fetches (vendored/host repos instead) — invoking one surfaces at analysis. L6/L7.
+    fn repository_rule<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(Value::new_none())
+    }
+
+    /// `module_extension(implementation, ...)` (compat stub) — bzlmod machinery, same posture.
+    fn module_extension<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(Value::new_none())
+    }
+
+    /// `tag_class(...)` (compat stub) — bzlmod machinery.
+    fn tag_class<'v>(
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(Value::new_none())
+    }
+
     /// `subrule(implementation, ...)` (compat stub): Bazel's subrule mechanism, absorbed —
     /// rules defining subrules load; invoking one surfaces at analysis (registered debt).
     fn subrule<'v>(
@@ -1164,59 +1371,28 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc_complex_no_freeze(Depset { items }))
     }
 
-    /// `select({condition: value, …})` — REAL resolution (razelV3, retiring the first-branch
-    /// stub): each condition names a declared `config_setting`, whose constraints must ALL match
-    /// the structured configuration; the most-specialized match wins (its constraints contain
-    /// every other match's); `//conditions:default` is the fallback; no match + no default, an
-    /// ambiguous pair, or an undeclared condition error LOUDLY. Eager (call-time) resolution:
-    /// declare conditions before the selects that use them (deferred select = registered debt).
+    /// `select({condition: value, …})` — Bazel semantics (razelV3): HYBRID resolution. If every
+    /// condition is a declared `config_setting` right now (loading its package on demand), the
+    /// branch resolves eagerly (most-specialized wins; `//conditions:default` fallback; loud
+    /// no-match/ambiguity errors). If any condition is not yet declared (real `.bzl` build
+    /// module-level selects — XLA's tsl.bzl), select returns a DEFERRED value, resolved when an
+    /// attr consumes it at analysis (by which time the conditions exist — the E0 split).
+    /// Keys may be strings or `Label`s; `select + list` concatenation is supported (SelectExpr).
     fn select<'v>(
-        branches: SmallMap<String, Value<'v>>,
+        branches: Value<'v>,
+        #[starlark(require = named)] _no_match_error: Option<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let sess = session(eval);
-        let mut matches: Vec<(String, crate::state::ConfigSpec, Value<'v>)> = Vec::new();
-        for (cond, v) in &branches {
-            if cond == "//conditions:default" {
-                continue;
-            }
-            let canon = canon_label(sess, cond);
-            // Cross-package condition in workspace mode: load its package on demand (the borrow
-            // in the condition drops before the nested eval — the [R1] discipline).
-            if !sess.config_specs.borrow().contains_key(&canon)
-                && sess.workspace.is_some()
-                && let Some(pkg) = crate::state::pkg_of(&canon)
-            {
-                let _ = crate::rules::load_package(sess, &pkg);
-            }
-            let spec = sess.config_specs.borrow().get(&canon).cloned().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "select(): `{cond}` is not a declared config_setting — declare conditions \
-                     before the selects that use them"
-                )
-            })?;
-            if spec.matches(&sess.global).map_err(|e| anyhow::anyhow!(e))? {
-                matches.push((cond.clone(), spec, *v));
-            }
+        let Some(d) = starlark::values::dict::DictRef::from_value(branches) else {
+            return Err(anyhow::anyhow!("select() takes a dict of conditions"));
+        };
+        let pairs: Vec<(Value<'v>, Value<'v>)> = d.iter().collect();
+        drop(d);
+        match pick_branch(eval, &pairs, true)? {
+            Some(v) => Ok(v),
+            // Defer: a condition isn't declared yet — resolve at attr consumption (analysis).
+            None => Ok(eval.heap().alloc(SelectBranches { branches: pairs })),
         }
-        if matches.is_empty() {
-            return branches.get("//conditions:default").copied().ok_or_else(|| {
-                anyhow::anyhow!("select() matched no condition and has no //conditions:default")
-            });
-        }
-        // Most-specialized wins: the winner's constraint set must contain every other match's.
-        matches.sort_by_key(|(_, s, _)| std::cmp::Reverse(s.constraints().len()));
-        let win = matches[0].1.constraints();
-        for (cond, s, _) in &matches[1..] {
-            if !s.constraints().is_subset(&win) {
-                return Err(anyhow::anyhow!(
-                    "select() is ambiguous: `{}` and `{cond}` both match and neither \
-                     specializes the other",
-                    matches[0].0
-                ));
-            }
-        }
-        Ok(matches[0].2)
     }
 
     /// `define_config(name, compile, archive=None, link=None)` — declare + register a
