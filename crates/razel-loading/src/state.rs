@@ -126,6 +126,9 @@ pub(crate) struct Session {
     /// `.bzl` per Session — provider identities (`dep[MyInfo]` ptr-eq) hold across packages,
     /// and TF's macro layer evaluates once, not per-package.
     pub(crate) bzl_cache: RefCell<std::collections::HashMap<String, starlark::environment::FrozenModule>>,
+    /// Harvested UNDRIVEN Starlark declarations (one frozen dict per dependency-loaded
+    /// package) — analyzed on demand cross-package ([`crate::dialect`] `analyze_deferred`).
+    pub(crate) deferred_decls: RefCell<Vec<starlark::values::OwnedFrozenValue>>,
     /// Layer 0: harvested provider instances from COMPLETED packages (one frozen dict per
     /// package: canonical label → [(constructor, instance)]). OwnedFrozenValues keep their
     /// heaps alive; `dep[P]` falls back here for cross-package instances.

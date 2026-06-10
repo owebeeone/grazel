@@ -51,6 +51,32 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
         });
         Ok(NoneType)
     }
+    /// `native.label_flag` / `native.label_setting` — build-setting label flags (declare-only;
+    /// build settings are registered debt).
+    fn label_flag<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        crate::deps::record_target(sess, crate::state::AnalyzedTarget {
+            name: crate::state::canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
+    fn label_setting<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        crate::deps::record_target(sess, crate::state::AnalyzedTarget {
+            name: crate::state::canon_label(sess, &name),
+            ..Default::default()
+        });
+        Ok(NoneType)
+    }
     /// `native.package_group` / `native.config_setting` / `native.exports_files` /
     /// `native.existing_rule(s)` — the BUILD declare-time surface macros reach for.
     fn package_group<'v>(

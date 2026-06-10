@@ -44,6 +44,11 @@ pub(crate) struct Ctx<'v> {
     toolchains: Value<'v>,
 }
 
+/// Absorbed ctx members (`fragments`, …): any access resolves; surfaces only at real use.
+fn ctx_absorb<'v>(heap: Heap<'v>) -> Value<'v> {
+    heap.alloc(crate::engine::Absorb)
+}
+
 
 impl fmt::Display for Ctx<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -63,6 +68,7 @@ impl<'v> StarlarkValue<'v> for Ctx<'v> {
             "files" => Some(self.files),
             "executable" => Some(self.executable),
             "toolchains" => Some(self.toolchains),
+            "fragments" | "configuration" => Some(ctx_absorb(_heap)),
             _ => None,
         }
     }
@@ -572,9 +578,16 @@ pub(crate) fn resolve_attr_value<'v>(
 /// the instances are freeze-generic).
 pub(crate) const CAPTURED_VAR: &str = "__razel_captured";
 
+/// Harvested UNDRIVEN Starlark declarations of a completed package:
+/// {canonical label: (pkg, rule, [(kwarg, value)…])} — analyzed on demand cross-package.
+pub(crate) const DEFERRED_VAR: &str = "__razel_deferred_decls";
+
 /// Layer 0 pre-freeze step: copy the decl store's captured map into [`CAPTURED_VAR`] as plain
 /// dict/list/tuples, then unroot the (unfreezable, already-drained) decl store.
-pub(crate) fn stash_captured_for_freeze<'v>(module: &Module<'v>) -> anyhow::Result<()> {
+pub(crate) fn stash_captured_for_freeze<'v>(
+    module: &Module<'v>,
+    sess: &crate::state::Session,
+) -> anyhow::Result<()> {
     let heap = module.heap();
     let Some(storev) = module.get(DECLS_VAR) else { return Ok(()) };
     let Some(store) = storev.downcast_ref::<DeclStore<'v>>() else { return Ok(()) };
@@ -589,6 +602,22 @@ pub(crate) fn stash_captured_for_freeze<'v>(module: &Module<'v>) -> anyhow::Resu
         .collect();
     drop(captured);
     module.set(CAPTURED_VAR, heap.alloc(starlark::values::dict::AllocDict(entries)));
+    // Undriven Starlark decls (dependency-loaded packages defer them): harvest as
+    // {label: (pkg, rule, [(k, v)…])} so a later demand analyzes them in the consumer's eval.
+    let pkg = sess.current_pkg.borrow().clone().unwrap_or_default();
+    let mut deferred: Vec<(Value<'v>, Value<'v>)> = Vec::new();
+    for slot in store.decls.borrow_mut().iter_mut() {
+        if let Some(d) = slot.take()
+            && let DeclBody::Rule { rule, kwargs } = d.body
+        {
+            sess.pending.borrow_mut().remove(&d.label);
+            let kw: Vec<Value<'v>> =
+                kwargs.iter().map(|(k, v)| heap.alloc((heap.alloc(k.as_str()), *v))).collect();
+            let tup = heap.alloc((heap.alloc(pkg.as_str()), rule, heap.alloc(kw)));
+            deferred.push((heap.alloc(d.label.as_str()), tup));
+        }
+    }
+    module.set(DEFERRED_VAR, heap.alloc(starlark::values::dict::AllocDict(deferred)));
     module.set(DECLS_VAR, Value::new_none());
     Ok(())
 }
@@ -699,14 +728,29 @@ fn rule_parts<'v>(rule: Value<'v>) -> anyhow::Result<(Value<'v>, Value<'v>)> {
 
 /// Phase 2: analyze every recorded declaration, in declaration order (demand-recursion may pull a
 /// forward-referenced one earlier; its slot is then empty when the loop reaches it).
-pub(crate) fn drive_decls<'v>(eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<()> {
+pub(crate) fn drive_decls<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    drive_all: bool,
+) -> starlark::Result<()> {
     let mut i = 0;
     loop {
-        let n = decl_store(eval)?.decls.borrow().len();
+        let (n, is_native) = {
+            let decls = decl_store(eval)?.decls.borrow();
+            let is_native = decls
+                .get(i)
+                .and_then(|s| s.as_ref())
+                .is_some_and(|d| matches!(d.body, DeclBody::Native(_)));
+            (decls.len(), is_native)
+        };
         if i >= n {
             return Ok(());
         }
-        analyze_decl(eval, i)?;
+        // Bazel analyzes only DEMANDED targets: a dependency-loaded package drives its native
+        // decls (their closures die with the package) but defers Starlark decls to the harvest —
+        // demanded ones analyze later, doc-only ones (bzl_library) never do.
+        if drive_all || is_native {
+            analyze_decl(eval, i)?;
+        }
         i += 1;
     }
 }
@@ -727,10 +771,106 @@ pub(crate) fn ensure_analyzed<'v>(
         }
         sess.pending.borrow().get(label).copied()
     };
-    match idx {
-        Some(i) => analyze_decl(eval, i),
-        None => Ok(()),
+    // A pending index is only meaningful against the CURRENT module's store (cross-package
+    // demand runs in the consumer's eval): verify the slot's label before driving it.
+    let local_pending = |eval: &mut Evaluator<'v, '_, '_>, i: usize| -> bool {
+        decl_store(eval)
+            .ok()
+            .map(|st| {
+                st.decls
+                    .borrow()
+                    .get(i)
+                    .and_then(|s| s.as_ref())
+                    .is_some_and(|d| d.label == label)
+            })
+            .unwrap_or(false)
+    };
+    if let Some(i) = idx
+        && local_pending(eval, i)
+    {
+        return analyze_decl(eval, i);
     }
+    // Cross-package: load the label's package (a failed load SURFACES), then the target is
+    // either locally pending again (entry semantics), harvested-deferred, or genuinely absent.
+    {
+        let sess = session(eval);
+        let mut load_err = None;
+        if !sess.results.borrow().contains_key(label)
+            && sess.workspace.is_some()
+            && let Some(pkg) = crate::state::pkg_of(label)
+        {
+            load_err = crate::rules::load_package(sess, &pkg).err();
+        }
+        if sess.results.borrow().contains_key(label) {
+            return Ok(());
+        }
+        let idx = sess.pending.borrow().get(label).copied();
+        if let Some(i) = idx
+            && local_pending(eval, i)
+        {
+            return analyze_decl(eval, i);
+        }
+        if let Some(e) = load_err {
+            return Err(anyhow::anyhow!("loading `{label}`'s package failed: {e}").into());
+        }
+    }
+    analyze_deferred(eval, label)
+}
+
+/// Analyze a HARVESTED declaration (a Starlark target of an already-completed package) on
+/// demand, in the CONSUMER's eval — the cross-package demand-analysis leg. No-op if `label`
+/// isn't harvested (the caller's existing error paths apply).
+fn analyze_deferred<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    label: &str,
+) -> starlark::Result<()> {
+    let sess = session(eval);
+    let owners: Vec<starlark::values::OwnedFrozenValue> = sess.deferred_decls.borrow().clone();
+    let mut found: Option<(String, Value<'v>, Vec<(String, Value<'v>)>)> = None;
+    'outer: for owned in &owners {
+        // SAFETY: as in cross_providers_for — the consumer module's frozen heap keeps the
+        // source heap alive for ≥ 'v.
+        let fv = unsafe { owned.owned_frozen_value(eval.frozen_heap()) };
+        let dictv: Value<'v> = fv.to_value();
+        let Some(d) = starlark::values::dict::DictRef::from_value(dictv) else { continue };
+        for (k, tup) in d.iter() {
+            if k.unpack_str() == Some(label) {
+                let Some(t) = starlark::values::tuple::TupleRef::from_value(tup) else {
+                    continue;
+                };
+                let xs: Vec<Value<'v>> = t.iter().collect();
+                if xs.len() != 3 {
+                    continue;
+                }
+                let pkg = xs[0].unpack_str().unwrap_or_default().to_string();
+                let mut kwargs = Vec::new();
+                if let Some(l) = ListRef::from_value(xs[2]) {
+                    for item in l.iter() {
+                        if let Some(p) = starlark::values::tuple::TupleRef::from_value(item) {
+                            let kv: Vec<Value<'v>> = p.iter().collect();
+                            if kv.len() == 2
+                                && let Some(key) = kv[0].unpack_str()
+                            {
+                                kwargs.push((key.to_string(), kv[1]));
+                            }
+                        }
+                    }
+                }
+                found = Some((pkg, xs[1], kwargs));
+                break 'outer;
+            }
+        }
+    }
+    let Some((pkg, rule, kwargs)) = found else { return Ok(()) };
+    if !sess.analyzing.borrow_mut().insert(label.to_string()) {
+        return Err(anyhow::anyhow!("dependency cycle detected at `{label}`").into());
+    }
+    // Analyze in the DECL's package context (labels/paths qualify to the origin package).
+    let prev = sess.current_pkg.borrow_mut().replace(pkg);
+    let res = analyze_rule_decl(eval, rule, &kwargs);
+    *session(eval).current_pkg.borrow_mut() = prev;
+    session(eval).analyzing.borrow_mut().remove(label);
+    res
 }
 
 /// Analyze the declaration at `idx` (no-op if its slot was already taken). Cycle-guarded via

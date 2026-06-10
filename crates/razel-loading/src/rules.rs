@@ -320,7 +320,7 @@ pub(crate) fn ruleset_modules(cc_toolchain: CcToolchainMode) -> Result<Vec<Rules
 /// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
 /// cross-package load appends, never clears).
 pub(crate) fn eval_build_src(session: &Session, name: &str, src: &str) -> Result<(), String> {
-    eval_build_src_in(session, name, src, None)
+    eval_build_src_in(session, name, src, None, true)
 }
 
 /// [`eval_build_src`] with a repo context: an EXTERNAL package's BUILD resolves its loads and
@@ -330,6 +330,7 @@ pub(crate) fn eval_build_src_in(
     name: &str,
     src: &str,
     repo_ctx: Option<(String, String)>,
+    drive_all: bool,
 ) -> Result<(), String> {
     let rulesets = ruleset_modules(session.global.cc_toolchain)?;
     let globals = build_globals();
@@ -343,7 +344,7 @@ pub(crate) fn eval_build_src_in(
         .current_bzl_repo
         .borrow_mut()
         .push(repo_ctx.as_ref().map(|(r, _)| r.clone()));
-    let result = eval_build_src_inner(session, name, src, &loader, &globals);
+    let result = eval_build_src_inner(session, name, src, &loader, &globals, drive_all);
     session.current_bzl_repo.borrow_mut().pop();
     return result;
 }
@@ -354,6 +355,7 @@ fn eval_build_src_inner(
     src: &str,
     loader: &BzlLoader<'_>,
     globals: &Globals,
+    drive_all: bool,
 ) -> Result<(), String> {
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
@@ -370,14 +372,17 @@ fn eval_build_src_inner(
             let mut eval = Evaluator::new(&module);
             eval.set_loader(loader);
             eval.extra = Some(session);
-            crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
+            crate::dialect::drive_decls(&mut eval, drive_all).map_err(|e| format!("{e}"))?;
         }
         // Layer 0: stash the captured provider instances as plain dict/list/tuple values,
         // unroot the (unfreezable) decl store, freeze the module, harvest into the Session.
-        crate::dialect::stash_captured_for_freeze(&module).map_err(|e| format!("{e}"))?;
+        crate::dialect::stash_captured_for_freeze(&module, session).map_err(|e| format!("{e}"))?;
         let fm = module.freeze().map_err(|e| format!("freeze: {e:?}"))?;
         if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
             session.cross_captured.borrow_mut().push(owned);
+        }
+        if let Ok(owned) = fm.get(crate::dialect::DEFERRED_VAR) {
+            session.deferred_decls.borrow_mut().push(owned);
         }
         Ok(())
     })
@@ -407,6 +412,16 @@ pub fn analyze_bazel_with(
 /// Load a package's BUILD (once) under workspace mode, evaluating it with that
 /// package as context. Cross-package deps trigger further loads via `resolve_dep`.
 pub(crate) fn load_package(sess: &Session, pkg: &str) -> Result<(), String> {
+    load_package_mode(sess, pkg, false)
+}
+
+/// [`load_package`] for the ENTRY package: drives every declaration (tests assert on the whole
+/// package); dependency loads analyze on demand only.
+pub(crate) fn load_package_entry(sess: &Session, pkg: &str) -> Result<(), String> {
+    load_package_mode(sess, pkg, true)
+}
+
+fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), String> {
     if sess.loaded.borrow().contains(pkg) {
         return Ok(());
     }
@@ -444,7 +459,7 @@ pub(crate) fn load_package(sess: &Session, pkg: &str) -> Result<(), String> {
         rest.split_once("//").map(|(r, sub)| (r.to_string(), sub.to_string()))
     });
     let prev = sess.current_pkg.borrow_mut().replace(pkg.to_string());
-    let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), &src, repo_ctx);
+    let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), &src, repo_ctx, drive_all);
     *sess.current_pkg.borrow_mut() = prev;
     // A failed load must not poison the loaded-set (the guard would silently no-op retries
     // and every later condition/dep in the package would report "not declared").
@@ -472,7 +487,7 @@ pub fn analyze_workspace_with(
     let session = Session::new(Some(root.to_path_buf()), flags);
     let top_pkg = pkg_of(&canon_label(&session, top_label))
         .ok_or_else(|| format!("top label must be //pkg:name, got `{top_label}`"))?;
-    load_package(&session, &top_pkg)?;
+    load_package_entry(&session, &top_pkg)?;
     Ok(session.take_targets())
 }
 
@@ -506,9 +521,9 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
         {
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(&session);
-            crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
+            crate::dialect::drive_decls(&mut eval, true).map_err(|e| format!("{e}"))?;
         }
-        crate::dialect::stash_captured_for_freeze(&module).map_err(|e| format!("{e}"))?;
+        crate::dialect::stash_captured_for_freeze(&module, &session).map_err(|e| format!("{e}"))?;
         let fm = module.freeze().map_err(|e| format!("freeze: {e:?}"))?;
         if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
             session.cross_captured.borrow_mut().push(owned);
