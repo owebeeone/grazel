@@ -305,3 +305,14 @@ provider_values/labels/genrule_cmd — the C0 discipline, glob re-exports keep a
 **Frontiers:** tf-load-cc — protobuf root-package toolchain machinery (post-proto-row);
 rules-rust-library — Layer 2 ctx members inside the real impl. Both walkable; Layer 3
 (process_wrapper run + param-files) unchanged ahead. 60 bins; 3 gates; 4 probe sentinels.
+
+## Round delta — razelV3 round 8 (2026-06-10)
+
+**The rust lane is INSIDE `rustc_compile_action`** (rustc.bzl:1536 → collect_inputs) — the real
+compile-action assembly, running over tinyjson (a real crates.io package built by
+rules_rust's own bootstrap path). Cleared this round: @platforms + host-matched constraint
+conditions; tinyjson repo materialization; real rust-toolchain host scalars; real ctx.label/
+ctx.file/ctx.files-defaulting; symlink/run_shell actions; external-repo glob(); operator
+absorption. Frontier: cc_common/cc_toolchain interactions inside collect_inputs (should_use_pic)
+— the Layer-3/cc_common bridge boundary, exactly where the build-path plan begins.
+TF cc lane: protobuf root-package toolchain machinery (unchanged this round).
