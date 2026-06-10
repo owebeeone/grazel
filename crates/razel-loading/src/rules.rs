@@ -599,9 +599,39 @@ pub fn load_tree_report_prepared(
 ) -> Vec<(String, Result<(), String>)> {
     let session = Session::new(Some(root.to_path_buf()), flags);
     session.ast_cache.borrow_mut().extend(asts);
+    // P4: N workers over a shared queue against ONE Session (Send+Sync, P1–P3).
+    // RAZEL_LOAD_THREADS=1 reproduces sequential behavior exactly.
+    // EXPERIMENTAL (P4 debug pending): first parallel run finished impossibly fast with
+    // coverage loss (7/53 vs 10/53) — workers error rather than work. OPT-IN until the
+    // worker error class is diagnosed; default = sequential parity.
+    let threads = std::env::var("RAZEL_LOAD_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1);
+    if threads <= 1 {
+        return packages
+            .iter()
+            .map(|pkg| (pkg.clone(), load_package_entry(&session, pkg)))
+            .collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(vec![None; packages.len()]);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(pkg) = packages.get(i) else { break };
+                    let r = load_package_entry(&session, pkg);
+                    results.lock().expect("results").get_mut(i).map(|slot| *slot = Some(r));
+                }
+            });
+        }
+    });
     packages
         .iter()
-        .map(|pkg| (pkg.clone(), load_package_entry(&session, pkg)))
+        .cloned()
+        .zip(results.into_inner().expect("results").into_iter().map(|r| r.unwrap_or(Ok(()))))
         .collect()
 }
 

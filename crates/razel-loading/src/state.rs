@@ -226,7 +226,19 @@ pub(crate) fn begin_pkg_load(sess: &Session, pkg: &str) -> bool {
                 return false;
             }
             Some(PkgState::InFlight(_)) => {
-                m = sess.loaded_cv.wait(m).expect("loaded poisoned");
+                // Bounded wait: package-level demand cycles are LEGAL in Bazel's model, so a
+                // cross-thread wait can cycle. Timeout = take over the load ourselves
+                // (loading is idempotent-by-construction; duplicate eval is waste, not wrong).
+                let (g, t) = sess
+                    .loaded_cv
+                    .wait_timeout(m, std::time::Duration::from_secs(20))
+                    .expect("loaded poisoned");
+                m = g;
+                if t.timed_out() {
+                    eprintln!("razel: warning: load wait timed out; duplicating load");
+                    m.insert(pkg.to_string(), PkgState::InFlight(std::thread::current().id()));
+                    return true;
+                }
             }
             None => {
                 m.insert(pkg.to_string(), PkgState::InFlight(std::thread::current().id()));
