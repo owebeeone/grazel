@@ -57,7 +57,16 @@ pub(crate) fn config_members(b: &mut GlobalsBuilder) {
 /// `coverage_common` / `testing`. Real rules reference these globals; razel resolves them so the
 /// `.bzl` load. Members are deferred to when rules actually run (not yet exercised).
 #[starlark::starlark_module]
-pub(crate) fn config_common_members(_b: &mut GlobalsBuilder) {}
+pub(crate) fn config_common_members(b: &mut GlobalsBuilder) {
+    /// `config_common.toolchain_type(type, mandatory=?)` — an optional-toolchain dependency
+    /// declaration (absorbed; toolchain resolution is L3).
+    fn toolchain_type<'v>(
+        #[starlark(require = pos)] _t: Value<'v>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+    ) -> anyhow::Result<NoneType> {
+        Ok(NoneType)
+    }
+}
 #[starlark::starlark_module]
 pub(crate) fn cc_common_members(_b: &mut GlobalsBuilder) {}
 #[starlark::starlark_module]

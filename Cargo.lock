@@ -1288,7 +1288,10 @@ dependencies = [
  "anyhow",
  "razel-cc-toolchain",
  "razel-core",
+ "razel-dds",
  "razel-ir",
+ "razel-parity",
+ "razel-rulepack",
  "starlark",
 ]
 
@@ -2201,6 +2204,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "razel-loading",
  "razel-parity",
 ]
 
