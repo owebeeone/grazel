@@ -287,3 +287,21 @@ instances (rules_cc's FunctionInfo delegate). Design: BUILD modules become freez
 freeze-generic), packages freeze after their drive completes, captured provider instances harvest
 into the Session as OwnedFrozenValues (heap-independent), DepTarget falls back to the harvest for
 cross-package dep[P]. This also closes the same-package-only limit for rules_rust's layering (L2).
+
+## Round delta — razelV3 round 7 (2026-06-10, layers session)
+
+**Layer 0 LANDED — cross-package provider flow (the L2a debt closed):** packages freeze after
+their drive; captured instances harvest into the Session as OwnedFrozenValues; dep[P] falls back
+to the harvest; .bzl module cache is Session-wide (identity holds; TF's macro layer evaluates
+once). **Demand analysis landed:** dependency-loaded packages drive native decls only — undriven
+Starlark decls harvest as data and analyze ON DEMAND in the consumer's eval (doc-only targets
+never analyze); ensure_analyzed owns load→pending→deferred with store-scoped pending.
+**Layer 1 LANDED:** ctx.toolchains (ToolchainMap: at()/is_in; host rows in toolchains.rs — rust,
+cc, proto types; fields grow probe-driven). Plus: lexical binding for attr-default label strings
+((repo,pkg) module-context stack); ctx.build_setting_value; label_flag/label_setting/toolchain/
+toolchain_type rules; ctx.fragments absorbs. **dialect.rs split** (2059→634 + ctxv/decls/selects/
+provider_values/labels/genrule_cmd — the C0 discipline, glob re-exports keep all paths).
+
+**Frontiers:** tf-load-cc — protobuf root-package toolchain machinery (post-proto-row);
+rules-rust-library — Layer 2 ctx members inside the real impl. Both walkable; Layer 3
+(process_wrapper run + param-files) unchanged ahead. 60 bins; 3 gates; 4 probe sentinels.
