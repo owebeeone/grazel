@@ -222,3 +222,22 @@ genrule breadth (RULEDIR/@D/tools=); File-typed depset elements for map_each.
 **Rung state:** unchanged — L2 frontier blocked solely on `rules_cc` vendoring. The unblocked
 compatibility lane (configuration + genrule + Args) is exhausted; remaining grounded work is
 behind the resource gate or L4-scale design (runfiles, platforms).
+
+## Round delta — razelV3 round 3 (2026-06-10)
+
+**MILESTONE — `rules-rust-load: OK`:** real, unmodified `rules_rust/rust.bzl` loads end-to-end
+through real rules_cc + skylib + bazel_tools. Landed: repo-relative loads inside `@repo`
+(BzlLoader load_ctx); `provider(init=)` 2-tuple + verbatim arg routing + freezable instances;
+host-materialized `@cc_compatibility_proxy` + `@bazel_tools` (razel-as-host bindings, the
+Bazel<9 dispatch shape — full rules_cc-Starlark CcInfo internals deferred to L4); Bazel
+file-label semantics (srcs entries resolve to source files). `rules-rust-library` now EXECUTES
+the real `_rust_library_impl` — frontier is the ctx-member batch (the predicted 16).
+
+**Agent-cycle pilot: VALIDATED.** T-001 (File-typed depsets) ran the full
+builder(worktree)→reviewer(fresh)→serial-integration loop: builder delivered test-first +
+green, reviewer ACCEPTed with a real residual-risk finding (to_list round-trip — watch),
+integration cherry-picked clean. The ctx-member batch is the fleet's first real workload.
+
+**Note (Gianni):** the host materializations live OUTSIDE razel's repo:
+`third-party/cc_compatibility_proxy/`, `third-party/bazel_tools/` (+ the rules_cc clone) —
+razel-authored content that should be committed in glial-dev.
