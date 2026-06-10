@@ -63,5 +63,53 @@ pub(crate) fn rungold(root: &Path) -> Result<(), String> {
         ran += 1;
     }
     println!("xtask rungold: OK — {ran} real actions executed for {target} (outputs verified)");
+
+    // The RUST golden: tinyjson (a real crates.io package) through real rules_rust.
+    let ws = root.join("../third-party/rules_rust_tinyjson");
+    let mut flags = GlobalFlags::default();
+    flags.external_base = Some(root.join("../third-party"));
+    let target = "//:tinyjson";
+    let targets = analyze_workspace_with(&ws, target, flags)
+        .map_err(|e| format!("rust analysis failed: {e}"))?;
+    let t = targets
+        .iter()
+        .find(|t| t.name.ends_with(":tinyjson"))
+        .ok_or("tinyjson not analyzed")?;
+    if t.actions.is_empty() {
+        return Err("no rust actions".into());
+    }
+    let mut ran = 0;
+    for a in &t.actions {
+        // Run-boundary tool resolution: a None bootstrap process_wrapper means DIRECT rustc
+        // (`None -- rustc args…` → `rustc args…`).
+        let argv: Vec<&str> = match a.argv.as_slice() {
+            [n, sep, rest @ ..] if n == "None" && sep == "--" => {
+                rest.iter().map(|s| s.as_str()).collect()
+            }
+            all => all.iter().map(|s| s.as_str()).collect(),
+        };
+        for o in &a.outputs {
+            if let Some(dir) = Path::new(o).parent() {
+                std::fs::create_dir_all(ws.join(dir)).map_err(|e| e.to_string())?;
+            }
+        }
+        let st = Command::new(argv[0])
+            .args(&argv[1..])
+            .current_dir(&ws)
+            .output()
+            .map_err(|e| format!("{} spawn failed: {e}", argv[0]))?;
+        if !st.status.success() {
+            return Err(format!(
+                "rust action `{}` failed:
+argv: {:?}
+stderr: {}",
+                a.mnemonic,
+                argv,
+                String::from_utf8_lossy(&st.stderr)
+            ));
+        }
+        ran += 1;
+    }
+    println!("xtask rungold: OK — {ran} real rust actions executed for {target}");
     Ok(())
 }

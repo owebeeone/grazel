@@ -294,6 +294,7 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
         #[starlark(require = pos)] values_pos: Option<Value<'v>>,
         #[starlark(require = named)] join_with: Option<String>,
         #[starlark(require = named)] format_each: Option<String>,
+        #[starlark(require = named)] format_joined: Option<String>,
         #[starlark(require = named)] map_each: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -326,7 +327,12 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
         if let Some(fmt) = &format_each {
             strs = strs.iter().map(|s| fmt.replace("%s", s)).collect();
         }
-        let joined = strs.join(join_with.as_deref().unwrap_or(" "));
+        let mut joined = strs.join(join_with.as_deref().unwrap_or(" "));
+        if let Some(fj) = &format_joined
+            && !joined.is_empty()
+        {
+            joined = fj.replace("%s", &joined);
+        }
         if let Some(a) = this.downcast_ref::<Args>() {
             let mut items = a.items.borrow_mut();
             if let Some(f) = flag {

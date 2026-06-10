@@ -110,7 +110,7 @@ pub(crate) fn resolve_dep<'v>(
         } else {
             canon.strip_prefix("//").and_then(|rest| {
                 rest.split_once(':').and_then(|(p, f)| {
-                    let rel = format!("{p}/{f}");
+                    let rel = if p.is_empty() { f.to_string() } else { format!("{p}/{f}") };
                     sess.workspace
                         .as_ref()
                         .filter(|root| root.join(&rel).is_file())

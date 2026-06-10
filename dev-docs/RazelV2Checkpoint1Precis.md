@@ -462,3 +462,16 @@ executor-level tool resolution (cc_wrapper.sh → host driver; registered debt).
 
 Next: widen the golden (multi-action targets, the archive/link step, then a rules_rust
 tinyjson run), and the TF full-tree load driver. 60 bins; 3 gates; 6 sentinels + rungold.
+
+## Round delta — razelV3 round 16 (2026-06-11)
+
+**MILESTONE: the rust run-golden passes — real rustc built tinyjson (a real crates.io crate)
+through real rules_rust's full `construct_arguments` argv** (crate-name/type, codegen flags,
+remap-path-prefix, --emit, --target, edition — the works). Two ecosystems now BUILD: cc
+(abseil/clang, round 15) and rust (tinyjson/rustc). Fixes the golden surfaced: empty-package
+file labels produced absolute paths (`//:src/lib.rs` → `/src/lib.rs` — a real `qualify` bug);
+`Args.add_joined(format_joined=)` was silently dropped (`--emit=` lost its prefix); the None
+bootstrap process_wrapper resolves to direct rustc at the run boundary (executor tool
+resolution, same seam as cc_wrapper.sh). Run outputs land in the vendored tree for now —
+an execroot sandbox is the rungold's next hygiene item. 60 bins; 3 gates; 6 sentinels;
+rungold = 2 ecosystems.

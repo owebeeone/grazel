@@ -395,6 +395,7 @@ pub(crate) fn qualify(sess: &Session, path: &str) -> String {
                 Some((repo, sub)) => format!("external/{repo}/{sub}/{path}"),
                 None => format!("external/{rest}/{path}"),
             },
+            None if pkg.is_empty() => path.to_string(),
             None => format!("{pkg}/{path}"),
         },
         None => path.to_string(),

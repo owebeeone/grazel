@@ -825,7 +825,7 @@ fn resolve_label_attr_inner<'v>(
                         }
                     } else if let Some(rest) = dep.strip_prefix("//") {
                         // A workspace file label from ANY package: `//pkg:file` → `pkg/file`.
-                        let q = rest.replacen(':', "/", 1);
+                        let q = rest.replacen(':', "/", 1).trim_start_matches('/').to_string();
                         let exists = sess
                             .workspace
                             .as_ref()
