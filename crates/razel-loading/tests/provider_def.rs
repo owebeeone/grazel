@@ -23,6 +23,42 @@ r(name = "t")
     assert!(argv.contains(&"hello".to_string()), "provider instance field read: {argv:?}");
 }
 
+/// L2: `provider(init=…)` returns the Bazel 2-tuple `(Provider, raw_ctor)` — rules_cc's CcInfo
+/// is defined exactly this way (`cc_info.bzl:272`). The main callable routes through `init`
+/// (kwargs → field dict); the raw ctor bypasses it; both construct instances of the SAME
+/// provider (a dependent's `dep[P]` finds raw-made instances).
+#[test]
+fn provider_init_returns_tuple_and_routes_construction() {
+    let src = r#"
+def _init(x = 0, y = 0):
+    return {"sum": x + y}
+
+PairInfo, _raw_pair = provider(fields = ["sum"], init = _init)
+
+def _lib(ctx):
+    return [_raw_pair(sum = 42)]
+
+def _bin(ctx):
+    made = PairInfo(x = 1, y = 2)
+    got = ctx.attr.deps[0][PairInfo]
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [],
+                    arguments = [str(made.sum), str(got.sum)])
+
+lib = rule(implementation = _lib, attrs = {})
+bin = rule(implementation = _bin, attrs = {})
+lib(name = "l")
+bin(name = "b", deps = [":l"])
+"#;
+    let targets = analyze_starlark("BUILD", src).unwrap();
+    let b = targets.iter().find(|t| t.name.ends_with("b")).unwrap();
+    assert_eq!(
+        b.actions[0].argv[1..],
+        ["3".to_string(), "42".to_string()],
+        "init routed (1+2=3) and the raw-made instance was indexable as PairInfo: {:?}",
+        b.actions[0].argv
+    );
+}
+
 /// D4.4: the Bazel builtin global stubs all resolve (builtin providers, the namespace stubs,
 /// transition/configuration_field) — what lets real upstream `.bzl` compile past their free vars.
 #[test]

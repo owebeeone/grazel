@@ -44,6 +44,44 @@ fn loads_external_repo_bzl_with_underscore_hyphen_mapping() {
     );
 }
 
+/// L2: loads INSIDE an external repo are repo-relative — `//pkg:f.bzl` and `:f.bzl` written in a
+/// `@my_repo` module resolve against `my_repo`'s root, not the workspace (Bazel label semantics;
+/// rules_cc's internals load `//cc/private:…` this way).
+#[test]
+fn external_repo_internal_loads_are_repo_relative() {
+    let base = std::env::temp_dir().join(format!("razel-d4-rel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("my-repo");
+    std::fs::create_dir_all(repo.join("lib")).unwrap();
+    std::fs::create_dir_all(repo.join("other")).unwrap();
+    // lib/defs.bzl loads a repo-relative //other:helper.bzl AND a package-relative :sibling.bzl.
+    std::fs::write(repo.join("other/helper.bzl"), "helper_part = \"hel\"\n").unwrap();
+    std::fs::write(repo.join("lib/sibling.bzl"), "sibling_part = \"per\"\n").unwrap();
+    std::fs::write(
+        repo.join("lib/defs.bzl"),
+        "load(\"//other:helper.bzl\", \"helper_part\")\n\
+         load(\":sibling.bzl\", \"sibling_part\")\n\
+         word = helper_part + sibling_part\n",
+    )
+    .unwrap();
+    let root = base.join("ws");
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("app/BUILD"),
+        "load(\"@my_repo//lib:defs.bzl\", \"word\")\nfilegroup(name = word, srcs = [])\n",
+    )
+    .unwrap();
+    let flags = GlobalFlags { external_base: Some(base.clone()), ..Default::default() };
+    let res = analyze_workspace_with(&root, "//app:helper", flags);
+    let _ = std::fs::remove_dir_all(&base);
+    let targets = res.expect("repo-relative loads inside an external repo resolve");
+    assert!(
+        targets.iter().any(|t| t.name.ends_with("helper")),
+        "word assembled from repo-relative + package-relative loads: {:?}",
+        targets.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
+}
+
 /// D4.1 (real): the same, against real vendored bazel_skylib `paths.bzl` (`third-party/bazel-skylib`).
 #[test]
 fn loads_real_bazel_skylib_paths() {

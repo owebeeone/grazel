@@ -11,7 +11,7 @@ use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
 use starlark::environment::{GlobalsBuilder, Module};
 use starlark::eval::{Arguments, Evaluator};
-use starlark::{starlark_complex_value, starlark_simple_value};
+use starlark::starlark_complex_value;
 use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::tuple::UnpackTuple;
 use starlark::values::none::NoneType;
@@ -530,8 +530,8 @@ fn analyze_rule_decl<'v>(
     {
         let mut captured: Vec<(Value<'v>, Value<'v>)> = Vec::new();
         let mut grab = |item: Value<'v>| {
-            if let Some(pi) = item.downcast_ref::<ProviderInstance>() {
-                captured.push((pi.callable, item));
+            if let Some(callable) = instance_callable(item) {
+                captured.push((callable, item));
             }
         };
         if let Some(list) = ListRef::from_value(ret) {
@@ -557,38 +557,106 @@ fn analyze_rule_decl<'v>(
 }
 
 
-/// A `provider()` value (D4.2): a callable that constructs a provider instance. Calling it with
-/// kwargs (`MyInfo(msg = "hi")`) yields a `struct` of those fields — the instance, read locally
-/// (`info.msg`) or, later, captured from a rule's return + read off a dep (`dep[MyInfo]`, D4.3+).
-/// Holds only field names (Bazel `provider(fields=…)`), so it freezes trivially and survives a `.bzl`
-/// `load()` (`BuildSettingInfo = provider(...)`).
-#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
-pub(crate) struct ProviderCallable {
-    fields: Vec<String>,
+/// A `provider()` value (D4.2/L2): a callable constructing provider instances. With `init=`
+/// (Bazel's `CcInfo, _raw = provider(init = f)` shape) the kwargs route through `init` (which
+/// returns the field dict) and `provider()` returns a 2-tuple `(Provider, raw_ctor)`. Generic
+/// over `V` (the `RuleObjGen` pattern) so a `.bzl`-defined provider survives `module.freeze()`.
+#[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
+#[repr(C)]
+pub(crate) struct ProviderCallableGen<V: ValueLifetimeless> {
+    /// The `init` callback (Starlark `None` ⇒ kwargs are the fields directly).
+    init: V,
 }
-starlark_simple_value!(ProviderCallable);
+starlark_complex_value!(ProviderCallable);
 
-impl fmt::Display for ProviderCallable {
+impl<V: ValueLifetimeless> fmt::Display for ProviderCallableGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<provider>")
     }
 }
 
 #[starlark_value(type = "provider")]
-impl<'v> StarlarkValue<'v> for ProviderCallable {
-    /// `MyInfo(field = value, …)` → a [`ProviderInstance`] carrying those fields. The instance
-    /// remembers its constructor (`me`) — that identity is what `dep[MyInfo]` indexes by (L2a).
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ProviderCallableGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
+    /// `MyInfo(field = value, …)` → a [`ProviderInstance`]. The instance remembers its
+    /// constructor (`me`) — that identity is what `dep[MyInfo]` indexes by (L2a). With `init`,
+    /// the kwargs go through it and its returned dict becomes the fields.
     fn invoke(
         &self,
         me: Value<'v>,
         args: &Arguments<'v, '_>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
-        let _ = &self.fields; // declared field names (validation not yet enforced)
+        let named = args.names_map()?;
+        let kwargs: Vec<(String, Value<'v>)> =
+            named.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect();
+        let pos: Vec<Value<'v>> = args.positions(eval.heap())?.collect();
+        let init = self.init.to_value();
+        let fields = if !init.is_none() {
+            {
+                // The call's args go to `init` VERBATIM (its signature is the contract —
+                // positional args are legal; rules_cc calls `_ArtifactCategoryInfo("X", …)`).
+                let named_refs: Vec<(&str, Value<'v>)> =
+                    kwargs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+                let dict = eval.eval_function(init, &pos, &named_refs)?;
+                let Some(d) = starlark::values::dict::DictRef::from_value(dict) else {
+                    return Err(anyhow::anyhow!(
+                        "provider init callback must return a dict of fields"
+                    )
+                    .into());
+                };
+                d.iter()
+                    .filter_map(|(k, v)| k.unpack_str().map(|k| (k.to_string(), v)))
+                    .collect()
+            }
+        } else {
+            if !pos.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "providers take field values as keyword arguments (no init= declared)"
+                )
+                .into());
+            }
+            kwargs
+        };
+        Ok(eval.heap().alloc(ProviderInstance { callable: me, fields }))
+    }
+}
+
+/// The raw constructor from `provider(init=…)` — builds instances of the SAME provider
+/// (instances carry the CANONICAL provider's identity, so `dep[P]` finds raw-made ones),
+/// bypassing `init`.
+#[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
+#[repr(C)]
+pub(crate) struct RawCtorGen<V: ValueLifetimeless> {
+    canonical: V,
+}
+starlark_complex_value!(RawCtor);
+
+impl<V: ValueLifetimeless> fmt::Display for RawCtorGen<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<provider raw constructor>")
+    }
+}
+
+#[starlark_value(type = "provider_raw_constructor")]
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for RawCtorGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
+    fn invoke(
+        &self,
+        _me: Value<'v>,
+        args: &Arguments<'v, '_>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
         let named = args.names_map()?;
         let fields: Vec<(String, Value<'v>)> =
             named.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect();
-        Ok(eval.heap().alloc_complex_no_freeze(ProviderInstance { callable: me, fields }))
+        Ok(eval
+            .heap()
+            .alloc(ProviderInstance { callable: self.canonical.to_value(), fields }))
     }
 }
 
@@ -596,22 +664,40 @@ impl<'v> StarlarkValue<'v> for ProviderCallable {
 /// A constructed provider instance (L2a): the fields plus the constructor's identity. Field reads
 /// (`info.msg`) go through `get_attr`; a rule impl returning instances gets them captured onto the
 /// target, and a dependent retrieves them via `dep[MyInfo]` (identity = same constructor value).
-#[derive(Debug, NoSerialize, ProvidesStaticType, Allocative, Trace)]
-pub(crate) struct ProviderInstance<'v> {
-    callable: Value<'v>,
-    fields: Vec<(String, Value<'v>)>,
+/// Freeze-generic: real `.bzl` construct instances at MODULE level (rules_cc's artifact
+/// categories), so instances must survive `module.freeze()`.
+#[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
+#[repr(C)]
+pub(crate) struct ProviderInstanceGen<V: ValueLifetimeless> {
+    callable: V,
+    fields: Vec<(String, V)>,
 }
+starlark_complex_value!(ProviderInstance);
 
-impl fmt::Display for ProviderInstance<'_> {
+impl<V: ValueLifetimeless> fmt::Display for ProviderInstanceGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<provider instance>")
     }
 }
 
 #[starlark_value(type = "provider_instance")]
-impl<'v> StarlarkValue<'v> for ProviderInstance<'v> {
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ProviderInstanceGen<V>
+where
+    Self: ProvidesStaticType<'v>,
+{
     fn get_attr(&self, attribute: &str, _heap: Heap<'v>) -> Option<Value<'v>> {
-        self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| *v)
+        self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| v.to_value())
+    }
+}
+
+/// The constructor identity of a provider-instance value (frozen or live), for `dep[P]` capture.
+pub(crate) fn instance_callable<'v>(item: Value<'v>) -> Option<Value<'v>> {
+    if let Some(pi) = item.downcast_ref::<ProviderInstance<'v>>() {
+        Some(pi.callable)
+    } else if let Some(pi) = item.downcast_ref::<FrozenProviderInstance>() {
+        Some(pi.callable.to_value())
+    } else {
+        None
     }
 }
 
@@ -669,14 +755,23 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc(RuleObjGen { implementation, attrs }))
     }
 
-    /// `provider(doc=?, fields=?, ...)` → a callable provider constructor (D4.2). Args are absorbed
-    /// (fields validation not yet enforced); calling the result builds the instance struct.
+    /// `provider(doc=?, fields=?, init=?)` → a callable provider constructor (D4.2). With `init`
+    /// it returns Bazel's 2-tuple `(Provider, raw_ctor)` (the `CcInfo, _raw = provider(...)`
+    /// shape — rules_cc). Field-name validation not yet enforced.
     fn provider<'v>(
         #[starlark(args)] _args: UnpackTuple<Value<'v>>,
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        Ok(eval.heap().alloc(ProviderCallable { fields: Vec::new() }))
+        let heap = eval.heap();
+        let init = kw.get("init").copied().unwrap_or_else(Value::new_none);
+        let main = heap.alloc(ProviderCallable { init });
+        Ok(if init.is_none() {
+            main
+        } else {
+            // Bazel: with init, provider() returns (Provider, raw_ctor).
+            heap.alloc((main, heap.alloc(RawCtor { canonical: main })))
+        })
     }
 
     /// Bazel builtin global providers `RunEnvironmentInfo(...)` / `OutputGroupInfo(...)` (D4 compat):

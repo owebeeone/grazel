@@ -113,11 +113,40 @@ pub(crate) struct BzlLoader<'a> {
     globals: &'a Globals,
     cache: RefCell<HashMap<String, FrozenModule>>,
     session: &'a Session,
+    /// The (repo, pkg) of the external module currently being loaded (`None` frames are
+    /// workspace modules). Loads written INSIDE `@repo` resolve repo-relatively — Bazel label
+    /// semantics (`//pkg:f.bzl` in rules_cc means rules_cc's own pkg, not the workspace's).
+    load_ctx: RefCell<Vec<Option<(String, String)>>>,
 }
 
+/// `@repo//pkg:file` → `(repo, pkg)`.
+fn parse_external(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix('@')?;
+    let (repo, pkgfile) = rest.split_once("//")?;
+    let (pkg, _file) = pkgfile.split_once(':')?;
+    Some((repo.to_string(), pkg.to_string()))
+}
+
+impl BzlLoader<'_> {
+    /// Rewrite a load label written inside an external module to its canonical `@repo//…` form;
+    /// workspace-context labels pass through unchanged.
+    fn canonicalize(&self, path: &str) -> String {
+        let Some(Some((repo, pkg))) = self.load_ctx.borrow().last().cloned() else {
+            return path.to_string();
+        };
+        if let Some(rest) = path.strip_prefix("//") {
+            format!("@{repo}//{rest}")
+        } else if let Some(file) = path.strip_prefix(':') {
+            format!("@{repo}//{pkg}:{file}")
+        } else {
+            path.to_string()
+        }
+    }
+}
 
 impl FileLoader for BzlLoader<'_> {
     fn load(&self, path: &str) -> starlark::Result<FrozenModule> {
+        let path = &self.canonicalize(path);
         if let Some(m) = self.cache.borrow().get(path) {
             return Ok(m.clone());
         }
@@ -130,6 +159,7 @@ impl FileLoader for BzlLoader<'_> {
             .external_base
             .as_deref()
             .and_then(|base| external_bzl_path(base, path));
+        let ctx = real_external.is_some().then(|| parse_external(path)).flatten();
         let fs = if let Some(p) = real_external {
             p
         } else if let Some(rs) = self.rulesets.iter().find(|r| path.starts_with(r.prefix)) {
@@ -146,6 +176,8 @@ impl FileLoader for BzlLoader<'_> {
         let src = std::fs::read_to_string(&fs)
             .map_err(|e| err(format!("cannot read {}: {e}", fs.display())))?;
 
+        // The nested eval runs with this module's repo context on the stack (popped even on error).
+        self.load_ctx.borrow_mut().push(ctx);
         let frozen = Module::with_temp_heap(|module| -> starlark::Result<FrozenModule> {
             let ast = AstModule::parse(path, src, &Dialect::Extended)?;
             {
@@ -157,7 +189,9 @@ impl FileLoader for BzlLoader<'_> {
             module
                 .freeze()
                 .map_err(|e| starlark::Error::new_other(anyhow::anyhow!("{e:?}")))
-        })?;
+        });
+        self.load_ctx.borrow_mut().pop();
+        let frozen = frozen?;
         self.cache
             .borrow_mut()
             .insert(path.to_string(), frozen.clone());
@@ -220,6 +254,7 @@ pub(crate) fn eval_build_src(session: &Session, name: &str, src: &str) -> Result
         globals: &globals,
         cache: RefCell::new(HashMap::new()),
         session,
+        load_ctx: RefCell::new(Vec::new()),
     };
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
