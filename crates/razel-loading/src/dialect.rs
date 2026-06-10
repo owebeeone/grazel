@@ -9,7 +9,7 @@ use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
 use starlark::collections::SmallMap;
-use starlark::environment::GlobalsBuilder;
+use starlark::environment::{GlobalsBuilder, Module};
 use starlark::eval::{Arguments, Evaluator};
 use starlark::{starlark_complex_value, starlark_simple_value};
 use starlark::values::list::{ListRef, UnpackList};
@@ -20,6 +20,7 @@ use starlark::values::{
     Freeze, Heap, NoSerialize, StarlarkValue, Trace, Value, ValueLifetimeless, ValueLike,
     starlark_value,
 };
+use std::cell::RefCell;
 use std::fmt;
 
 
@@ -94,148 +95,295 @@ impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for RuleObjGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
-    /// `my_rule(name=…, …)` — build a `ctx` and run the impl (same-scope analysis).
+    /// `my_rule(name=…, …)` — RECORD the declaration (E0 phase split). Dep resolution and the
+    /// impl run later, in the demand-driven analysis pass ([`drive_decls`]) — which is what makes
+    /// forward references within a package resolve (Bazel loads a package before analyzing it).
     fn invoke(
         &self,
-        _me: Value<'v>,
+        me: Value<'v>,
         args: &Arguments<'v, '_>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
         let named = args.names_map()?;
-        let heap = eval.heap();
         let sess = session(eval);
-        let mut name = String::new();
-        let mut dep_labels: Vec<String> = Vec::new();
-        let mut fields: Vec<(String, Value<'v>)> = Vec::new();
-        for (k, v) in &named {
-            let key = k.as_str().to_string();
-            // D1b/c: the schema kind drives label resolution. Look it up once: `label`/`label_list`
-            // resolve to provider struct(s); the legacy `deps` is an implicit `label_list`.
-            let attr_kind: Option<String> = {
-                let mut k = None;
-                if let Some(d) = starlark::values::dict::DictRef::from_value(self.attrs.to_value()) {
-                    for (kk, desc) in d.iter() {
-                        if kk.unpack_str() == Some(key.as_str()) {
-                            if let Ok(Some(kind)) = desc.get_attr("kind", heap) {
-                                k = kind.unpack_str().map(String::from);
-                            }
-                            break;
+        let kwargs: Vec<(String, Value<'v>)> =
+            named.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect();
+        let name = kwargs
+            .iter()
+            .find(|(k, _)| k == "name")
+            .and_then(|(_, v)| v.unpack_str())
+            .unwrap_or_default()
+            .to_string();
+        let label = canon_label(sess, &name);
+        let store = decl_store(eval)?;
+        let idx = {
+            let mut decls = store.decls.borrow_mut();
+            decls.push(Some(Decl { label: label.clone(), rule: me, kwargs }));
+            decls.len() - 1
+        };
+        sess.pending.borrow_mut().insert(label, idx);
+        Ok(Value::new_none())
+    }
+}
+
+
+// ---- E0: the phase split — declaration store + demand-driven analysis -------------------------
+
+
+/// The module variable holding the package's [`DeclStore`] — installed by the analysis entry
+/// points before BUILD eval; not addressable from Starlark source.
+pub(crate) const DECLS_VAR: &str = "__razel_decls";
+
+/// One recorded rule instantiation: the rule value + raw kwargs, analyzed on demand.
+#[derive(Debug, Allocative, Trace)]
+struct Decl<'v> {
+    label: String,
+    rule: Value<'v>,
+    kwargs: Vec<(String, Value<'v>)>,
+}
+
+/// The package's recorded declarations — a heap value, so the `'v`-bound rule/kwarg values live on
+/// the module heap across the eval→analyze boundary. Slots are `take()`n when analyzed.
+#[derive(Debug, Default, ProvidesStaticType, NoSerialize, Allocative, Trace)]
+pub(crate) struct DeclStore<'v> {
+    decls: RefCell<Vec<Option<Decl<'v>>>>,
+}
+
+impl fmt::Display for DeclStore<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<decls>")
+    }
+}
+
+#[starlark_value(type = "razel_decls")]
+impl<'v> StarlarkValue<'v> for DeclStore<'v> {}
+
+/// Install an empty declaration store on the module. Every BUILD-eval entry point MUST call this
+/// before evaluation and [`drive_decls`] after — rule instantiation without it is an error.
+pub(crate) fn install_decl_store<'v>(module: &Module<'v>) {
+    module.set(DECLS_VAR, module.heap().alloc_complex_no_freeze(DeclStore::default()));
+}
+
+/// The store installed on the current module.
+fn decl_store<'v>(eval: &Evaluator<'v, '_, '_>) -> anyhow::Result<&'v DeclStore<'v>> {
+    let v = eval.module().get(DECLS_VAR).ok_or_else(|| {
+        anyhow::anyhow!("rule instantiation outside a package analysis (no declaration store)")
+    })?;
+    v.downcast_ref::<DeclStore>()
+        .ok_or_else(|| anyhow::anyhow!("declaration store has the wrong type"))
+}
+
+/// A rule value's (implementation, attrs-schema), frozen or not.
+fn rule_parts<'v>(rule: Value<'v>) -> anyhow::Result<(Value<'v>, Value<'v>)> {
+    if let Some(r) = rule.downcast_ref::<RuleObj<'v>>() {
+        Ok((r.implementation, r.attrs))
+    } else if let Some(r) = rule.downcast_ref::<FrozenRuleObj>() {
+        Ok((r.implementation.to_value(), r.attrs.to_value()))
+    } else {
+        Err(anyhow::anyhow!("declaration's rule is not a rule value"))
+    }
+}
+
+/// Phase 2: analyze every recorded declaration, in declaration order (demand-recursion may pull a
+/// forward-referenced one earlier; its slot is then empty when the loop reaches it).
+pub(crate) fn drive_decls<'v>(eval: &mut Evaluator<'v, '_, '_>) -> starlark::Result<()> {
+    let mut i = 0;
+    loop {
+        let n = decl_store(eval)?.decls.borrow().len();
+        if i >= n {
+            return Ok(());
+        }
+        analyze_decl(eval, i)?;
+        i += 1;
+    }
+}
+
+/// Ensure `label` (canonical) is analyzed: no-op if already in results; demand-analyze if it is a
+/// pending local declaration; otherwise leave it to the caller's existing resolution/error path.
+pub(crate) fn ensure_analyzed<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    label: &str,
+) -> starlark::Result<()> {
+    let idx = {
+        let sess = session(eval);
+        if sess.results.borrow().contains_key(label) {
+            return Ok(());
+        }
+        if sess.analyzing.borrow().contains(label) {
+            return Err(anyhow::anyhow!("dependency cycle detected at `{label}`").into());
+        }
+        sess.pending.borrow().get(label).copied()
+    };
+    match idx {
+        Some(i) => analyze_decl(eval, i),
+        None => Ok(()),
+    }
+}
+
+/// Analyze the declaration at `idx` (no-op if its slot was already taken). Cycle-guarded via
+/// `Session.analyzing`.
+fn analyze_decl<'v>(eval: &mut Evaluator<'v, '_, '_>, idx: usize) -> starlark::Result<()> {
+    let decl = { decl_store(eval)?.decls.borrow_mut()[idx].take() };
+    let Some(decl) = decl else { return Ok(()) };
+    {
+        let sess = session(eval);
+        if !sess.analyzing.borrow_mut().insert(decl.label.clone()) {
+            return Err(
+                anyhow::anyhow!("dependency cycle detected at `{}`", decl.label).into()
+            );
+        }
+        sess.pending.borrow_mut().remove(&decl.label);
+    }
+    let res = analyze_decl_body(eval, &decl);
+    session(eval).analyzing.borrow_mut().remove(&decl.label);
+    res
+}
+
+/// The analysis of one declaration — dep resolution (demand-driven), schema defaults/`mandatory`,
+/// ctx construction, and the impl call. (The body that ran inside `invoke()` before E0.)
+fn analyze_decl_body<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    decl: &Decl<'v>,
+) -> starlark::Result<()> {
+    let (implementation, attrs) = rule_parts(decl.rule)?;
+    let mut name = String::new();
+    let mut dep_labels: Vec<String> = Vec::new();
+    let mut fields: Vec<(String, Value<'v>)> = Vec::new();
+    for (key, v) in &decl.kwargs {
+        let (key, v) = (key.clone(), *v);
+        // D1b/c: the schema kind drives label resolution. Look it up once: `label`/`label_list`
+        // resolve to provider struct(s); the legacy `deps` is an implicit `label_list`.
+        let attr_kind: Option<String> = {
+            let mut k = None;
+            if let Some(d) = starlark::values::dict::DictRef::from_value(attrs) {
+                for (kk, desc) in d.iter() {
+                    if kk.unpack_str() == Some(key.as_str()) {
+                        if let Ok(Some(kind)) = desc.get_attr("kind", eval.heap()) {
+                            k = kind.unpack_str().map(String::from);
                         }
+                        break;
                     }
                 }
-                k
-            };
-            let is_label =
-                key == "deps" || matches!(attr_kind.as_deref(), Some("label") | Some("label_list"));
-            let single_label = attr_kind.as_deref() == Some("label");
-            match key.as_str() {
-                "name" => {
-                    name = v.unpack_str().unwrap_or_default().to_string();
-                    fields.push((key, *v));
-                }
-                // A label attr (legacy `deps` or any `attr.label_list`): resolve each label to its
-                // analyzed providers as a `struct(files=…, <folded fields>…)`.
-                _ if is_label => {
-                    // Collect the label string(s): a list (`label_list`/`deps`) or a single (`label`).
-                    let labels: Vec<String> = if let Some(list) = ListRef::from_value(*v) {
-                        list.iter().filter_map(|x| x.unpack_str().map(String::from)).collect()
-                    } else if let Some(s) = v.unpack_str() {
-                        vec![s.to_string()]
-                    } else {
-                        Vec::new()
-                    };
+            }
+            k
+        };
+        let is_label =
+            key == "deps" || matches!(attr_kind.as_deref(), Some("label") | Some("label_list"));
+        let single_label = attr_kind.as_deref() == Some("label");
+        match key.as_str() {
+            "name" => {
+                name = v.unpack_str().unwrap_or_default().to_string();
+                fields.push((key, v));
+            }
+            // A label attr (legacy `deps` or any `attr.label_list`): resolve each label to its
+            // analyzed providers as a `struct(files=…, <folded fields>…)`.
+            _ if is_label => {
+                // Collect the label string(s): a list (`label_list`/`deps`) or a single (`label`).
+                let labels: Vec<String> = if let Some(list) = ListRef::from_value(v) {
+                    list.iter().filter_map(|x| x.unpack_str().map(String::from)).collect()
+                } else if let Some(s) = v.unpack_str() {
+                    vec![s.to_string()]
+                } else {
+                    Vec::new()
+                };
+                let mut structs: Vec<Value<'v>> = Vec::new();
+                for label in &labels {
+                    // Canonical label — bare in single-package mode, //pkg:name in a workspace.
+                    let dep = canon_label(session(eval), label);
+                    // E0: a forward-referenced local declaration analyzes on demand, first.
+                    ensure_analyzed(eval, &dep)?;
+                    let sess = session(eval);
                     let results = sess.results.borrow();
-                    // C2c: transitive provider closures come from the ONE razel-dds fold (`DdsRead` over
-                    // a fact store of the analyzed-so-far targets). cc `.headers` = `Set` fold; java
-                    // `.compile_jars` = `OrderedDepset`; `.runtime_jars` = the same, neverlink-pruned.
+                    let Some(dep_target) = results.get(&dep) else {
+                        return Err(anyhow::anyhow!(
+                            "dep `{dep}` is not declared in this package \
+                             (or its package failed to load)"
+                        )
+                        .into());
+                    };
+                    // C2c: transitive provider closures come from the ONE razel-dds fold. (E0b
+                    // transitional: per-dep snapshot rebuild — E0d makes the Session own the Dds.)
                     let dds = crate::dds::to_dds(
                         &results.values().cloned().collect::<Vec<_>>(),
                         InstanceId::SINGLE,
                     )
                     .map_err(|e| anyhow::anyhow!(e))?;
-                    let mut structs: Vec<Value<'v>> = Vec::new();
-                    for label in &labels {
-                        // Canonical label — bare in single-package mode, //pkg:name in a workspace.
-                        let dep = canon_label(sess, label);
-                        let Some(dep_target) = results.get(&dep) else {
-                            return Err(anyhow::anyhow!(
-                                "dep `{dep}` not analyzed yet — declare it before its users \
-                                 (forward references not yet supported)"
-                            )
-                            .into());
-                        };
-                        let tkey = crate::dds::target_key(InstanceId::SINGLE, &dep)
-                            .map_err(|e| anyhow::anyhow!(e))?;
-                        // `files` is own-exposed (DefaultInfo); transitive fields fold via the ONE
-                        // registry-driven helper (shared with the native path) — no hardcoded cc/java.
-                        let mut sfields: Vec<(String, Vec<String>)> =
-                            vec![("files".to_string(), dep_target.default_info.clone())];
-                        sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
-                        dep_labels.push(dep);
-                        structs.push(heap.alloc(AllocStruct(sfields)));
-                    }
-                    // D1c: a single `attr.label` yields ONE struct; a list yields the list of structs.
-                    if single_label {
-                        fields.push((key, structs.into_iter().next().unwrap_or_else(Value::new_none)));
-                    } else {
-                        fields.push((key, heap.alloc(structs)));
-                    }
+                    let tkey = crate::dds::target_key(InstanceId::SINGLE, &dep)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    // `files` is own-exposed (DefaultInfo); transitive fields fold via the ONE
+                    // registry-driven helper (shared with the native path) — no hardcoded cc/java.
+                    let mut sfields: Vec<(String, Vec<String>)> =
+                        vec![("files".to_string(), dep_target.default_info.clone())];
+                    sfields.extend(crate::dds::fold_dep_fields(&dds, &tkey));
+                    dep_labels.push(dep);
+                    structs.push(eval.heap().alloc(AllocStruct(sfields)));
                 }
-                _ => fields.push((key, *v)),
-            }
-        }
-
-        // D1: consult the declared attrs schema — fill omitted attrs from their `default`, error on a
-        // missing `mandatory` one. (A2 discarded the schema; the real upstream rules require it.)
-        if let Some(schema) = starlark::values::dict::DictRef::from_value(self.attrs.to_value()) {
-            let passed: std::collections::BTreeSet<&str> =
-                named.keys().map(|k| k.as_str()).collect();
-            for (aname, descriptor) in schema.iter() {
-                let Some(an) = aname.unpack_str() else { continue };
-                if an == "name" || passed.contains(an) {
-                    continue;
-                }
-                let default = descriptor.get_attr("default", heap)?.unwrap_or_else(Value::new_none);
-                if !default.is_none() {
-                    fields.push((an.to_string(), default));
-                } else if descriptor
-                    .get_attr("mandatory", heap)?
-                    .and_then(|m| m.unpack_bool())
-                    .unwrap_or(false)
-                {
-                    return Err(anyhow::anyhow!("mandatory attribute `{an}` not provided").into());
+                // D1c: a single `attr.label` yields ONE struct; a list yields the list of structs.
+                if single_label {
+                    fields.push((key, structs.into_iter().next().unwrap_or_else(Value::new_none)));
+                } else {
+                    fields.push((key, eval.heap().alloc(structs)));
                 }
             }
+            _ => fields.push((key, v)),
         }
+    }
 
-        sess.state.borrow_mut().current = Some(AnalyzedTarget {
+    // D1: consult the declared attrs schema — fill omitted attrs from their `default`, error on a
+    // missing `mandatory` one. (A2 discarded the schema; the real upstream rules require it.)
+    if let Some(schema) = starlark::values::dict::DictRef::from_value(attrs) {
+        let passed: std::collections::BTreeSet<&str> =
+            decl.kwargs.iter().map(|(k, _)| k.as_str()).collect();
+        for (aname, descriptor) in schema.iter() {
+            let Some(an) = aname.unpack_str() else { continue };
+            if an == "name" || passed.contains(an) {
+                continue;
+            }
+            let default =
+                descriptor.get_attr("default", eval.heap())?.unwrap_or_else(Value::new_none);
+            if !default.is_none() {
+                fields.push((an.to_string(), default));
+            } else if descriptor
+                .get_attr("mandatory", eval.heap())?
+                .and_then(|m| m.unpack_bool())
+                .unwrap_or(false)
+            {
+                return Err(anyhow::anyhow!("mandatory attribute `{an}` not provided").into());
+            }
+        }
+    }
+
+    let sess = session(eval);
+    let heap = eval.heap();
+    sess.state.borrow_mut().current = Some(AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_labels,
             ..Default::default()
         });
 
-        // ctx.outputs.<attr> — string-valued attrs are predeclared output filenames
-        // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
-        // (qualified). ctx.executable is empty until an executable-label attr is wired.
-        // (razel resolves attribute values directly; the schema is not consulted.)
-        let mk_file = |s: &str| heap.alloc_complex_no_freeze(File { path: qualify(sess, s) });
-        let outputs_fields: Vec<(String, Value<'v>)> = named
-            .iter()
-            .filter_map(|(k, v)| v.unpack_str().map(|s| (k.as_str().to_string(), mk_file(s))))
-            .collect();
-        let files_fields: Vec<(String, Value<'v>)> = named
-            .iter()
-            .filter_map(|(k, v)| {
-                ListRef::from_value(*v).map(|list| {
-                    let items: Vec<Value<'v>> = list
-                        .iter()
-                        .filter_map(|it| it.unpack_str().map(mk_file))
-                        .collect();
-                    (k.as_str().to_string(), heap.alloc(items))
-                })
+    // ctx.outputs.<attr> — string-valued attrs are predeclared output filenames
+    // (package-qualified). ctx.files.<attr> — list-valued attrs are source files
+    // (qualified). ctx.executable is empty until an executable-label attr is wired.
+    let mk_file = |s: &str| heap.alloc_complex_no_freeze(File { path: qualify(sess, s) });
+    let outputs_fields: Vec<(String, Value<'v>)> = decl
+        .kwargs
+        .iter()
+        .filter_map(|(k, v)| v.unpack_str().map(|s| (k.clone(), mk_file(s))))
+        .collect();
+    let files_fields: Vec<(String, Value<'v>)> = decl
+        .kwargs
+        .iter()
+        .filter_map(|(k, v)| {
+            ListRef::from_value(*v).map(|list| {
+                let items: Vec<Value<'v>> = list
+                    .iter()
+                    .filter_map(|it| it.unpack_str().map(mk_file))
+                    .collect();
+                (k.clone(), heap.alloc(items))
             })
-            .collect();
-        let ctx = heap.alloc_complex_no_freeze(Ctx {
+        })
+        .collect();
+    let ctx = heap.alloc_complex_no_freeze(Ctx {
             attr: heap.alloc(AllocStruct(fields)),
             actions: heap.alloc_complex_no_freeze(Actions),
             // `ctx.label` is a Label struct (`.package`/`.name`) — razel's cc:defs.bzl reads them
@@ -251,19 +399,18 @@ where
             files: heap.alloc(AllocStruct(files_fields)),
             executable: heap.alloc(AllocStruct(Vec::<(String, Value<'v>)>::new())),
         });
-        eval.eval_function(self.implementation.to_value(), &[ctx], &[])?;
+    eval.eval_function(implementation, &[ctx], &[])?;
 
-        // Post-eval (after the nested rule impl ran): commit the analyzed target. `sess` is
-        // still valid — it borrows the extra target, not `eval`. Short, non-overlapping borrows.
-        {
-            let mut st = sess.state.borrow_mut();
-            if let Some(c) = st.current.take() {
-                sess.results.borrow_mut().insert(c.name.clone(), c.clone());
-                st.targets.push(c);
-            }
+    // Post-impl: commit the analyzed target. `sess` is still valid — it borrows the extra
+    // target, not `eval`. Short, non-overlapping borrows.
+    {
+        let mut st = sess.state.borrow_mut();
+        if let Some(c) = st.current.take() {
+            sess.results.borrow_mut().insert(c.name.clone(), c.clone());
+            st.targets.push(c);
         }
-        Ok(Value::new_none())
     }
+    Ok(())
 }
 
 

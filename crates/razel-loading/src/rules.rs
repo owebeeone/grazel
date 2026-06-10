@@ -224,11 +224,18 @@ pub(crate) fn eval_build_src(session: &Session, name: &str, src: &str) -> Result
     let ast =
         AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
     Module::with_temp_heap(|module| {
+        crate::dialect::install_decl_store(&module);
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.set_loader(&loader);
+            eval.extra = Some(session); // builtins read the Session via `session(eval)`
+            eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
+        }
+        // E0 phase 2: analyze the recorded declarations, demand-driven (forward refs resolve).
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
-        eval.extra = Some(session); // builtins read the Session via `session(eval)`
-        eval.eval_module(ast, &globals)
-            .map_err(|e| format!("{e}"))?;
+        eval.extra = Some(session);
+        crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
         Ok(())
     })
 }
@@ -322,10 +329,16 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
     .with(engine_namespaces)
     .build();
     let res: Result<(), String> = Module::with_temp_heap(|module| {
+        crate::dialect::install_decl_store(&module);
+        {
+            let mut eval = Evaluator::new(&module);
+            eval.extra = Some(&session);
+            eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
+        }
+        // E0 phase 2: analyze the recorded declarations, demand-driven (forward refs resolve).
         let mut eval = Evaluator::new(&module);
         eval.extra = Some(&session);
-        eval.eval_module(ast, &globals)
-            .map_err(|e| format!("{e}"))?;
+        crate::dialect::drive_decls(&mut eval).map_err(|e| format!("{e}"))?;
         Ok(())
     });
     res?;
@@ -417,8 +430,9 @@ bin_rule(name = "app", deps = [":math"])
     }
 
     #[test]
-    fn forward_dep_reference_errors_clearly() {
-        // bin declared before its dep → forward ref → clear error, not silently wrong.
+    fn forward_dep_reference_analyzes() {
+        // E0: bin declared before its dep → the demand-driven pass analyzes :math first.
+        // (Inverts the pre-E0 pin that forward refs must error — RazelV3Plan §2.)
         let src = r#"
 def _lib(ctx):
     return [DefaultInfo(files = ["x"])]
@@ -429,6 +443,7 @@ bin_rule = rule(implementation = _bin, attrs = {})
 bin_rule(name = "app", deps = [":math"])
 lib_rule(name = "math")
 "#;
-        assert!(analyze_starlark("BUILD", src).is_err());
+        let targets = analyze_starlark("BUILD", src).unwrap();
+        assert!(targets.iter().any(|t| t.name.ends_with("app")));
     }
 }

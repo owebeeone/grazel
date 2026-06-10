@@ -104,6 +104,13 @@ pub(crate) struct Session {
     /// process global — F13). `None` until first use; a different analysis (different PATH/toolchain)
     /// re-resolves because it's a fresh `Session`.
     pub(crate) resolved_cc: RefCell<Option<String>>,
+    /// E0 phase split: declared-but-not-yet-analyzed targets (canonical label → index into the
+    /// current package's declaration store). Registered at record time (BUILD eval), consumed by the
+    /// demand-driven analysis pass — this is what makes forward references resolve. Entries belong to
+    /// the package currently being driven; a nested `load_package` drains its own before returning.
+    pub(crate) pending: RefCell<BTreeMap<String, usize>>,
+    /// Targets currently mid-analysis (cycle detection for the demand-driven pass).
+    pub(crate) analyzing: RefCell<HashSet<String>>,
 }
 
 impl Session {
