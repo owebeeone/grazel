@@ -74,9 +74,14 @@ pub(crate) fn py_rules(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
-        let (srcs, deps) = (unpack_strs_any(srcs), unpack_strs_any(deps));
+        // Selects defer to analysis (round 41 — the str_attr_parts pattern; the python
+        // layer's `deps = [..] + select(..)` stringified into bogus dep labels).
+        let srcs = crate::values::str_attr_parts(eval, srcs)?;
+        let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
-            let g = gather(eval, srcs.clone(), deps.clone())?;
+            let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+            let deps = crate::values::resolve_str_parts(eval, &deps)?;
+            let g = gather(eval, srcs, deps)?;
             let sess = session(eval);
             // Exported sources: own srcs + transitive dep srcs (the PyInfo channel).
             let mut exported = g.srcs.clone();
@@ -135,9 +140,13 @@ fn py_executable<'v>(
     main: Option<String>,
 ) -> anyhow::Result<NoneType> {
     let label = canon_label(session(eval), &name);
-    let (srcs, deps) = (unpack_strs_any(srcs), unpack_strs_any(deps));
+    // Selects defer to analysis (round 41 — see native_py_library).
+    let srcs = crate::values::str_attr_parts(eval, srcs)?;
+    let deps = crate::values::str_attr_parts(eval, deps)?;
     crate::dialect::record_native(eval, label, native_decl(move |eval| {
-    let g = gather(eval, srcs.clone(), deps.clone())?;
+    let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+    let deps = crate::values::resolve_str_parts(eval, &deps)?;
+    let g = gather(eval, srcs, deps)?;
     let sess = session(eval);
     // Entrypoint: `main` (package-qualified) or the first src (already qualified).
     let entry = match main {

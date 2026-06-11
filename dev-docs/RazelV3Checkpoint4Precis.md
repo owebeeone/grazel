@@ -306,3 +306,16 @@ stringify deferred selects — "dep `select({…})` not analyzed" 36 + "select-e
 + @cpuinfo 22+12 (vendor hops behind jit and ruy/lite — fetchable); @pypi 37+12 (posture);
 tf/cc `$(location :ops/…)` 23; tfrt make-var 9. Wall 8:00 sequential — the default-on
 pool decision now saves ~6:00/sweep. 64 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 41 (2026-06-11, stabilization lane)
+
+**385 → 393/835 (47.1%).** The deferral's own residue is dead: py natives
+(py_library/py_binary/py_test) route srcs/deps through str_attr_parts (they had
+stringified deferred selects into bogus dep labels — the 36-class), and str_attr_parts
+flattens RECURSIVELY (function-composed selects nest exprs: `ruy_copts_warnings() +
+ruy_copts_neon()` — the 10-class). @shardy + @cpuinfo materialized (the 35-class dead;
+cpuinfo converts into its own analysis chain, 21). **New top engine class:** `NoneType has
+no attribute basename` (33 — a ctx.file/File-shape gap, next plate); the python chains
+keep converting inward (tensorflow_py 22 → constant_op 16 → eager:context 15 →
+client:session 14 — the @pypi/numpy posture gates the cone). 64 bins; 3 gates; 6
+sentinels; 2 rungolds. **Session curve: 307 → 393 (+86; 36.8% → 47.1%).**

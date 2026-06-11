@@ -663,24 +663,36 @@ pub(crate) fn str_attr_parts<'v>(
         }
         Ok(StrAttrPart::Branches(out))
     };
-    let decompose_one = |part: Value<'v>| -> anyhow::Result<StrAttrPart> {
-        if let Some(b) = part.downcast_ref::<crate::selects::SelectBranches>() {
-            branches(&b.branches)
+    // Parts flatten RECURSIVELY: function-composed selects nest exprs inside exprs
+    // (`ruy_copts_warnings() + ruy_copts_neon()` — each itself a list+select), round 41.
+    fn walk<'v>(
+        out: &mut Vec<StrAttrPart>,
+        part: Value<'v>,
+        branches: &dyn Fn(&[(Value<'v>, Value<'v>)]) -> anyhow::Result<StrAttrPart>,
+        strs: &dyn Fn(Value<'v>) -> Vec<String>,
+    ) -> anyhow::Result<()> {
+        if let Some(e) = part.downcast_ref::<crate::selects::SelectExpr>() {
+            for p in &e.parts {
+                walk(out, *p, branches, strs)?;
+            }
+        } else if let Some(e) = part.downcast_ref::<crate::selects::FrozenSelectExpr>() {
+            for p in &e.parts {
+                walk(out, p.to_value(), branches, strs)?;
+            }
+        } else if let Some(b) = part.downcast_ref::<crate::selects::SelectBranches>() {
+            out.push(branches(&b.branches)?);
         } else if let Some(b) = part.downcast_ref::<crate::selects::FrozenSelectBranches>() {
             let pairs: Vec<(Value<'v>, Value<'v>)> =
                 b.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect();
-            branches(&pairs)
+            out.push(branches(&pairs)?);
         } else {
-            Ok(StrAttrPart::Plain(strs(part)))
+            out.push(StrAttrPart::Plain(strs(part)));
         }
-    };
-    if let Some(e) = r.downcast_ref::<crate::selects::SelectExpr>() {
-        e.parts.iter().map(|p| decompose_one(*p)).collect()
-    } else if let Some(e) = r.downcast_ref::<crate::selects::FrozenSelectExpr>() {
-        e.parts.iter().map(|p| decompose_one(p.to_value())).collect()
-    } else {
-        Ok(vec![decompose_one(r)?])
+        Ok(())
     }
+    let mut out = Vec::new();
+    walk(&mut out, r, &branches, &strs)?;
+    Ok(out)
 }
 
 /// Resolve [`StrAttrPart`]s at ANALYSIS time (all conditions declared by now): reconstruct the
