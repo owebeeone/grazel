@@ -16,8 +16,16 @@ pub(crate) fn expand_genrule_cmd(
     let lookup = |x: &str| -> anyhow::Result<&Vec<String>> {
         loc.iter()
             .find(|(k, _)| k == x)
+            // `:name` and `name` are the same label (round 42).
+            .or_else(|| {
+                loc.iter().find(|(k, _)| {
+                    k.trim_start_matches(':') == x.trim_start_matches(':')
+                })
+            })
             .map(|(_, v)| v)
-            .ok_or_else(|| anyhow::anyhow!("$(location {x}): `{x}` is not in this genrule's srcs"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("$(location {x}): `{x}` is not in this genrule's srcs/outs/tools")
+            })
     };
     let mut out = String::with_capacity(cmd.len());
     let mut it = cmd.chars().peekable();

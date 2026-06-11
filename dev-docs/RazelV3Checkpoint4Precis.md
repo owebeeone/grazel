@@ -319,3 +319,15 @@ no attribute basename` (33 — a ctx.file/File-shape gap, next plate); the pytho
 keep converting inward (tensorflow_py 22 → constant_op 16 → eager:context 15 →
 client:session 14 — the @pypi/numpy posture gates the cone). 64 bins; 3 gates; 6
 sentinels; 2 rungolds. **Session curve: 307 → 393 (+86; 36.8% → 47.1%).**
+
+## Round delta — razelV3 round 42 (2026-06-11, stabilization lane — two engine plates)
+
+**393 → 397/835 (47.5%); both plates dead.** (1) `NoneType.basename` (33): typed
+`attr.output`/`output_list` kwargs now materialize as FILE objects on
+`ctx.outputs.<attr>` (@xla cc_embed_data iterates them; razel had only mapped loose
+single-string kwargs). (2) `$(location :ops/…)` (23): Bazel's `$(location)` resolves
+against the genrule's OWN outs too (tf_gen_op_wrapper_cc locates its outputs in cmd) —
+outs join the location table and lookup is `:`-tolerant (`:name` == `name`). Converted
+walls now visible: `@local_config_cuda//cuda:cuda_headers` not declared (36 — the no-CUDA
+host BUILD needs the target rows) and a grpc `src/compiler` load-path hop (23). Python
+cone unchanged (@pypi posture). 64 bins; 3 gates; 6 sentinels; 2 rungolds.

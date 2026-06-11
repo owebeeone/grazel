@@ -1046,6 +1046,9 @@ pub(crate) fn analyze_rule_decl<'v>(
     let mut name = String::new();
     let mut dep_labels: Vec<String> = Vec::new();
     let mut fields: Vec<(String, Value<'v>)> = Vec::new();
+    // Typed output attrs (kind output/output_list) surface as FILES on ctx.outputs.<attr>
+    // (@xla cc_embed_data iterates ctx.outputs.outs — round 42).
+    let mut typed_outputs: Vec<(String, Vec<String>)> = Vec::new();
     for (key, v) in &kwargs {
         let (key, v) = (key.clone(), *v);
         // D1b/c: the schema kind drives label resolution. Look it up once: `label`/`label_list`
@@ -1091,6 +1094,14 @@ pub(crate) fn analyze_rule_decl<'v>(
                     }
                 }
                 fields.push((key, heap.alloc(starlark::values::dict::AllocDict(entries))));
+            }
+            _ if matches!(attr_kind.as_deref(), Some("output") | Some("output_list")) => {
+                let outs: Vec<String> = match v.unpack_str() {
+                    Some(s) => vec![s.to_string()],
+                    None => crate::values::unpack_strs_any(Some(v)),
+                };
+                typed_outputs.push((key.clone(), outs));
+                fields.push((key, v));
             }
             // A label attr (legacy `deps` or any `attr.label_list`): resolve each label to its
             // analyzed providers as a `struct(files=…, <folded fields>…)`.
@@ -1188,8 +1199,20 @@ pub(crate) fn analyze_rule_decl<'v>(
             }
         }
     }
+    // Typed output attrs first (output → one File, output_list → a list of Files).
+    let typed_keys: std::collections::BTreeSet<&str> =
+        typed_outputs.iter().map(|(k, _)| k.as_str()).collect();
+    for (k, outs) in &typed_outputs {
+        if outs.len() == 1 {
+            outputs_fields.push((k.clone(), mk_file(&outs[0])));
+        } else {
+            let files: Vec<Value<'v>> = outs.iter().map(|o| mk_file(o)).collect();
+            outputs_fields.push((k.clone(), heap.alloc(files)));
+        }
+    }
     let kw_outputs: Vec<(String, Value<'v>)> = kwargs
         .iter()
+        .filter(|(k, _)| !typed_keys.contains(k.as_str()))
         .filter_map(|(k, v)| v.unpack_str().map(|s| (k.clone(), mk_file(s))))
         .collect();
     outputs_fields.extend(kw_outputs);

@@ -103,3 +103,15 @@ genrule(name = "selcat", srcs = [], outs = ["p"], cmd = "echo " + select({":dbg"
     assert_eq!(target(&ts, "selgen").actions[0].argv[2], "rel-cmd");
     assert_eq!(target(&ts, "selcat").actions[0].argv[2], "echo R");
 }
+
+#[test]
+fn location_resolves_own_outs() {
+    // tf_gen_op_wrapper_cc's shape (23 pkgs): the cmd locates the genrule's OWN outputs —
+    // Bazel's $(location) resolves against srcs, tools AND outs; `:o.h` and `o.h` are the
+    // same label.
+    let src = r#"
+genrule(name = "own", srcs = [], outs = ["o.h", "o.cc"], cmd = "tool $(location :o.h) $(location o.cc)")
+"#;
+    let ts = analyze_starlark("BUILD", src).unwrap();
+    assert_eq!(target(&ts, "own").actions[0].argv[2], "tool o.h o.cc");
+}

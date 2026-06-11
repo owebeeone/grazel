@@ -91,3 +91,21 @@ r(name = "x")  # src omitted -> must error
     let err = analyze_starlark("BUILD", src).unwrap_err();
     assert!(format!("{err}").contains("mandatory"), "missing mandatory attr must error: {err}");
 }
+
+#[test]
+fn output_list_attr_populates_ctx_outputs() {
+    // @xla cc_embed_data's shape (33 pkgs): `attr.output_list()` values must surface as
+    // FILE objects on ctx.outputs.<attr> (the impl iterates them reading .path/.basename);
+    // razel only mapped single-string kwargs.
+    let src = r#"
+def _impl(ctx):
+    names = [f.basename for f in ctx.outputs.outs]
+    return [DefaultInfo(files = names)]
+
+embed = rule(implementation = _impl, attrs = {"outs": attr.output_list()})
+embed(name = "x", outs = ["gen/a.h", "gen/a.cc"])
+"#;
+    let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
+    let x = targets.iter().find(|t| t.name == "x").unwrap();
+    assert_eq!(x.default_info, vec!["a.h", "a.cc"]);
+}

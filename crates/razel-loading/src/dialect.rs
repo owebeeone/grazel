@@ -511,6 +511,12 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             }
             let outs_raw: Vec<String> = outs.items.clone();
             let outs: Vec<String> = outs.items.iter().map(|o| qualify(sess, o)).collect();
+            // Bazel's $(location X) resolves against srcs, tools AND the genrule's OWN
+            // outs (tf_gen_op_wrapper_cc locates its outputs in cmd) — round 42.
+            for (raw, q) in outs_raw.iter().zip(outs.iter()) {
+                loc.push((raw.clone(), vec![q.clone()]));
+                loc.push((format!(":{raw}"), vec![q.clone()]));
+            }
             // $(@D)/$(RULEDIR): the package's output root — qualified out minus the
             // as-written path (single-out @D is the output's own directory).
             let out_dir = match (outs.first(), outs_raw.first()) {
