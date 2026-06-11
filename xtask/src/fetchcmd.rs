@@ -42,7 +42,9 @@ pub(crate) fn fetch_extract(root: &Path) -> Result<(), String> {
         "workspace": ws.display().to_string(),
         "repos": repos,
     });
-    let out = root.join("../third-party/tensorflow.razel-lock.json");
+    // Bazel writes its lockfile (MODULE.bazel.lock) into the WORKSPACE ROOT; razel's
+    // equivalent sits in the same place under its own name (mirror-Bazel placement).
+    let out = ws.join("razel-lock.json");
     std::fs::write(&out, serde_json::to_string_pretty(&lock).expect("json") + "\n")
         .map_err(|e| format!("write {}: {e}", out.display()))?;
     // The dry-run report: counts by kind + what the fetcher would need.
