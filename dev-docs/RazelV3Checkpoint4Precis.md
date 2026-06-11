@@ -147,3 +147,21 @@ flatbuffers-overlay 23, @stablehlo 19, @FP16 18, highway list+tuple 15 (coverage
 Registered: round-32's absorbing synthesis silently serves cycle partial-state instance
 reads (sequential-equivalent, value-divergent under timing; surfaced designing the F4 test
 — RazelGaps round-33). 62 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 34 (2026-06-11, stabilization lane — scheduling groundwork)
+
+**The scheduling lever is measured, its headroom proven, and its gate identified: seeding
+waits on the coverage lane's deferred-select fix.** Post-round-33 parallel wall, threads=12:
+**317-318/835 @ 98s, 564s user (5.75 avg cores busy** — round 27: 3.3); a 12s mid-run
+sample shows the tail is 1-busy/11-parked on package waits — the spine ceiling, confirmed
+post-futures. The round-23 spine-seeding infrastructure (`RAZEL_TFLOAD_SEED`, parked when
+the pool was unsound) re-tested: **wall 98s → 25.1s (3.9×)** — the fan-out machinery works
+— but coverage 317 → 195. Root-caused, not corruption: seeding entry-drives
+`@xla//xla/tsl/platform` BEFORE `//xla/tsl:fuchsia` is declared; the hybrid eager-select
+leaves an unresolvable `select_expr` that filegroup's typed `srcs` rejects at DECLARE →
+`PkgState::Failed` caches the package-in-error → 277 consumers inherit it (~122 net
+Ok→Fail). Unseeded ordering always declares the condition first (0 occurrences across both
+full sweeps) — the eager-select class's order-sensitivity at spine scale, exactly the
+round-27 wording. **Sequencing consequence: deferred-select (coverage lane, item 1) is now
+also the scheduling lane's gate; re-run the seeding experiment when it lands — the <60s
+target is plainly inside the 25s envelope.** No code this round; observations only.
