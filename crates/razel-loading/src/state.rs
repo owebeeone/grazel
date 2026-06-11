@@ -88,6 +88,11 @@ pub(crate) struct EvalStack {
     /// Targets mid-analysis on THIS worker (cycle detection; cross-worker duplicate analysis
     /// is allowed — results overwrite by label, the established idempotent re-analysis).
     pub(crate) analyzing: HashSet<String>,
+    /// F4 (restart): cross-thread partial-state reads this worker consumed (CycleProceed
+    /// grants, failed-dep declaration waits). Cross-thread-only by construction — sequential
+    /// re-entry takes the Reentry arm — so threads=1 never advances it. The tree driver
+    /// retries failed entry loads whose count advanced.
+    pub(crate) partial_reads: usize,
 }
 
 /// Per-analysis state, threaded explicitly — the precursor of the DDS (RazelV2Contracts §0)
@@ -336,6 +341,11 @@ pub(crate) fn acquire_resource(sess: &Session, key: &ResKey) -> Acquire {
         Acquire::CycleProceed => "cycle-proceed",
         Acquire::Failed(_) => "failed-cached",
     };
+    // F4: every CycleProceed is a CROSS-thread partial read (same-thread re-entry takes
+    // the Reentry arm) — count it so a failed entry load can restart.
+    if matches!(out, Acquire::CycleProceed) {
+        sess.note_partial_read();
+    }
     sched_event(sess, point, key.name());
     out
 }
@@ -521,16 +531,25 @@ pub(crate) fn wait_pending_decl(sess: &Session, label: &str, pkg: &str) -> Pendi
     let pkey = ResKey::Pkg(pkg.to_string());
     {
         // Silent pre-check: only engage (and emit events) when the package is genuinely
-        // mid-flight on ANOTHER worker.
+        // mid-flight on ANOTHER worker. A vanished package (FailRetry purge between the
+        // pending peek and here) counts as a partial read — its retry may resolve this.
         let g = sess.loaded.lock().expect("loaded poisoned");
         match g.res.get(&pkey) {
             Some(PkgState::InFlight(owner)) if *owner != me => {}
             Some(PkgState::InFlight(_)) => return PendingWait::Proceed,
-            _ => return PendingWait::PkgTerminal,
+            Some(_) => return PendingWait::PkgTerminal,
+            None => {
+                drop(g);
+                sess.note_partial_read();
+                return PendingWait::PkgTerminal;
+            }
         }
     }
     sched_event(sess, "enter", label);
-    let outcome = wait_pending_decl_locked(sess, &dkey, &pkey, me);
+    let (outcome, partial) = wait_pending_decl_locked(sess, &dkey, &pkey, me);
+    if partial {
+        sess.note_partial_read();
+    }
     let point = match outcome {
         PendingWait::Published => "decl-published",
         PendingWait::PkgTerminal => "decl-terminal",
@@ -545,15 +564,15 @@ fn wait_pending_decl_locked(
     dkey: &ResKey,
     pkey: &ResKey,
     me: std::thread::ThreadId,
-) -> PendingWait {
+) -> (PendingWait, bool) {
     let mut g = sess.loaded.lock().expect("loaded poisoned");
     loop {
         let owner = match g.res.get(dkey) {
-            Some(PkgState::Done) => return PendingWait::Published,
+            Some(PkgState::Done) => return (PendingWait::Published, false),
             // A terminal failure on the declaration itself (native FailCached) — the
             // callers' memo paths serve the real error.
-            Some(PkgState::Failed(_)) => return PendingWait::PkgTerminal,
-            Some(PkgState::InFlight(t)) if *t == me => return PendingWait::Proceed,
+            Some(PkgState::Failed(_)) => return (PendingWait::PkgTerminal, false),
+            Some(PkgState::InFlight(t)) if *t == me => return (PendingWait::Proceed, false),
             Some(PkgState::InFlight(t)) => *t,
             None => match g.res.get(pkey) {
                 // (Re)create the proxy, owned by the package's owner — the walk and the
@@ -563,14 +582,19 @@ fn wait_pending_decl_locked(
                     g.res.insert(dkey.clone(), PkgState::InFlight(owner));
                     owner
                 }
-                Some(PkgState::InFlight(_)) => return PendingWait::Proceed,
-                _ => return PendingWait::PkgTerminal,
+                Some(PkgState::InFlight(_)) => return (PendingWait::Proceed, false),
+                Some(_) => return (PendingWait::PkgTerminal, false),
+                // FailRetry removed the package mid-wait: the declaration died with a
+                // partial-read failure somewhere — restart-eligible.
+                None => return (PendingWait::PkgTerminal, true),
             },
         };
         let mut wake_breaker = false;
         if let Some(has_breaker) = walk_cycle_kind(&g, owner, me) {
             if !has_breaker {
-                return PendingWait::Proceed;
+                // All-Decl cycle: the publishers are all parked on each other — a true
+                // cross-thread deadlock shape. Proceed-partial (restart-eligible).
+                return (PendingWait::Proceed, true);
             }
             wake_breaker = true;
         }
@@ -736,6 +760,15 @@ impl Session {
     /// Commit: take the in-flight target out (post-impl record).
     pub(crate) fn take_current_target(&self) -> Option<AnalyzedTarget> {
         self.with_stack(|s| s.current.take())
+    }
+
+    /// F4: this worker's cross-thread partial-read count (see [`EvalStack::partial_reads`]).
+    pub(crate) fn partial_reads(&self) -> usize {
+        self.read_stack(|s| s.partial_reads).unwrap_or(0)
+    }
+
+    pub(crate) fn note_partial_read(&self) {
+        self.with_stack(|s| s.partial_reads += 1);
     }
 
     /// The resolved native (host) cc compiler — walked from `PATH` once per Session (§7 ·iii), cached

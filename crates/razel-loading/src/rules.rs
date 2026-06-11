@@ -699,22 +699,57 @@ pub fn load_tree_report_with_threads(
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(vec![None; packages.len()]);
+    let retry = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(pkg) = packages.get(i) else { break };
+                    let before = session.partial_reads();
                     let r = load_package_entry(&session, pkg);
+                    // F4 (restart): an entry that FAILED after consuming cross-thread
+                    // partial state (CycleProceed grants, dead declaration waits) is not a
+                    // sequential verdict — queue it for the post-drain restart rounds.
+                    if r.is_err() && session.partial_reads() > before {
+                        retry.lock().expect("retry").push(i);
+                    }
                     results.lock().expect("results").get_mut(i).map(|slot| *slot = Some(r));
                 }
             });
         }
     });
+    let mut results = results.into_inner().expect("results");
+    // Restart rounds, SINGLE-threaded (Skyframe's answer, RazelDemandFutures.md §5): by
+    // now the cycle partners are terminal, so each retry sees what a sequential entry
+    // would have. Rounds until no progress — termination is structural, no cap to tune.
+    let mut retry = retry.into_inner().expect("retry");
+    retry.sort_unstable();
+    while !retry.is_empty() {
+        eprintln!(
+            "razel: restarting {} entry load(s) after cross-thread partial reads",
+            retry.len()
+        );
+        let mut progressed = false;
+        let mut still_failing = Vec::new();
+        for &i in &retry {
+            let r = load_package_entry(&session, &packages[i]);
+            if r.is_ok() {
+                progressed = true;
+            } else {
+                still_failing.push(i);
+            }
+            results[i] = Some(r);
+        }
+        if !progressed {
+            break;
+        }
+        retry = still_failing;
+    }
     let report: Vec<(String, Result<(), String>)> = packages
         .iter()
         .cloned()
-        .zip(results.into_inner().expect("results").into_iter().map(|r| r.unwrap_or(Ok(()))))
+        .zip(results.into_iter().map(|r| r.unwrap_or(Ok(()))))
         .collect();
     let loaded = loaded_done(&session);
     (report, loaded)

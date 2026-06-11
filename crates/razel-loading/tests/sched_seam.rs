@@ -294,6 +294,85 @@ use = rule(implementation = _use_impl, attrs = {"deps": attr.label_list()})
     );
 }
 
+/// F4 (restart): the MUTUAL-UNDRIVEN-DECLARATION shape — each entry's drive demands a
+/// declaration the OTHER entry has declared but not yet driven (each is parked before its
+/// own producer target). The decl-future waits form an all-Decl cycle: the workers' drive
+/// loops ARE the publishers, and both are parked — a true cross-thread deadlock that the
+/// cycle rule resolves by failing the later walker (proceed-partial), sweeping the other
+/// onto the same fallthrough. Sequentially BOTH packages load (the nested dep-load defers
+/// and harvests). The tree driver must RESTART failed entries that consumed cross-thread
+/// partial reads once the pool drains — both green, matching the sequential sweep.
+#[test]
+fn mutual_undriven_decl_demands_restart_to_parity() {
+    let root = std::env::temp_dir().join(format!("razel-seam-restart-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("defs")).unwrap();
+    std::fs::write(
+        root.join("defs/info.bzl"),
+        r#"def _lib_impl(ctx):
+    return [DefaultInfo(files = [])]
+
+lib = rule(implementation = _lib_impl, attrs = {})
+
+def _use_impl(ctx):
+    paths = []
+    for d in ctx.attr.deps:
+        for f in d.files:
+            paths.append(f.path)
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = paths)
+
+use = rule(implementation = _use_impl, attrs = {"deps": attr.label_list()})
+"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("defs/BUILD"), "").unwrap();
+    for s in ["slowa", "slowb"] {
+        std::fs::create_dir_all(root.join(s)).unwrap();
+        std::fs::write(root.join(s).join("x.txt"), "x").unwrap();
+        std::fs::write(
+            root.join(s).join("BUILD"),
+            "filegroup(name = \"x\", srcs = [\"x.txt\"])\n",
+        )
+        .unwrap();
+    }
+    // Drive order is the trap: each entry demands the OTHER's last-declared target while
+    // its own producer is still undriven. The slowa/slowb demands are the rendezvous —
+    // keys only one worker each reaches, AFTER declaring, BEFORE the cross-demand.
+    std::fs::create_dir_all(root.join("p1")).unwrap();
+    std::fs::write(
+        root.join("p1/BUILD"),
+        "load(\"//defs:info.bzl\", \"lib\", \"use\")\n\
+         use(name = \"g1\", deps = [\"//slowa:x\"])\n\
+         use(name = \"u1\", deps = [\"//p2:t2\"])\n\
+         lib(name = \"t4\")\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("p2")).unwrap();
+    std::fs::write(
+        root.join("p2/BUILD"),
+        "load(\"//defs:info.bzl\", \"lib\", \"use\")\n\
+         use(name = \"g2\", deps = [\"//slowb:x\"])\n\
+         use(name = \"u2\", deps = [\"//p1:t4\"])\n\
+         lib(name = \"t2\")\n",
+    )
+    .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut flags = GlobalFlags::default();
+    flags.sched_hook = Some(hook_with_gate(events.clone(), |k| k == "slowa" || k == "slowb"));
+    let (report, _) = load_tree_report_with_threads(
+        &root,
+        flags,
+        &["p1".to_string(), "p2".to_string()],
+        Vec::new(),
+        2,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    for (pkg, r) in &report {
+        assert!(r.is_ok(), "restart must recover the partial-read failure: {pkg}: {r:?}");
+    }
+    assert_eq!(count(&events, "takeover-timeout", ""), 0, "no waiter may hit the 20s backstop");
+}
+
 /// F2 (demand futures): two workers demanding the same DEFERRED NATIVE body (FnOnce —
 /// `Session.native_decls[i].take()`) must single-flight: the loser WAITS for the runner's
 /// record instead of seeing an empty slot and erroring "neither a declared target nor a
