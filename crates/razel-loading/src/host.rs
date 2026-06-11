@@ -113,9 +113,19 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
             "@rules_python//python:pip.bzl",
             include_str!("../host-repos/rules_python/python/pip.bzl"),
         ),
+        // (@pypi//:requirements.bzl host stub RETIRED round 45 — the fetch-pypi hub
+        // generates the real one; host rows would shadow it.)
         (
-            "@pypi//:requirements.bzl",
-            include_str!("../host-repos/pypi/requirements.bzl"),
+            "@rules_python//python/private/pypi:pkg_aliases.bzl",
+            include_str!("../host-repos/rules_python/python/private/pypi/pkg_aliases.bzl"),
+        ),
+        (
+            "@rules_python//python/private/pypi:whl_library_targets.bzl",
+            include_str!("../host-repos/rules_python/python/private/pypi/whl_library_targets.bzl"),
+        ),
+        (
+            "@rules_python//python/pip_install:pip_repository.bzl",
+            include_str!("../host-repos/rules_python/python/pip_install/pip_repository.bzl"),
         ),
         (
             "@rules_jvm_external//:defs.bzl",

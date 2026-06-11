@@ -29,6 +29,7 @@ fn workspace_root() -> PathBuf {
 }
 
 mod fetchcmd;
+mod fetchpypi;
 mod probe;
 mod rungold;
 mod stress;
@@ -73,6 +74,16 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("fetch-pypi") => {
+            let names: Vec<String> = rest.clone();
+            match fetchpypi::fetch_pypi(&workspace_root(), &names) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("xtask fetch-pypi: FAIL — {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("fetch") => {
             let names: Vec<String> = rest.clone();
             match fetchcmd::fetch(&workspace_root(), &names) {

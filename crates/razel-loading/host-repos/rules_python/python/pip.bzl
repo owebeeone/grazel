@@ -6,3 +6,6 @@ def package_annotation(**kwargs):
 
 def pip_parse(name = None, **kwargs):
     pass
+
+# pip_utils namespace (loaded by generated requirements.bzl shapes).
+pip_utils = razel_host_absorb

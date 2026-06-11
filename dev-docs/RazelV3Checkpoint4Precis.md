@@ -362,3 +362,25 @@ unified; ONE globals surface everywhere. The 32 packages now fail on grpc's own 
 validation ("Path references a path above the execution root") — an include-path model
 plate, likely shared with the cpuinfo chain (22). 64 bins; 3 gates; 6 sentinels; 2
 rungolds.
+
+## Round delta — razelV3 round 45 (2026-06-11, stabilization lane — faithful @pypi)
+
+**420 → 458/835 (54.9%). The @pypi cone is OPEN — and it is the FAITHFUL pipeline
+(decision: Gianni — no stub hub): `xtask fetch-pypi` is razel's pip_parse/whl_library
+equivalent, mirroring rules_python's on-disk shapes against bazel-7.7.0 ground truth.**
+Hub `@pypi` (76 packages from TF's requirements_lock_3_10 — the hermetic default bazel
+actually uses; cp310 wheels prove it): pkg_aliases BUILDs BYTE-IDENTICAL to bazel's, the
+generated requirements.bzl, the boundary files. Spokes `pypi_<name>`: PyPI JSON-API URL
+resolution by LOCK-DIGEST membership, wheel choice = highest compatible macosx_arm64 then
+py3-none-any (numpy picks bazel's exact macosx_14_0 cp310 wheel; spoke BUILD.bazel —
+whl_library_targets full field set + TF's numpy_headers annotation — byte-identical),
+sha-verified into the shared content-addressed cache, unpacked to site-packages/,
+console-script entry-point shims, deps from wheel METADATA ∩ lock. Pure-python sdists
+(lit) lay out sources directly where rules_python pip-builds a wheel — documented
+deviation. 28 nvidia/linux-only spokes skipped as NAMED holes (bazel on this host skips
+the same). razel-side: pkg_aliases/whl_library_targets/pip_repository host macros; the
+round-35 @pypi requirements.bzl stub RETIRED. Earlier in the round: ducc fetched; the
+includes-validation plate (32) diagnosed to rules_cc cc_helper synthesizing `..` from
+partially-absorbed inputs (instrumented session next). Remaining top: includes 32 +
+cpuinfo 22, cudnn_header host row (16), python chains converting deeper. 64 bins; 3
+gates; 6 sentinels; 2 rungolds. **Session curve: 307 → 458 (+151; 36.8% → 54.9%).**

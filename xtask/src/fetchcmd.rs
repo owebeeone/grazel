@@ -84,7 +84,7 @@ pub(crate) fn fetch_extract(root: &Path) -> Result<(), String> {
 
 // ---- R2/R3: fetch + materialize -----------------------------------------------------
 
-fn sh(cmd: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn sh(cmd: &str, args: &[&str]) -> Result<String, String> {
     let out = Command::new(cmd)
         .args(args)
         .output()
@@ -101,7 +101,7 @@ fn sh(cmd: &str, args: &[&str]) -> Result<String, String> {
 
 /// razel's output root — SIBLING to `_bazel_<user>`, identical layout below it
 /// (RazelFetchPlan §3 R2; decision: Gianni). Override: RAZEL_OUTPUT_ROOT.
-fn razel_output_root() -> PathBuf {
+pub(crate) fn razel_output_root() -> PathBuf {
     if let Ok(r) = std::env::var("RAZEL_OUTPUT_ROOT") {
         return PathBuf::from(r);
     }
@@ -116,7 +116,7 @@ fn razel_output_root() -> PathBuf {
 
 /// Bazel's output-base key: md5 of the absolute workspace path (verified round 36 —
 /// `md5("…/third-party/tensorflow")` == the live `_bazel_<user>` dir name).
-fn ws_hash(ws: &Path) -> Result<String, String> {
+pub(crate) fn ws_hash(ws: &Path) -> Result<String, String> {
     let p = ws.canonicalize().map_err(|e| format!("{}: {e}", ws.display()))?;
     Ok(sh("md5", &["-q", "-s", &p.display().to_string()])?.trim().to_string())
 }
@@ -207,7 +207,7 @@ fn attr_list(r: &serde_json::Map<String, serde_json::Value>, k: &str) -> Vec<Str
 
 /// Download into the content-addressed cache (skip when present — content addressing IS
 /// the validity check, as in Bazel); returns the cached archive path.
-fn fetch_archive(root: &Path, urls: &[String], sha256: &str) -> Result<PathBuf, String> {
+pub(crate) fn fetch_archive(root: &Path, urls: &[String], sha256: &str) -> Result<PathBuf, String> {
     let dir = root.join("cache/repos/v1/content_addressable/sha256").join(sha256);
     let file = dir.join("file");
     if file.is_file() {
