@@ -461,8 +461,8 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<Value<'v>>,
         #[starlark(require = named)] outs: UnpackList<String>,
-        #[starlark(require = named)] cmd: Option<String>,
-        #[starlark(require = named)] cmd_bash: Option<String>,
+        #[starlark(require = named)] cmd: Option<Value<'v>>,
+        #[starlark(require = named)] cmd_bash: Option<Value<'v>>,
         #[starlark(require = named)] tools: Option<Value<'v>>,
         #[starlark(require = named)] exec_tools: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
@@ -475,9 +475,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let mut src_parts = crate::values::str_attr_parts(eval, srcs)?;
         src_parts.extend(crate::values::str_attr_parts(eval, tools)?);
         src_parts.extend(crate::values::str_attr_parts(eval, exec_tools)?);
-        // Bazel: `cmd` or the bash-explicit `cmd_bash` (razel always runs bash).
-        let cmd = match cmd.or(cmd_bash) {
-            Some(c) => c,
+        // Bazel: `cmd` or the bash-explicit `cmd_bash` (razel always runs bash). String
+        // selects defer to analysis like list ones (round 40 — protobuf upb's cmd=select).
+        let cmd_parts = match crate::values::scalar_attr_parts(eval, cmd.or(cmd_bash))? {
+            Some(p) => p,
             None => return Err(anyhow::anyhow!("genrule `{name}` needs cmd (or cmd_bash)")),
         };
         // Output-file labels resolve statically (Bazel: outs are targets) — index them now.
@@ -520,6 +521,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 (Some(q), _) => q.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default(),
                 _ => String::new(),
             };
+            let cmd = crate::values::resolve_scalar_parts(eval, &cmd_parts)?;
             let expanded = expand_genrule_cmd(&cmd, &inputs, &outs, &loc, &out_dir)?;
             record_target(sess, AnalyzedTarget {
                 name: canon_label(sess, &name),

@@ -731,3 +731,80 @@ pub(crate) fn unpack_strs<'v>(list: Option<UnpackList<Value<'v>>>) -> Vec<String
     })
     .unwrap_or_default()
 }
+
+/// A STRING-attr part (genrule `cmd` — round 40): the scalar twin of [`StrAttrPart`].
+/// `cmd = select({...})` and `"prefix " + select({...})` are real corpus shapes (protobuf
+/// upb); parts CONCATENATE as strings at analysis.
+#[derive(Debug, Clone)]
+pub(crate) enum StrScalarPart {
+    Plain(String),
+    Branches(Vec<(String, String)>),
+}
+
+/// Decompose a string-valued native attr at DECLARE time (plain data — closures capture it).
+pub(crate) fn scalar_attr_parts<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    v: Option<Value<'v>>,
+) -> anyhow::Result<Option<Vec<StrScalarPart>>> {
+    let Some(r) = v else { return Ok(None) };
+    let heap = eval.heap();
+    let branches = |pairs: &[(Value<'v>, Value<'v>)]| -> anyhow::Result<StrScalarPart> {
+        let mut out = Vec::new();
+        for (k, val) in pairs {
+            let cond = crate::selects::key_string(heap, *k)
+                .ok_or_else(|| anyhow::anyhow!("select(): condition key is not a label"))?;
+            let s = val
+                .unpack_str()
+                .ok_or_else(|| anyhow::anyhow!("select branch for a string attr must be a string"))?;
+            out.push((cond, s.to_string()));
+        }
+        Ok(StrScalarPart::Branches(out))
+    };
+    let one = |part: Value<'v>| -> anyhow::Result<StrScalarPart> {
+        if let Some(b) = part.downcast_ref::<crate::selects::SelectBranches>() {
+            branches(&b.branches)
+        } else if let Some(b) = part.downcast_ref::<crate::selects::FrozenSelectBranches>() {
+            let pairs: Vec<(Value<'v>, Value<'v>)> =
+                b.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect();
+            branches(&pairs)
+        } else if let Some(s) = part.unpack_str() {
+            Ok(StrScalarPart::Plain(s.to_string()))
+        } else {
+            Err(anyhow::anyhow!("string attr part is neither a string nor a select (got `{part}`)"))
+        }
+    };
+    let parts = if let Some(e) = r.downcast_ref::<crate::selects::SelectExpr>() {
+        e.parts.iter().map(|p| one(*p)).collect::<anyhow::Result<Vec<_>>>()?
+    } else if let Some(e) = r.downcast_ref::<crate::selects::FrozenSelectExpr>() {
+        e.parts.iter().map(|p| one(p.to_value())).collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        vec![one(r)?]
+    };
+    Ok(Some(parts))
+}
+
+/// Resolve [`StrScalarPart`]s at ANALYSIS time: pick branches, concatenate strings.
+pub(crate) fn resolve_scalar_parts<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    parts: &[StrScalarPart],
+) -> anyhow::Result<String> {
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            StrScalarPart::Plain(s) => out.push_str(s),
+            StrScalarPart::Branches(br) => {
+                let heap = eval.heap();
+                let pairs: Vec<(Value<'v>, Value<'v>)> = br
+                    .iter()
+                    .map(|(k, s)| (heap.alloc(k.as_str()), heap.alloc(s.as_str())))
+                    .collect();
+                let picked = crate::selects::pick_branch(eval, &pairs, false, true)?
+                    .unwrap_or_else(Value::new_none);
+                if let Some(s) = picked.unpack_str() {
+                    out.push_str(s);
+                }
+            }
+        }
+    }
+    Ok(out)
+}

@@ -89,3 +89,17 @@ genrule(name = "g", srcs = [], outs = ["o"], cmd = "$(JAVABASE)/bin/java -o o")
     let err = analyze_starlark("BUILD", src).unwrap_err();
     assert!(err.contains("JAVABASE"), "unmodeled variable must error loudly: {err}");
 }
+
+#[test]
+fn cmd_accepts_string_select_and_concat() {
+    // protobuf upb's shape (round 40): `cmd = select({...})` — string-valued selects defer
+    // like list ones; string + select concatenates at analysis.
+    let src = r#"
+config_setting(name = "dbg", values = {"compilation_mode": "dbg"})
+genrule(name = "selgen", srcs = [], outs = ["o"], cmd = select({":dbg": "dbg-cmd", "//conditions:default": "rel-cmd"}))
+genrule(name = "selcat", srcs = [], outs = ["p"], cmd = "echo " + select({":dbg": "D", "//conditions:default": "R"}))
+"#;
+    let ts = analyze_starlark("BUILD", src).unwrap();
+    assert_eq!(target(&ts, "selgen").actions[0].argv[2], "rel-cmd");
+    assert_eq!(target(&ts, "selcat").actions[0].argv[2], "echo R");
+}
