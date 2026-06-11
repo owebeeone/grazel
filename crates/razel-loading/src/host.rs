@@ -209,6 +209,10 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
 pub(crate) fn host_build(pkg: &str) -> Option<&'static str> {
     const HOST: &[(&str, &str)] = &[
         (
+            "@bazel_tools//src/conditions",
+            include_str!("../host-repos/bazel_tools/src/conditions/BUILD"),
+        ),
+        (
             "@bazel_tools//tools/cpp",
             include_str!("../host-repos/bazel_tools/tools/cpp/BUILD"),
         ),

@@ -266,3 +266,20 @@ overlay serves.** Remaining top: eager-select 107 (coverage lane; grew with reac
 @jsoncpp_git 74 (curl hop 3), ruy BUILD class 43, @pypi 37+12, highway 28 (coverage lane),
 @net_zstd 10 (riegeli hop 2). The conveyor is now: `xtask fetch <next wall>` + resweep.
 64 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 39 (2026-06-11, stabilization lane — conveyor wave 2)
+
+**353 → 374/835 (44.8%).** Thirteen more repos materialized through `xtask fetch`
+(jsoncpp_git, net_zstd, pybind11, googletest, eigen_archive, farmhash_archive, fft2d,
+snappy, nasm, libjpeg_turbo, png, zlib, sobol_data) — the @jsoncpp_git 74-class,
+@net_zstd 10 and @sobol_data 10 are dead/converted. The ruy class (46) is DIAGNOSED to its
+root: ruy's `config_setting_group` references `@bazel_tools//src/conditions:windows_msvc`;
+the host package now EXISTS (`host_build` row, adapted from the real bazel_tools with
+razel-modelable constraint_values), but the group-member check in **selects.rs:230 errors
+without demand-loading the member's package — coverage-lane file, theirs by coordination;
+the fix is one demand-load in their select/condition rework and the 46 packages follow.**
+New engine class for the stabilization queue: tensorflow/cc `$(location :ops/…)` genrule
+lookup (23). Remaining top: eager-select 107 + highway 47 (coverage lane), ruy 46 (gated
+on selects.rs), @pypi 37+12 (stub-hub posture), tfrt make-var 9. Wall 7:12 sequential —
+deeper again; the pool default-on decision is worth ~5:30 of every sweep. 64 bins; 3
+gates; 6 sentinels; 2 rungolds.
