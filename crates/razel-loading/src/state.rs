@@ -215,6 +215,9 @@ pub(crate) struct Session {
     /// schema registration); access via [`crate::dds::session_dds`]. Targets assert incrementally
     /// at `record_target`; folds read this directly (no per-dep rebuild — O(n), not O(n²)).
     pub(crate) dds: SyncCell<Option<razel_dds::Dds>>,
+    /// Fetch R1: repo specs recorded by the `repository_rule` recorder during a WORKSPACE
+    /// eval ([`crate::fetch`]). Empty outside extraction.
+    pub(crate) repo_specs: SyncCell<Vec<crate::fetch::RepoSpec>>,
 }
 
 /// A deferred native-rule analysis body (E0c): the rule fn's work, run by the demand-driven pass.

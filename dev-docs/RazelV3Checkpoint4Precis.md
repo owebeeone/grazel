@@ -165,3 +165,29 @@ full sweeps) — the eager-select class's order-sensitivity at spine scale, exac
 round-27 wording. **Sequencing consequence: deferred-select (coverage lane, item 1) is now
 also the scheduling lane's gate; re-run the seeding experiment when it lands — the <60s
 target is plainly inside the 25s envelope.** No code this round; observations only.
+
+## Round delta — razelV3 round 35 (2026-06-11, stabilization lane — fetch R1)
+
+**The fetch arc opens (decision: Gianni — razel cannot be Bazel-compatible without fetch;
+cache SIBLING to Bazel's, below the root byte-identical layout for `diff -r` comparison;
+plan: `RazelFetchPlan.md`) and R1 LANDS: `xtask fetch-extract` evaluates TF's ENTIRE
+WORKSPACE chain — `WORKSPACE` → `workspace3/2/1/0.bzl`, 100+ loads, the real `repo.bzl` —
+with `repository_rule` bound to a RECORDER, and writes the lockfile:** 312 repo specs (285
+unique; `maybe()` re-declares collapse), **196 sha-pinned, 39 patched, 113 with
+build_file/link_files — every named census wall present (@curl/@ruy/@stablehlo/@FP16/
+@riegeli/@gemmlowp), and @flatbuffers carries exactly the `link_files` overlay the hand
+vendor missed** (the R3 materializer kills that bug class by construction). No network, no
+repository_ctx: the recorder runs the REAL wrapper macros (mirror expansion, patch lists).
+
+What it took (the probe loop, ~25 iterations): ~30 host-stub rows (WORKSPACE dep-inits:
+bazel_tools repo rules http/git/java/local + utils, rules_python repositories/versions/pip,
+cc-autoconf trio, workspace0's apple/swift/grpc/closure/pkg/foreign_cc inits, googleapis,
+generated cuda/nccl/nvshmem/llvm redist `version.bzl`s via one shared no-CUDA stub);
+`repository_rule` is now a UNIVERSAL .bzl global (Bazel-faithful — definition was never
+WORKSPACE-scoped); `native.bazel_version = "7.4.5"` (skylib versions.check; consistent with
+the all-True @bazel_features posture); `@//`/`@@//` main-repo load forms; and **Bazel-style
+TAB indentation** (starlark-rust rejects tabs outright; leading-run expansion at every
+external parse boundary — rules_ml_toolchain is tab-indented). Sequential sweep unchanged
+(27/105 sample-8); 63 bins; 3 gates; 6 sentinels; 2 rungolds. Next: R2 fetcher + download
+cache (sha-verified, mirror-first), R3 materializer + external-resolution second base
+(vendored-first), R4 census re-base.

@@ -33,6 +33,8 @@ mod registry; // C3a: the provider-schema registry (source of truth for schemas/
 mod py_rules;
 mod rust_rules;
 mod sh_rules;
+mod fetch; // Fetch R1: WORKSPACE spec extraction (RazelFetchPlan §3)
+pub use fetch::{AttrV, RepoSpec, extract_workspace_repos};
 pub use rules::{
     analyze_bazel, analyze_bazel_with, analyze_starlark, analyze_workspace, analyze_workspace_with,
     load_tree_report, load_tree_report_prepared, load_tree_report_seeded,

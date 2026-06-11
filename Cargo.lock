@@ -2206,6 +2206,7 @@ version = "0.1.0"
 dependencies = [
  "razel-loading",
  "razel-parity",
+ "serde_json",
 ]
 
 [[package]]

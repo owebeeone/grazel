@@ -28,6 +28,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+mod fetchcmd;
 mod probe;
 mod rungold;
 mod stress;
@@ -61,6 +62,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("xtask rungold: FAIL — {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("fetch-extract") => match fetchcmd::fetch_extract(&workspace_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("xtask fetch-extract: FAIL — {e}");
                 ExitCode::FAILURE
             }
         },

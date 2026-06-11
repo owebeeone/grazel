@@ -27,6 +27,10 @@ use std::path::{Path, PathBuf};
 
 
 pub(crate) fn build_globals() -> Globals {
+    builder_base().build()
+}
+
+fn builder_base() -> GlobalsBuilder {
     GlobalsBuilder::extended_by(&[
         LibraryExtension::StructType,
         LibraryExtension::Print,
@@ -39,7 +43,39 @@ pub(crate) fn build_globals() -> Globals {
     .with(rule_globals)
     .with(engine_namespaces)
     .with(bazel_native_rule_globals)
-    .build()
+    .with(crate::fetch::repo_rule_globals)
+}
+
+/// Evaluate a WORKSPACE source (fetch R1, RazelFetchPlan §3): the normal BUILD surface plus
+/// the WORKSPACE-only globals (the `repository_rule` recorder, `workspace()`,
+/// `register_*` no-ops). Declarations record but never drive; no freeze/harvest — the
+/// Session's `repo_specs` are the product.
+pub(crate) fn eval_workspace_src(
+    session: &Session,
+    name: &str,
+    src: &str,
+) -> Result<(), String> {
+    let rulesets = ruleset_modules(session.global.cc_toolchain)?;
+    let globals = builder_base().with(crate::fetch::workspace_globals).build();
+    let loader = BzlLoader {
+        rulesets: &rulesets,
+        globals: &globals,
+        session,
+        load_ctx: RefCell::new(vec![None]),
+    };
+    session.bzl_repo_push(None);
+    let res = Module::with_temp_heap(|module| -> Result<(), String> {
+        crate::dialect::install_decl_store(&module);
+        let ast = AstModule::parse(name, detab_leading(src).into_owned(), &Dialect::Extended)
+            .map_err(|e| format!("{e}"))?;
+        let mut eval = Evaluator::new(&module);
+        eval.set_loader(&loader);
+        eval.extra = Some(session);
+        eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
+        Ok(())
+    });
+    session.bzl_repo_pop();
+    res
 }
 
 /// Bazel's native rules as BUILD GLOBALS (no `load()` needed — `cc_library` is a builtin in real
@@ -78,6 +114,16 @@ pub(crate) fn bazel_native_rule_globals(b: &mut GlobalsBuilder) {
 pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
     b.namespace("native", |nb| {
         native_members(nb);
+        // skylib `versions.check` consults this (fetch R1's WORKSPACE chain does too).
+        // Bazel-7-era claim, consistent with the all-True @bazel_features posture.
+        nb.set("bazel_version", "7.4.5");
+        // WORKSPACE-macro surface (fetch R1): registration no-ops, namespaced form.
+        let ws_g = GlobalsBuilder::standard().with(crate::fetch::workspace_globals).build();
+        for name in ["register_toolchains", "register_execution_platforms", "bind"] {
+            if let Some((_, v)) = ws_g.iter().find(|(n, _)| *n == name) {
+                nb.set(name, v);
+            }
+        }
         // Real macros wrap the BUILD-global builtins via `native.X` — alias them in wholesale
         // (the BUILD globals and `native.*` are the same functions in Bazel).
         let dialect_g = GlobalsBuilder::standard().with(rule_globals).build();
@@ -146,6 +192,42 @@ fn razel_host_helpers(b: &mut GlobalsBuilder) {
     }
 }
 
+
+/// Bazel accepts TAB indentation (a tab advances to the next multiple-of-8 column);
+/// starlark-rust rejects tabs outright. Expand each line's LEADING whitespace run by the
+/// Bazel column rule — tabs inside strings/comments after code starts are untouched.
+/// Borrow-through when tab-free (the overwhelmingly common case).
+pub(crate) fn detab_leading(src: &str) -> std::borrow::Cow<'_, str> {
+    if !src.contains('\t') {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    let mut out = String::with_capacity(src.len() + 64);
+    for line in src.split_inclusive('\n') {
+        let mut col = 0usize;
+        let mut rest = line.len();
+        let mut had_tab = false;
+        for (i, c) in line.char_indices() {
+            match c {
+                ' ' => col += 1,
+                '\t' => {
+                    col += 8 - (col % 8);
+                    had_tab = true;
+                }
+                _ => {
+                    rest = i;
+                    break;
+                }
+            }
+        }
+        if had_tab {
+            out.extend(std::iter::repeat(' ').take(col));
+            out.push_str(&line[rest.min(line.len())..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
 
 /// Resolve a project `.bzl` load to a file under `root`. `//pkg:f.bzl` → `root/pkg/f.bzl`;
 /// `:f.bzl` → `root/<current pkg>/f.bzl`. (`@repo` loads go through [`external_bzl_path`] /
@@ -250,7 +332,16 @@ impl BzlLoader<'_> {
 
 impl FileLoader for BzlLoader<'_> {
     fn load(&self, path: &str) -> starlark::Result<FrozenModule> {
-        let path = &self.canonicalize(path);
+        // `@//pkg:f.bzl` / `@@//pkg:f.bzl` are the MAIN-repo absolute forms (WORKSPACE
+        // files use them) — identical to `//pkg:f.bzl` here.
+        let path = if let Some(rest) = path.strip_prefix("@@//") {
+            format!("//{rest}")
+        } else if let Some(rest) = path.strip_prefix("@//") {
+            format!("//{rest}")
+        } else {
+            path.to_string()
+        };
+        let path = &self.canonicalize(&path);
         if let Some(m) = self.session.bzl_cache.borrow().get(path) {
             return Ok(m.clone());
         }
@@ -307,7 +398,7 @@ impl FileLoader for BzlLoader<'_> {
         self.session.bzl_repo_push(ctx.clone());
         self.load_ctx.borrow_mut().push(ctx);
         let frozen = Module::with_temp_heap(|module| -> starlark::Result<FrozenModule> {
-            let ast = AstModule::parse(path, src, &Dialect::Extended)?;
+            let ast = AstModule::parse(path, detab_leading(&src).into_owned(), &Dialect::Extended)?;
             {
                 let mut eval = Evaluator::new(&module);
                 eval.set_loader(self); // recursive: a .bzl may load other .bzl
@@ -421,7 +512,7 @@ fn eval_build_src_inner(
 ) -> Result<(), LoadErr> {
     let ast = match session.ast_cache.borrow_mut().remove(name) {
         Some(ast) => ast,
-        None => AstModule::parse(name, src.to_owned(), &Dialect::Extended)
+        None => AstModule::parse(name, detab_leading(src).into_owned(), &Dialect::Extended)
             .map_err(|e| LoadErr::declare(format!("{e}")))?,
     };
     Module::with_temp_heap(|module| {
@@ -797,7 +888,7 @@ pub fn prepare_build_asts(
                         };
                         let Ok(src) = std::fs::read_to_string(&path) else { continue };
                         let name = format!("{pkg}/BUILD");
-                        if let Ok(ast) = AstModule::parse(&name, src, &Dialect::Extended) {
+                        if let Ok(ast) = AstModule::parse(&name, detab_leading(&src).into_owned(), &Dialect::Extended) {
                             out.push((name, ast));
                         }
                     }
@@ -815,7 +906,7 @@ pub fn prepare_build_asts(
 pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, String> {
     let session = Session::default();
     let ast =
-        AstModule::parse(name, src.to_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
+        AstModule::parse(name, detab_leading(src).into_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
     let globals = GlobalsBuilder::extended_by(&[
         LibraryExtension::StructType,
         LibraryExtension::Print,
@@ -859,6 +950,18 @@ mod tests {
 
     // ── fold_field (F3/F24): the LIVE transitive fold, tested directly (not only via the .bzl). ──
 
+
+    #[test]
+    fn tab_indented_source_parses_like_bazel() {
+        // Bazel accepts tab indentation (a tab advances to the next multiple-of-8 column);
+        // starlark-rust rejects tabs outright (rules_ml_toolchain's cuda_redist_versions
+        // .bzl is tab-indented — the fetch R1 probe wall). Leading tabs expand; tabs
+        // inside strings are untouched.
+        let src = "def _impl(ctx):\n\treturn [DefaultInfo(files = [\"a\tb\"])]\n\nr = rule(implementation = _impl, attrs = {})\nr(name = \"x\")\n";
+        let targets = analyze_starlark("BUILD", src).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].default_info, vec!["a\tb"], "string-internal tab preserved");
+    }
 
     #[test]
     fn starlark_rule_analyzes_by_running_its_impl() {
