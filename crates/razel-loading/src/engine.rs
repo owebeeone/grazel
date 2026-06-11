@@ -76,16 +76,18 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
     /// filegroup macro calls `native.filegroup(**kwargs)`). Mirrors the BUILD-global builtin.
     fn filegroup<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = crate::state::canon_label(session(eval), &name);
-        let srcs = crate::values::unpack_strs(srcs);
+        // Selects defer to analysis (round 40 — srcs may be a select expression).
+        let src_parts = crate::values::str_attr_parts(eval, srcs)?;
         // E0c: deferred — label srcs resolve to their files on demand.
         crate::dialect::record_native(eval, label, crate::state::native_decl(move |eval| {
+            let srcs = crate::values::resolve_str_parts(eval, &src_parts)?;
             let mut files: Vec<String> = Vec::new();
-            for s in srcs.clone() {
+            for s in srcs {
                 if s.starts_with(':') || s.starts_with("//") || s.starts_with('@') {
                     let dep = crate::deps::resolve_dep(eval, &s)?;
                     files.extend(dep.libs);

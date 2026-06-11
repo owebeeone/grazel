@@ -1024,16 +1024,17 @@ cc_thing(name = "gadget", src = "gadget.c")
     fn select_picks_default_branch() {
         // razelV3: conditions must be DECLARED config_settings (the stub tolerated unknowns);
         // under the default config (fastbuild) the non-matching :dbg falls through to default.
+        // Round 40: select sits on the ATTR (Bazel's model — selects are attr values, never
+        // impl-time expressions; the retired eager hybrid had let the impl-time form work).
         let src = r#"
 config_setting(name = "dbg", values = {"compilation_mode": "dbg"})
 
 def _impl(ctx):
-    flags = select({"//conditions:default": ["-O2"], ":dbg": ["-g"]})
-    ctx.actions.run(executable = "cc", outputs = [ctx.attr.name], inputs = [], arguments = flags)
+    ctx.actions.run(executable = "cc", outputs = [ctx.attr.name], inputs = [], arguments = ctx.attr.flags)
     return [DefaultInfo(files = [ctx.attr.name])]
 
-thing = rule(implementation = _impl, attrs = {})
-thing(name = "x")
+thing = rule(implementation = _impl, attrs = {"flags": attr.string_list()})
+thing(name = "x", flags = select({"//conditions:default": ["-O2"], ":dbg": ["-g"]}))
 "#;
         let targets = analyze_starlark("BUILD", src).unwrap();
         let x = targets.iter().find(|t| t.name.ends_with("x")).unwrap();

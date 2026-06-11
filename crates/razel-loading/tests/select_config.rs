@@ -108,3 +108,69 @@ r(name = "t", copts = select({":never": ["-x"], "//conditions:default": ["-d"]})
     let err = analyze_bazel_with(src, flags("opt", &[])).unwrap_err();
     assert!(err.contains("config_setting"), "never-declared condition errors at analysis: {err}");
 }
+
+// ---- Round 40: full select deferral (the eager-hybrid retirement) ----------------------
+
+/// The highway 1.3.0 shape (47 pkgs): a module-level `[list] + select({...})` must STAY a
+/// select expression (Bazel never resolves at load) so `+ (tuple,)` select-concats — the
+/// eager hybrid collapsed it to a plain list and `list + tuple` errored (Bazel rejects that
+/// op too; it never sees it because the select stays deferred).
+#[test]
+fn module_level_select_stays_deferred_and_concats_tuples() {
+    let src = r#"
+config_setting(name = "dbg", values = {"compilation_mode": "dbg"})
+BASE = ["a.txt"] + select({":dbg": ["d.txt"], "//conditions:default": ["r.txt"]})
+ALL = BASE + ("t.txt",)
+
+def _impl(ctx):
+    return [DefaultInfo(files = ctx.attr.srcs)]
+
+r = rule(implementation = _impl, attrs = {"srcs": attr.string_list()})
+r(name = "x", srcs = ALL)
+"#;
+    let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
+    let x = targets.iter().find(|t| t.name == "x").unwrap();
+    assert_eq!(x.default_info, vec!["a.txt", "r.txt", "t.txt"], "default branch + tuple part");
+}
+
+/// The ruy shape (46 pkgs): a select whose condition is a `config_setting_group` with a
+/// MEMBER in a not-yet-loaded package must DEFER at call time (the eager probe may not
+/// error on an unloaded member) and resolve at analysis, demand-loading the member.
+#[test]
+fn group_member_in_unloaded_package_defers_then_loads() {
+    let root = std::env::temp_dir().join(format!("razel-selgroup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("conds")).unwrap();
+    std::fs::write(
+        root.join("conds/BUILD"),
+        "config_setting(name = \"never\", values = {\"compilation_mode\": \"dbg\"})\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::write(
+        root.join("a/BUILD"),
+        "razel_config_setting_group(name = \"g\", match_any = [\"//conds:never\"])\n\
+         filegroup(name = \"x\", srcs = [\"x.txt\"] + select({\":g\": [\"g.txt\"], \"//conditions:default\": [\"d.txt\"]}))\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("a/x.txt"), "").unwrap();
+    std::fs::write(root.join("a/d.txt"), "").unwrap();
+    let targets =
+        razel_loading::analyze_workspace(&root, "//a:x").unwrap();
+    let x = targets.iter().find(|t| t.name == "//a:x").unwrap();
+    assert_eq!(x.default_info, vec!["a/x.txt", "a/d.txt"], "member loaded; default picked");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The 107-pkg class: `filegroup(srcs = <select expression>)` — the typed native param must
+/// accept the deferred value and resolve it at the native's analysis.
+#[test]
+fn filegroup_srcs_accepts_select_expression() {
+    let src = r#"
+config_setting(name = "dbg", values = {"compilation_mode": "dbg"})
+filegroup(name = "fg", srcs = ["a.txt"] + select({":dbg": ["d.txt"], "//conditions:default": ["r.txt"]}))
+"#;
+    let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
+    let fg = targets.iter().find(|t| t.name == "fg").unwrap();
+    assert_eq!(fg.default_info, vec!["a.txt", "r.txt"]);
+}

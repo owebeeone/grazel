@@ -608,17 +608,20 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     }
     fn filegroup<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
-        let srcs = crate::values::unpack_strs(srcs);
+        // Selects defer to analysis (the str_attr_parts pattern — round 40; srcs may be a
+        // select expression now that select() never resolves eagerly).
+        let src_parts = crate::values::str_attr_parts(eval, srcs)?;
         // E0c: deferred — label srcs resolve to their files on demand (filegroup-of-filegroup).
         record_native(eval, label, crate::state::native_decl(move |eval| {
+            let srcs = crate::values::resolve_str_parts(eval, &src_parts)?;
             let sess = session(eval);
             let mut files: Vec<String> = Vec::new();
-            for s in srcs.clone() {
+            for s in srcs {
                 if s.starts_with(':') || s.starts_with("//") || s.starts_with('@') {
                     let dep = crate::deps::resolve_dep(eval, &s)?;
                     files.extend(dep.libs);
@@ -626,6 +629,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                     files.push(qualify(session(eval), &s));
                 }
             }
+            let _ = sess;
             let sess = session(eval);
             record_target(sess, AnalyzedTarget {
                 name: canon_label(sess, &name),
@@ -764,14 +768,11 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             })
             .collect();
         drop(d);
-        // Bazel: select never resolves at LOAD time. The eager path consults only specs already
-        // declared (no package loading — that recursed into mid-load packages); everything else
-        // defers to attr consumption at analysis.
-        match pick_branch(eval, &pairs, true, false)? {
-            Some(v) => Ok(v),
-            // Defer: a condition isn't declared yet — resolve at attr consumption (analysis).
-            None => Ok(eval.heap().alloc(SelectBranches { branches: pairs })),
-        }
+        // Bazel: select NEVER resolves at load — always a deferred value, picked at attr
+        // consumption (round 40; the eager hybrid collapsed `[..] + select(..)` to a plain
+        // list, recreating list+tuple errors Bazel never sees — highway 1.3.0 — and let
+        // macros inspect select contents, which Bazel forbids).
+        Ok(eval.heap().alloc(SelectBranches { branches: pairs }))
     }
 
     /// `define_config(name, compile, archive=None, link=None)` — declare + register a

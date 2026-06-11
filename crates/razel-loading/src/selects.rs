@@ -225,11 +225,14 @@ pub(crate) fn condition_matches(
                         return Ok(Some(true));
                     }
                 }
-                None => {
+                None if allow_load => {
                     return Err(anyhow::anyhow!(
                         "config_setting_group member `{m}` not declared"
                     ));
                 }
+                // A load-forbidden probe may not error on an unloaded member — DEFER
+                // (round 40; ruy's group members live in @bazel_tools//src/conditions).
+                None => return Ok(None),
             }
         }
         return Ok(Some(*all));
@@ -284,6 +287,10 @@ pub(crate) fn resolve_attr_value<'v>(
             let r = resolve_attr_value(eval, p)?;
             if let Some(l) = ListRef::from_value(r) {
                 out.extend(l.iter());
+            } else if let Some(t) = starlark::values::tuple::TupleRef::from_value(r) {
+                // Bazel's select concatenation tolerates TUPLE parts (highway 1.3.0:
+                // `HWY_TEST_DEPS + (":skeleton",)`).
+                out.extend(t.iter());
             } else {
                 return Err(anyhow::anyhow!(
                     "select concatenation parts must be lists (got `{r}`)"
