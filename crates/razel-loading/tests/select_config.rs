@@ -174,3 +174,30 @@ filegroup(name = "fg", srcs = ["a.txt"] + select({":dbg": ["d.txt"], "//conditio
     let fg = targets.iter().find(|t| t.name == "fg").unwrap();
     assert_eq!(fg.default_info, vec!["a.txt", "r.txt"]);
 }
+
+/// Round 43: a `constraint_value` DECLARATION registers as a config spec — selecting on
+/// `@platforms//os:<x>` directly (TF does this everywhere) matches iff the HOST carries
+/// the constraint. platform()/constraint_setting() stay record-only placeholders.
+#[test]
+fn constraint_value_declaration_matches_host_in_selects() {
+    let root = std::env::temp_dir().join(format!("razel-constraint-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("os")).unwrap();
+    std::fs::write(
+        root.join("os/BUILD"),
+        "constraint_setting(name = \"oss\")\n\
+         constraint_value(name = \"windows\", constraint_setting = \":oss\")\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::write(
+        root.join("a/BUILD"),
+        "filegroup(name = \"x\", srcs = select({\"//os:windows\": [\"w.txt\"], \"//conditions:default\": [\"d.txt\"]}))\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("a/d.txt"), "").unwrap();
+    let targets = razel_loading::analyze_workspace(&root, "//a:x").unwrap();
+    let x = targets.iter().find(|t| t.name == "//a:x").unwrap();
+    assert_eq!(x.default_info, vec!["a/d.txt"], "non-host constraint falls to default");
+    let _ = std::fs::remove_dir_all(&root);
+}

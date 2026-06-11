@@ -7,3 +7,16 @@ bzl_library(
     srcs = ["build_defs.bzl"],
     visibility = ["//visibility:public"],
 )
+
+# No-TensorRT host posture (round 43): the header/lib targets TF deps unconditionally.
+filegroup(
+    name = "tensorrt_headers",
+    srcs = [],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "tensorrt",
+    srcs = [],
+    visibility = ["//visibility:public"],
+)

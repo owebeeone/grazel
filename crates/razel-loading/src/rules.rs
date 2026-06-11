@@ -79,6 +79,56 @@ fn autoload_stub_globals(b: &mut GlobalsBuilder) {
         crate::deps::record_named(crate::state::session(eval), &name);
         Ok(starlark::values::none::NoneType)
     }
+
+    /// `toolchain()` declarations (round 43 — grpc registers clang-cl toolchains):
+    /// record-only; real toolchain resolution is L3 surface.
+    fn toolchain<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        crate::deps::record_named(crate::state::session(eval), &name);
+        Ok(starlark::values::none::NoneType)
+    }
+
+    /// The platform-family DECLARE rules (round 43 — grpc declares clang-cl platforms in
+    /// its BUILD): record-only placeholders; real platform resolution is L4 surface.
+    fn platform<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        crate::deps::record_named(crate::state::session(eval), &name);
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn constraint_setting<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        crate::deps::record_named(crate::state::session(eval), &name);
+        Ok(starlark::values::none::NoneType)
+    }
+
+    /// A `constraint_value` IS a selectable condition: it registers a config spec whose
+    /// single constraint is ITSELF — `spec.matches` answers via `host_constraint_matches`
+    /// (TF selects on `@platforms//os:*` directly; round 43).
+    fn constraint_value<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        let sess = crate::state::session(eval);
+        crate::deps::record_named(sess, &name);
+        let canon = crate::state::canon_label(sess, &name);
+        let spec = crate::state::ConfigSpec {
+            constraint_values: vec![canon.clone()],
+            ..Default::default()
+        };
+        sess.config_specs.borrow_mut().insert(canon, spec);
+        Ok(starlark::values::none::NoneType)
+    }
 }
 
 /// Evaluate a WORKSPACE source (fetch R1, RazelFetchPlan §3): the normal BUILD surface plus
@@ -156,6 +206,13 @@ pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
         let ws_g = GlobalsBuilder::standard().with(crate::fetch::workspace_globals).build();
         for name in ["register_toolchains", "register_execution_platforms", "bind"] {
             if let Some((_, v)) = ws_g.iter().find(|(n, _)| *n == name) {
+                nb.set(name, v);
+            }
+        }
+        // Platform-family declare rules (round 43) — BUILD globals AND native.* forms.
+        let stub_g = GlobalsBuilder::standard().with(autoload_stub_globals).build();
+        for name in ["platform", "constraint_setting", "constraint_value", "toolchain", "java_library"] {
+            if let Some((_, v)) = stub_g.iter().find(|(n, _)| *n == name) {
                 nb.set(name, v);
             }
         }

@@ -170,6 +170,20 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
             include_str!("../host-repos/build_bazel_rules_android/android/rules.bzl"),
         ),
         (
+            "@build_bazel_apple_support//rules:universal_binary.bzl",
+            include_str!("../host-repos/build_bazel_apple_support/rules/universal_binary.bzl"),
+        ),
+        (
+            "@build_bazel_rules_apple//apple:ios.bzl",
+            include_str!("../host-repos/build_bazel_rules_apple/apple/ios.bzl"),
+        ),
+        (
+            "@build_bazel_rules_apple//apple/testing/default_runner:ios_test_runner.bzl",
+            include_str!(
+                "../host-repos/build_bazel_rules_apple/apple/testing/default_runner/ios_test_runner.bzl"
+            ),
+        ),
+        (
             "@cuda_redist_json//:distributions.bzl",
             include_str!("../host-repos/cuda_redist_json/distributions.bzl"),
         ),
@@ -211,6 +225,14 @@ pub(crate) fn host_build(pkg: &str) -> Option<&'static str> {
         (
             "@bazel_tools//src/conditions",
             include_str!("../host-repos/bazel_tools/src/conditions/BUILD"),
+        ),
+        (
+            "@local_config_nccl//",
+            include_str!("../host-repos/local_config_nccl/BUILD"),
+        ),
+        (
+            "@nvshmem//",
+            include_str!("../host-repos/nvshmem/BUILD"),
         ),
         (
             "@bazel_tools//tools/cpp",

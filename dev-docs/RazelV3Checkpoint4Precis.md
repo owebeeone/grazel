@@ -331,3 +331,20 @@ outs join the location table and lookup is `:`-tolerant (`:name` == `name`). Con
 walls now visible: `@local_config_cuda//cuda:cuda_headers` not declared (36 — the no-CUDA
 host BUILD needs the target rows) and a grpc `src/compiler` load-path hop (23). Python
 cone unchanged (@pypi posture). 64 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 43 (2026-06-11, stabilization lane — the host-stub wave + 50%)
+
+**397 → 420/835 (50.3%) — the halfway mark.** The wave: no-CUDA host targets
+(@local_config_cuda cuda_headers/cudart/…, @local_config_nccl, @local_config_tensorrt
+rows, @nvshmem) — the whole cuda config cone cleared in hops; rules_apple stubs
+(universal_binary, ios.bzl, ios_test_runner) unblocked grpc's build system, which then
+needed `platform()`/`constraint_setting()`/`toolchain()` declare-rules (record-only;
+L3/L4 surface). **One honest regression mid-round, caught by the sentinels:** a
+record-only `constraint_value` made @platforms packages load as plain targets and broke
+select-condition resolution (193/835, 2 sentinels red) — fixed with the FAITHFUL
+semantics instead: `constraint_value` registers a config spec whose constraint is itself,
+so selecting on `@platforms//os:*` directly answers via host matching (test pins it; this
+also retired the `@platforms//cpu:aarch64` group-member class). Next plates: `fail(attr=…)`
+keyword form (32 — dialect shim), @pypi posture (37+python cone), cpuinfo chain (22).
+64 bins; 3 gates; 6 sentinels; 2 rungolds. **Session curve: 307 → 420 (+113; 36.8% →
+50.3%).**
