@@ -38,7 +38,7 @@ pub use rules::{
     load_tree_report, load_tree_report_prepared, load_tree_report_seeded,
     load_tree_report_with_threads, prepare_build_asts,
 };
-pub use state::{AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags};
+pub use state::{AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags, SchedHook};
 
 /// Match a `glob` pattern against a path. Supports `*` (within a segment) and `**`
 /// (across segments). A documented subset of Bazel glob — enough for `*.cc`, `a/*.h`,

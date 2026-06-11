@@ -259,6 +259,24 @@ pub(crate) enum Acquire {
     CycleProceed,
 }
 
+/// The wait-graph trace (S3): `RAZEL_TRACE_LOAD=1` prints every coordination event — the
+/// instrument that caught the harvest-index and InFlight-leak bugs, made permanent. Checked
+/// per event (loads are low-frequency; no cached static — AD2).
+fn trace_load(point: &str, key: &str) {
+    if std::env::var_os("RAZEL_TRACE_LOAD").is_some() {
+        eprintln!("razel-trace: {:?} {point} `{key}`", std::thread::current().id());
+    }
+}
+
+/// Emit a wait-graph event to the trace + the S2 hook. MUST be called WITHOUT the graph
+/// lock held (hooks may block at "enter" by design — that is how tests script schedules).
+fn sched_event(sess: &Session, point: &str, key: &str) {
+    trace_load(point, key);
+    if let Some(h) = &sess.global.sched_hook {
+        (h.0)(point, key);
+    }
+}
+
 /// Single-flight acquire with DEADLOCK-FREE waiting: before parking, walk the waits-for chain
 /// from the owner; if it reaches a resource THIS thread owns, the wait would deadlock — take
 /// the load over NOW instead (duplicate eval is waste, not wrong: results overwrite by label,
@@ -267,12 +285,26 @@ pub(crate) enum Acquire {
 /// hours-long livelock (every cycle edge cost a 20s sleep). The timeout stays as a backstop
 /// for waits the graph cannot see (it should never fire in practice — it prints loudly).
 pub(crate) fn acquire_resource(sess: &Session, key: &str) -> Acquire {
+    sched_event(sess, "enter", key);
+    let (out, timed_out) = acquire_resource_locked(sess, key);
+    let point = match out {
+        Acquire::Own if timed_out => "takeover-timeout",
+        Acquire::Own => "own",
+        Acquire::Ready => "ready",
+        Acquire::Reentry => "reentry",
+        Acquire::CycleProceed => "cycle-proceed",
+    };
+    sched_event(sess, point, key);
+    out
+}
+
+fn acquire_resource_locked(sess: &Session, key: &str) -> (Acquire, bool) {
     let me = std::thread::current().id();
     let mut g = sess.loaded.lock().expect("loaded poisoned");
     loop {
         match g.res.get(key) {
-            Some(PkgState::Done) => return Acquire::Ready,
-            Some(PkgState::InFlight(tid)) if *tid == me => return Acquire::Reentry,
+            Some(PkgState::Done) => return (Acquire::Ready, false),
+            Some(PkgState::InFlight(tid)) if *tid == me => return (Acquire::Reentry, false),
             Some(PkgState::InFlight(owner)) => {
                 // Cycle check: owner → (what owner waits on) → its owner → … → me?
                 let mut cur = *owner;
@@ -296,32 +328,34 @@ pub(crate) fn acquire_resource(sess: &Session, key: &str) -> Acquire {
                     // VALUE is required, so take the eval over (duplicate; converges — the
                     // worst case is an illegal load cycle, which the eval reports loudly).
                     if !key.contains(':') {
-                        return Acquire::CycleProceed;
+                        return (Acquire::CycleProceed, false);
                     }
                     g.res.insert(key.to_string(), PkgState::InFlight(me));
                     *g.live.entry(key.to_string()).or_default() += 1;
-                    return Acquire::Own;
+                    return (Acquire::Own, false);
                 }
                 g.waiting.insert(me, key.to_string());
+                trace_load("wait", key);
                 let (g2, t) = sess
                     .loaded_cv
                     .wait_timeout(g, std::time::Duration::from_secs(20))
                     .expect("loaded poisoned");
                 g = g2;
                 g.waiting.remove(&me);
+                trace_load("wake", key);
                 if t.timed_out() {
                     eprintln!(
                         "razel: warning: load wait timed out (unseen cycle?); duplicating `{key}`"
                     );
                     g.res.insert(key.to_string(), PkgState::InFlight(me));
                     *g.live.entry(key.to_string()).or_default() += 1;
-                    return Acquire::Own;
+                    return (Acquire::Own, true);
                 }
             }
             None => {
                 g.res.insert(key.to_string(), PkgState::InFlight(me));
                 *g.live.entry(key.to_string()).or_default() += 1;
-                return Acquire::Own;
+                return (Acquire::Own, false);
             }
         }
     }
@@ -333,26 +367,30 @@ pub(crate) fn acquire_resource(sess: &Session, key: &str) -> Acquire {
 /// when no concurrent eval succeeded — a takeover duplicate failing mid-way must not clobber
 /// the original owner's in-progress (or completed) results.
 pub(crate) fn finish_resource(sess: &Session, key: &str, ok: bool) -> bool {
-    let mut g = sess.loaded.lock().expect("loaded poisoned");
-    let live = g.live.entry(key.to_string()).or_default();
-    *live = live.saturating_sub(1);
-    let last = *live == 0;
-    let may_purge = if ok {
-        g.res.insert(key.to_string(), PkgState::Done);
-        false
-    } else if matches!(g.res.get(key), Some(PkgState::Done)) {
-        // A concurrent eval already succeeded — this failure is moot; keep Done.
-        false
-    } else if last {
-        g.res.remove(key);
-        true
-    } else {
-        // Survivors are still evaluating: leave THEIR InFlight claim in place (last-writer
-        // state may carry our id — restore is impossible without per-owner slots; the
-        // survivors' finish overwrites it) and do NOT purge.
-        false
+    let may_purge = {
+        let mut g = sess.loaded.lock().expect("loaded poisoned");
+        let live = g.live.entry(key.to_string()).or_default();
+        *live = live.saturating_sub(1);
+        let last = *live == 0;
+        let may_purge = if ok {
+            g.res.insert(key.to_string(), PkgState::Done);
+            false
+        } else if matches!(g.res.get(key), Some(PkgState::Done)) {
+            // A concurrent eval already succeeded — this failure is moot; keep Done.
+            false
+        } else if last {
+            g.res.remove(key);
+            true
+        } else {
+            // Survivors are still evaluating: leave THEIR InFlight claim in place (last-writer
+            // state may carry our id — restore is impossible without per-owner slots; the
+            // survivors' finish overwrites it) and do NOT purge.
+            false
+        };
+        sess.loaded_cv.notify_all();
+        may_purge
     };
-    sess.loaded_cv.notify_all();
+    sched_event(sess, if ok { "finish-ok" } else { "finish-err" }, key);
     may_purge
 }
 
@@ -508,6 +546,21 @@ pub(crate) fn session<'a>(eval: &Evaluator<'_, 'a, '_>) -> &'a Session {
         .expect("eval.extra is not a Session")
 }
 
+/// A wait-graph observation hook (the S2 deterministic-interleaving seam): called with
+/// `(point, key)` at load-coordination events. Points: `"enter"` (before the graph lock —
+/// the ONLY point where a test may block, e.g. on a barrier, to script an interleaving),
+/// and post-lock outcomes: `"own"`, `"ready"`, `"reentry"`, `"cycle-proceed"`,
+/// `"takeover-timeout"`, `"finish-ok"`, `"finish-err"`. Production runs carry `None` —
+/// one Option read per package/module load.
+#[derive(Clone)]
+pub struct SchedHook(pub std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>);
+
+impl std::fmt::Debug for SchedHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SchedHook(..)")
+    }
+}
+
 /// Build-wide flags from the command line that ride every cc action: `copts` prepend
 /// to every compile (so `-c opt` / `--copt`/`--cxxopt`/`--conlyopt`/`--define` take
 /// effect), `linkopts` append to every link (`--linkopt`). Per-target attrs still apply.
@@ -529,6 +582,8 @@ pub struct GlobalFlags {
     /// `--define k=v` pairs as structured configuration (`config_setting` `define_values` /
     /// `values = {"define": "k=v"}`).
     pub defines: Vec<(String, String)>,
+    /// S2 test seam (see [`SchedHook`]). `None` in production.
+    pub sched_hook: Option<SchedHook>,
 }
 
 impl GlobalFlags {
