@@ -42,6 +42,11 @@ pub(crate) fn expand_genrule_cmd(
                     None if inner == "SRCS" => out.push_str(&srcs.join(" ")),
                     None if inner == "OUTS" => out.push_str(&outs.join(" ")),
                     None if inner == "@D" || inner == "RULEDIR" => out.push_str(out_dir),
+                    // Bazel merged genfiles into bin (0.25+): both roots are the bin root —
+                    // razel's single output root (ctx.var's BINDIR constant).
+                    None if inner == "GENDIR" || inner == "BINDIR" => {
+                        out.push_str("bazel-out/bin")
+                    }
                     None if inner == "@" => match outs {
                         [one] => out.push_str(one),
                         _ => return Err(anyhow::anyhow!("$(@) needs exactly one output")),

@@ -67,6 +67,21 @@ genrule(name = "g", srcs = [], outs = ["a", "b"], cmd = "touch $@")
 }
 
 #[test]
+fn gendir_bindir_expand_to_the_output_root() {
+    // flatbuffers' schema_fbs_srcs path (the round-33 33-pkg class): DEFAULT include paths
+    // carry `-I $(GENDIR) -I $(BINDIR)`. Bazel merged genfiles into bin (0.25+), so both
+    // expand to the bin root — razel's single output root, matching ctx.var's BINDIR.
+    let src = r#"
+genrule(name = "g", srcs = ["s.fbs"], outs = ["o"], cmd = "flatc -I $(GENDIR) -I $(BINDIR) $<")
+"#;
+    let ts = analyze_starlark("BUILD", src).unwrap();
+    assert_eq!(
+        target(&ts, "g").actions[0].argv[2],
+        "flatc -I bazel-out/bin -I bazel-out/bin s.fbs"
+    );
+}
+
+#[test]
 fn unmodeled_make_variable_errors() {
     let src = r#"
 genrule(name = "g", srcs = [], outs = ["o"], cmd = "$(JAVABASE)/bin/java -o o")
