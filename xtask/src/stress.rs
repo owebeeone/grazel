@@ -36,6 +36,7 @@ fn run_one(ws: &Path, root: &Path, packages: &[String], threads: usize) -> Sweep
     let counter = timeouts.clone();
     let mut flags = GlobalFlags::default();
     flags.external_base = Some(root.join("../third-party"));
+    flags.fetched_external_base = crate::fetchcmd::fetched_external_dir(&ws);
     flags.sched_hook = Some(SchedHook(Arc::new(move |point: &str, _: &str| {
         if point == "takeover-timeout" {
             counter.fetch_add(1, Ordering::Relaxed);

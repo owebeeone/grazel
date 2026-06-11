@@ -9,6 +9,14 @@ yet), surfaced during development. Promote an item into a plan (e.g. `RazelStarl
 razel must eat both `.bazelrc` (Bazel-compatible) and `.razelrc` (razel extensions). Today only the
 `--bazelrc` *flag name* is recognized (`razel-cli/src/bazel_flags.rs`); there is **no rc-file parsing**.
 
+- **Two live consumers since round 36 (fetch arc ground truth):** TF's `.bazelrc` carries
+  `--noenable_bzlmod --enable_workspace` (selects WHICH dependency universe is real — the
+  WORKSPACE chain razel's fetch extractor follows vs the 328-line MODULE.bazel) and the
+  default-applied `--deleted_packages` over the whole tfrt family (the tfload census's 835
+  denominator currently counts packages Bazel itself deletes). rc consumption is now
+  correctness-relevant, not just CLI ergonomics. bzlmod/MODULE resolution itself is a later
+  arc (RazelFetchPlan §4).
+
 - **Format:** `<command> <args>` lines (`build`, `test`, `common`, `always`); `import` /
   `try-import <file>`; `#` comments; line continuations; `--config=X` → expand the `<command>:X` lines.
 - **Locations / precedence:** system → workspace `.bazelrc` → home `~/.bazelrc` → `--bazelrc=`

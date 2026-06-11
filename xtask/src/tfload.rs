@@ -43,6 +43,7 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     let packages = discover_packages(&ws, sample);
     let mut flags = GlobalFlags::default();
     flags.external_base = Some(root.join("../third-party"));
+    flags.fetched_external_base = crate::fetchcmd::fetched_external_dir(&ws);
     // RAZEL_TFLOAD_ONE=<pkg>[,<pkg>…]: print FULL errors (debugging a failure class). A comma
     // list loads in order in ONE session — replicates sweep context (earlier packages paving
     // aliases/config_settings) for order-dependent classes.

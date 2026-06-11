@@ -44,6 +44,41 @@ fn builder_base() -> GlobalsBuilder {
     .with(engine_namespaces)
     .with(bazel_native_rule_globals)
     .with(crate::fetch::repo_rule_globals)
+    .with(autoload_stub_globals)
+}
+
+/// Bazel-AUTOLOADED BUILD globals razel models as RECORD-ONLY placeholders (fetch R4):
+/// upstream BUILDs (flatbuffers et al.) declare java targets bare; nothing in the TF cone
+/// consumes them, but the package must LOAD. The target exists (deps resolve to an empty
+/// placeholder); real java analysis is the java rung's work, via the @rules_java shim.
+#[starlark::starlark_module]
+fn autoload_stub_globals(b: &mut GlobalsBuilder) {
+    fn java_library<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        crate::deps::record_named(crate::state::session(eval), &name);
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn java_binary<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        crate::deps::record_named(crate::state::session(eval), &name);
+        Ok(starlark::values::none::NoneType)
+    }
+
+    fn java_test<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        crate::deps::record_named(crate::state::session(eval), &name);
+        Ok(starlark::values::none::NoneType)
+    }
 }
 
 /// Evaluate a WORKSPACE source (fetch R1, RazelFetchPlan §3): the normal BUILD surface plus
@@ -253,17 +288,19 @@ pub(crate) fn resolve_bzl(root: &Path, label: &str, current_pkg: Option<&str>) -
 }
 
 
-/// Resolve a vendored external load `@repo//pkg:file` to a real file under `base` (D4). The repo→dir
-/// name tolerates the `_`/`-` convention (canonical `@bazel_skylib` ↔ dir `bazel-skylib`): try the
-/// name as-is, then with `_`→`-`. `None` if not an `@repo//pkg:file` label or no such file. A real
-/// vendored file takes precedence over razel's synthetic shim, so configured corpora run REAL upstream.
-pub(crate) fn external_bzl_path(base: &Path, label: &str) -> Option<PathBuf> {
+/// Resolve a vendored/fetched external load `@repo//pkg:file` to a real file (D4 + fetch
+/// R4): candidates fold over [`GlobalFlags::external_repo_dirs`] — hand-vendored first
+/// (with the `_`/`-` name tolerance), the fetched root second. `None` if not an
+/// `@repo//pkg:file` label or no such file. A real external file takes precedence over
+/// razel's synthetic shim, so configured corpora run REAL upstream.
+pub(crate) fn external_bzl_path(global: &GlobalFlags, label: &str) -> Option<PathBuf> {
     let rest = label.strip_prefix('@')?;
     let (repo, pkgfile) = rest.split_once("//")?;
     let (pkg, file) = pkgfile.split_once(':')?;
-    [repo.to_string(), repo.replace('_', "-")]
-        .iter()
-        .map(|dir| base.join(dir).join(pkg).join(file))
+    global
+        .external_repo_dirs(repo)
+        .into_iter()
+        .map(|dir| dir.join(pkg).join(file))
         .find(|p| p.exists())
 }
 
@@ -353,11 +390,7 @@ impl FileLoader for BzlLoader<'_> {
         let real_external = if host.is_some() {
             None
         } else {
-            self.session
-                .global
-                .external_base
-                .as_deref()
-                .and_then(|base| external_bzl_path(base, path))
+            external_bzl_path(&self.session.global, path)
         };
         let ctx = if host.is_some() || real_external.is_some() {
             parse_external(path)
@@ -666,13 +699,8 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
     let pkg_dir = if let Some(rest) = pkg.strip_prefix('@') {
         let (repo, sub) =
             rest.split_once("//").ok_or_else(|| LoadErr::declare(format!("bad package `{pkg}`")))?;
-        let base = sess.global.external_base.clone().ok_or_else(|| {
-            LoadErr::declare(format!("external package `{pkg}` needs an external base"))
-        })?;
-        [repo.to_string(), repo.replace('_', "-")]
-            .iter()
-            .map(|dir| base.join(dir))
-            .find(|p| p.exists())
+        sess.global
+            .external_repo_dir(repo)
             .ok_or_else(|| LoadErr::declare(format!("external repo for `{pkg}` not vendored")))?
             .join(sub)
     } else {

@@ -833,6 +833,11 @@ pub struct GlobalFlags {
     /// `@repo//pkg:file` load resolves to `<base>/<repo>/pkg/file`, with `_`→`-` name tolerance
     /// (canonical `@bazel_skylib` ↔ dir `bazel-skylib`). `None` ⇒ external loads not configured.
     pub external_base: Option<PathBuf>,
+    /// Fetch R4 (RazelFetchPlan §3): the FETCHED external root
+    /// (`_razel_<user>/<md5(ws)>/external` — `xtask fetch`'s materializations), consulted
+    /// AFTER `external_base`: hand-vendored overlays win until deliberately retired.
+    /// Exact repo names (the materializer writes canonical dirs; no `_`→`-` tolerance).
+    pub fetched_external_base: Option<PathBuf>,
     /// `-c`/`--compilation_mode` as STRUCTURED configuration (`config_setting` matching reads
     /// this; the cc flag expansion into `copts` is separate, done by the CLI). Empty ⇒ Bazel's
     /// default `fastbuild`.
@@ -848,6 +853,30 @@ impl GlobalFlags {
     /// The effective compilation mode (`fastbuild` when unset — Bazel's default).
     pub(crate) fn mode(&self) -> &str {
         if self.compilation_mode.is_empty() { "fastbuild" } else { &self.compilation_mode }
+    }
+
+    /// Candidate DIRS for external repo `repo` (bare name — no `@`, no `//`), in
+    /// precedence order: hand-vendored (with the `_`→`-` name tolerance) first, then the
+    /// fetched root (exact name) — fetch R4. The ONE resolver every external consumer
+    /// (loads, BUILDs, file fallbacks, glob) folds over.
+    pub(crate) fn external_repo_dirs(&self, repo: &str) -> Vec<std::path::PathBuf> {
+        let mut v = Vec::new();
+        if let Some(base) = &self.external_base {
+            v.push(base.join(repo));
+            let dashed = repo.replace('_', "-");
+            if dashed != repo {
+                v.push(base.join(dashed));
+            }
+        }
+        if let Some(f) = &self.fetched_external_base {
+            v.push(f.join(repo));
+        }
+        v
+    }
+
+    /// First existing candidate dir for `repo` (see [`Self::external_repo_dirs`]).
+    pub(crate) fn external_repo_dir(&self, repo: &str) -> Option<std::path::PathBuf> {
+        self.external_repo_dirs(repo).into_iter().find(|p| p.exists())
     }
 }
 

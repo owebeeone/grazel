@@ -240,3 +240,29 @@ Neither MODULE.bazel nor .bazelrc is involved (version-locked core behavior); th
 DOES gate other things (WORKSPACE-vs-bzlmod selection, deleted_packages) — rc consumption
 stays the registered RazelGaps item, now with two live consumers. RazelFetchPlan §4b
 records the proven rules. Next: R4 unchanged.
+
+## Round delta — razelV3 round 38 (2026-06-11, stabilization lane — fetch R4)
+
+**The fetched root is WIRED into resolution and the sweep hits its high-water mark:
+321 → 353/835 (42.3%).** `GlobalFlags.fetched_external_base` (`_razel_<user>/<hash>/
+external`) is a SECOND base behind hand-vendored `third-party/` — one helper
+(`external_repo_dirs`: vendored-first with `_`→`-` tolerance, fetched exact-name second)
+replaced five duplicated lookups (bzl loads, BUILD dirs, two file fallbacks, glob);
+tfload/stress auto-wire it when materializations exist. Tests pin fetched-only resolution
+AND vendored-wins precedence.
+
+**The census conveyor, live across three sweeps:** wiring the 7 round-36 repos → 346
+(@gemmlowp/@FP16/@riegeli/@stablehlo classes ERASED; @curl's 69 converted to @boringssl —
+curl now actually evaluates; ruy converted to its own BUILD surface). Fetching the next
+hops (boringssl, org_brotli) + RETIRING the hand-vendored flatbuffers → 325 first
+(REGRESSION: upstream flatbuffers' BUILD uses Bazel-AUTOLOADED bare `java_library` + an
+`@build_bazel_rules_android` load — the curated hand-vendor BUILD had been masking the gap;
+lesson: retirement exposes autoload surface, and the curated copy was LOST uncommitted —
+it was never tracked) → fixed properly: `java_library/java_binary/java_test` as RECORD-ONLY
+placeholder BUILD globals (the target exists; real java analysis stays the java rung's) +
+the rules_android host stub (round 33's predicted overlay prerequisite) → **353, with the
+tensorflow_py chain (23) and lite framework_experimental chain GONE — the link_files
+overlay serves.** Remaining top: eager-select 107 (coverage lane; grew with reach),
+@jsoncpp_git 74 (curl hop 3), ruy BUILD class 43, @pypi 37+12, highway 28 (coverage lane),
+@net_zstd 10 (riegeli hop 2). The conveyor is now: `xtask fetch <next wall>` + resweep.
+64 bins; 3 gates; 6 sentinels; 2 rungolds.

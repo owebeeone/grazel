@@ -12,12 +12,7 @@ pub(crate) fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>
     let dir = sess.current_pkg().and_then(|pkg| {
         if let Some(rest) = pkg.strip_prefix('@') {
             let (repo, sub) = rest.split_once("//")?;
-            let base = sess.global.external_base.clone()?;
-            [repo.to_string(), repo.replace('_', "-")]
-                .iter()
-                .map(|d| base.join(d))
-                .find(|p| p.exists())
-                .map(|r| r.join(sub))
+            sess.global.external_repo_dir(repo).map(|r| r.join(sub))
         } else {
             sess.workspace.clone().map(|root| root.join(&pkg))
         }

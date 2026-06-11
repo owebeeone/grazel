@@ -879,20 +879,12 @@ fn resolve_label_attr_inner<'v>(
                                 // Host-materialized repo files (`@cc_compatibility_proxy//:
                                 // symbols.bzl`) exist by construction — razel compiled them in.
                                 let exists = crate::host::host_bzl(&dep).is_some()
-                                    || sess
-                                        .global
-                                        .external_base
-                                        .as_ref()
-                                        .is_some_and(|base| {
-                                            [repo.to_string(), repo.replace('_', "-")]
-                                                .iter()
-                                                .any(|d| {
-                                                    crate::state::path_is_file(
-                                                        sess,
-                                                        &base.join(d).join(pkg).join(file),
-                                                    )
-                                                })
-                                        });
+                                    || sess.global.external_repo_dirs(repo).iter().any(|d| {
+                                        crate::state::path_is_file(
+                                            sess,
+                                            &d.join(pkg).join(file),
+                                        )
+                                    });
                                 (exists, format!("external/{repo}/{pkg}/{file}"))
                             }
                             None => (false, dep.clone()),

@@ -166,6 +166,10 @@ pub(crate) fn host_bzl(label: &str) -> Option<&'static str> {
             include_str!("../host-repos/com_google_googleapis/repository_rules.bzl"),
         ),
         (
+            "@build_bazel_rules_android//android:rules.bzl",
+            include_str!("../host-repos/build_bazel_rules_android/android/rules.bzl"),
+        ),
+        (
             "@cuda_redist_json//:distributions.bzl",
             include_str!("../host-repos/cuda_redist_json/distributions.bzl"),
         ),

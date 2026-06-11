@@ -364,3 +364,10 @@ pub(crate) fn fetch(root: &Path, names: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The fetched external root for `ws` when materializations exist — tfload/stress wire it
+/// as the SECOND resolution base (fetch R4; vendored `third-party/` keeps precedence).
+pub(crate) fn fetched_external_dir(ws: &Path) -> Option<PathBuf> {
+    let d = razel_output_root().join(ws_hash(ws).ok()?).join("external");
+    d.is_dir().then_some(d)
+}

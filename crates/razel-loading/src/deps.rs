@@ -105,12 +105,11 @@ pub(crate) fn resolve_dep<'v>(
             rest.split_once("//")
                 .and_then(|(r, pf)| pf.split_once(':').map(|(p, f)| (r, p, f)))
                 .and_then(|(repo, pkg, file)| {
-                    sess.global.external_base.as_ref().and_then(|base| {
-                        [repo.to_string(), repo.replace('_', "-")]
-                            .iter()
-                            .find(|d| crate::state::path_is_file(sess, &base.join(d).join(pkg).join(file)))
-                            .map(|_| format!("external/{repo}/{pkg}/{file}"))
-                    })
+                    sess.global
+                        .external_repo_dirs(repo)
+                        .into_iter()
+                        .find(|d| crate::state::path_is_file(sess, &d.join(pkg).join(file)))
+                        .map(|_| format!("external/{repo}/{pkg}/{file}"))
                 })
         } else {
             canon.strip_prefix("//").and_then(|rest| {
