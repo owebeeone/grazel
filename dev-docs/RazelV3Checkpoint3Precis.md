@@ -210,3 +210,16 @@ native — small binding). The 6:01 (was 1:16) is part honest (frozen depsets no
 real eval depth) and part the analysis-retry storm on the hot protobuf_python package
 (72 consumers × retryable analysis failure × re-eval; the declare-phase memo deliberately
 doesn't cache analysis failures) — diagnosis next. 62 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 31 (2026-06-11, stabilization lane)
+
+**`native.package_relative_label` lands (Bazel 7; binds against the package BEING
+CONSTRUCTED, unlike `Label()`'s lexical binding; Labels pass through) — the 62-pkg class
+converts to its next wall: a make-var expansion failure in flatbuffers' `schema_fbs_srcs`
+genrule path (33). Sweep 305/835 @ 6:07.**
+
+**The 6-minute sweep is HONEST, not a storm:** the load trace (RAZEL_TRACE_LOAD over the
+full sweep) shows max 5 re-evals for any key, 1-2 for packages — no analysis-retry storm.
+Round 30's depset/repo_name fixes opened the proto/python pipelines and razel now does ~5×
+more real single-core eval. The wall-time lever is the pool (demand futures + scheduling,
+queued next session), not a retry bug. 62 bins; 3 gates; 6 sentinels; 2 rungolds.

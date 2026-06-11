@@ -31,6 +31,42 @@ r(name = "t")
     assert_eq!(t.actions[0].argv[1..], ["some_repo", "some_repo", ""]);
 }
 
+/// `native.package_relative_label` (Bazel 7; flatbuffers/lite macros): a label string
+/// resolves against the package BEING CONSTRUCTED (unlike `Label()`'s lexical binding);
+/// an existing Label passes through unchanged. Round 31.
+#[test]
+fn package_relative_label_resolves_against_the_build_package() {
+    let root = std::env::temp_dir().join(format!("razel-prl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("defs")).unwrap();
+    // The macro lives in //defs but runs during //app's BUILD eval — the label must bind
+    // to //app (package-relative), NOT to //defs (lexical).
+    std::fs::write(
+        root.join("defs/m.bzl"),
+        r#"def mk(name):
+    l = native.package_relative_label(":" + name)
+    passthrough = native.package_relative_label(Label("@zzz//q:w"))
+    native.filegroup(name = name + "-" + l.package + "-" + l.name + "-" + passthrough.repo_name)
+"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("defs/BUILD"), "").unwrap();
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("app/BUILD"),
+        "load(\"//defs:m.bzl\", \"mk\")\nmk(\"t\")\n",
+    )
+    .unwrap();
+    let res = analyze_workspace_with(&root, "//app:t-app-t-zzz", GlobalFlags::default());
+    let _ = std::fs::remove_dir_all(&root);
+    let targets = res.unwrap();
+    assert!(
+        targets.iter().any(|t| t.name == "//app:t-app-t-zzz"),
+        "package-relative binding + Label passthrough: {:?}",
+        targets.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn label_list_entry_resolves_to_a_source_file() {
     let root = std::env::temp_dir().join(format!("razel-filelabel-{}", std::process::id()));

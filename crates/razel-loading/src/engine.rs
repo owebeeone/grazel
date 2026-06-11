@@ -9,7 +9,7 @@ use starlark::values::list::{ListRef, UnpackList};
 use starlark::values::none::NoneType;
 use starlark::any::ProvidesStaticType;
 use starlark::coerce::Coerce;
-use starlark::values::{Freeze, NoSerialize, Trace, Value, ValueLifetimeless};
+use starlark::values::{Freeze, NoSerialize, Trace, Value, ValueLifetimeless, ValueLike};
 
 
 
@@ -25,6 +25,44 @@ pub(crate) fn native_members(b: &mut GlobalsBuilder) {
     }
     fn repository_name() -> anyhow::Result<String> {
         Ok("@".to_string())
+    }
+    /// Bazel 7's `native.package_relative_label`: a label string resolves against the
+    /// package BEING CONSTRUCTED (current_pkg — macros run at BUILD eval), unlike `Label()`
+    /// which binds lexically to the defining `.bzl`. An existing Label passes through.
+    fn package_relative_label<'v>(
+        #[starlark(require = pos)] input: Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Value<'v>> {
+        if input.downcast_ref::<crate::labels::LabelV>().is_some() {
+            return Ok(input);
+        }
+        let Some(s) = input.unpack_str() else {
+            return Err(anyhow::anyhow!(
+                "package_relative_label takes a label string or Label, got `{input}`"
+            ));
+        };
+        let sess = session(eval);
+        let canon = crate::state::canon_label(sess, s);
+        let (repo, rest) = match canon.strip_prefix('@') {
+            Some(r) => {
+                let (repo, rest) = r
+                    .split_once("//")
+                    .ok_or_else(|| anyhow::anyhow!("bad label `{canon}`"))?;
+                (Some(format!("@{repo}")), rest)
+            }
+            None => (None, canon.strip_prefix("//").unwrap_or(canon.as_str())),
+        };
+        let (pkg, name) = match rest.split_once(':') {
+            Some((p, n)) => (p.to_string(), n.to_string()),
+            None => (
+                // Single-package mode canon is the bare name; package context is empty.
+                String::new(),
+                rest.to_string(),
+            ),
+        };
+        Ok(eval
+            .heap()
+            .alloc(crate::labels::LabelV { repo, package: pkg, name }))
     }
     fn glob<'v>(
         include: Option<UnpackList<String>>,
