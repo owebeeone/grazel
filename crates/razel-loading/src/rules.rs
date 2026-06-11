@@ -876,10 +876,17 @@ pub fn load_tree_report_seeded(
     // DEFAULT-ON since round 46 (decision: Gianni — the parity bar held since round 34:
     // driven-work coverage equality, deterministic run-to-run, 0 livelock signatures).
     // RAZEL_LOAD_THREADS=1 reproduces sequential behavior exactly (the escape hatch).
+    // Default 6 (Gianni, round 46): the measured knee — 12 workers average ~5 busy cores
+    // at current corpus depth (the spine serializes the rest); 6 buys the same wall with
+    // half the contention. Bazel-flag mapping of record: this is `--loading_phase_threads`
+    // (loading/analysis), NOT `--jobs` (execution-phase actions) — wire when razel-cli
+    // grows a tree command.
     let threads = std::env::var("RAZEL_LOAD_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(6)
+        });
     load_tree_report_with_threads(root, flags, packages, asts, threads)
 }
 

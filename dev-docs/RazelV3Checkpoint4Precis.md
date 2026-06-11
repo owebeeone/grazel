@@ -401,3 +401,11 @@ suboptimal-by-design — the destination is a DICE/Skyframe-shaped VERSIONED nod
 (label-interned, (Label,Config)-keyed, snapshot reads) absorbing results/fold_cache/the
 futures protocol; triggers: a store-dominated profile or one more concurrency-patch class;
 design note to be banked before any rewrite. 64 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+**Round 46 amendment (threads=6, Bazel-flag mapping):** default worker count capped at
+min(6, cores) — measured: 455/835 @ 4:26 / 789s-user at 6 workers vs 455 @ 5:01 /
+1528s-user at 12 (the spine serializes the surplus; same coverage, faster wall, half the
+burn). Flag mapping of record: the pool is Bazel's `--loading_phase_threads`, NOT
+`--jobs` (execution-phase actions); both are PARSED today (the recognized-flags table,
+`-j` abbrev included) but unwired — `--loading_phase_threads` wires when razel-cli grows
+a tree command; `--jobs` belongs to razel-build's action executor.
