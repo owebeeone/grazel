@@ -238,17 +238,21 @@ pub(crate) enum PkgState {
 /// A wait-graph resource, TYPED (round 33): the former string keys discriminated package vs
 /// `.bzl` by `:`-in-key — unsound once target labels (which carry `:`) join the graph for
 /// demand futures. The variant drives cycle resolution; the name is the hook/trace rendering
-/// (unchanged strings: pkg name, bzl path).
+/// (unchanged strings: pkg name, bzl path, declaration label).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ResKey {
     Pkg(String),
     Bzl(String),
+    /// A per-DECLARATION demand future (RazelDemandFutures.md): completes at `record_target`;
+    /// the owning package's finish sweeps stragglers. Cycle rule: a declaration waiter never
+    /// waits into a cycle (the publisher is blocked on the waiter) — it proceeds-partial.
+    Decl(String),
 }
 
 impl ResKey {
     pub(crate) fn name(&self) -> &str {
         match self {
-            ResKey::Pkg(s) | ResKey::Bzl(s) => s,
+            ResKey::Pkg(s) | ResKey::Bzl(s) | ResKey::Decl(s) => s,
         }
     }
 }
@@ -348,10 +352,12 @@ fn acquire_resource_locked(sess: &Session, key: &ResKey) -> (Acquire, bool) {
                 // Cycle check: owner → (what owner waits on) → its owner → … → me?
                 if walk_finds_cycle(&g, *owner, me) {
                     // Packages: sequential re-entry semantics — proceed against the owner's
-                    // partial state, no duplicate eval. `.bzl` modules: the module VALUE is
-                    // required, so take the eval over (duplicate; converges — the worst case
-                    // is an illegal load cycle, which the eval reports loudly).
-                    if matches!(key, ResKey::Pkg(_)) {
+                    // partial state, no duplicate eval. Declarations: a waiter in a cycle
+                    // must not park (its publisher is blocked on it) — proceed-partial.
+                    // `.bzl` modules: the module VALUE is required, so take the eval over
+                    // (duplicate; converges — the worst case is an illegal load cycle,
+                    // which the eval reports loudly).
+                    if matches!(key, ResKey::Pkg(_) | ResKey::Decl(_)) {
                         return (Acquire::CycleProceed, false);
                     }
                     g.res.insert(key.clone(), PkgState::InFlight(me));

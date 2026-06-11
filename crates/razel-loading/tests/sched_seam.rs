@@ -214,6 +214,50 @@ fn declare_phase_failure_is_cached_package_in_error() {
     );
 }
 
+/// F2 (demand futures): two workers demanding the same DEFERRED NATIVE body (FnOnce —
+/// `Session.native_decls[i].take()`) must single-flight: the loser WAITS for the runner's
+/// record instead of seeing an empty slot and erroring "neither a declared target nor a
+/// source file" (the wrong reason). The runner is held mid-body (inside its `//slow` srcs
+/// demand) so the loser's window is deterministic: post-fix the loser's claim is the gate's
+/// second arrival; pre-fix the loser never gates and fails inside the 5s window.
+#[test]
+fn deferred_native_demand_single_flights() {
+    let root = std::env::temp_dir().join(format!("razel-seam-native-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("n")).unwrap();
+    std::fs::create_dir_all(root.join("slow")).unwrap();
+    std::fs::write(root.join("slow/x.txt"), "x").unwrap();
+    std::fs::write(root.join("slow/BUILD"), "filegroup(name = \"x\", srcs = [\"x.txt\"])\n")
+        .unwrap();
+    // n is only ever DEP-loaded (not a sweep entry), so its native decl defers to
+    // `deferred_natives` and the demand-run races.
+    std::fs::write(root.join("n/BUILD"), "filegroup(name = \"gen\", srcs = [\"//slow:x\"])\n")
+        .unwrap();
+    for pkg in ["a", "b"] {
+        std::fs::create_dir_all(root.join(pkg)).unwrap();
+        std::fs::write(
+            root.join(pkg).join("BUILD"),
+            format!("filegroup(name = \"{pkg}\", srcs = [\"//n:gen\"])\n"),
+        )
+        .unwrap();
+    }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut flags = GlobalFlags::default();
+    flags.sched_hook = Some(hook_with_gate(events.clone(), |k| k == "slow" || k == "//n:gen"));
+    let (report, _) = load_tree_report_with_threads(
+        &root,
+        flags,
+        &["a".to_string(), "b".to_string()],
+        Vec::new(),
+        2,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    for (pkg, r) in &report {
+        assert!(r.is_ok(), "the FnOnce loser must wait, not error: {pkg}: {r:?}");
+    }
+    assert_eq!(count(&events, "takeover-timeout", ""), 0, "no waiter may hit the 20s backstop");
+}
+
 /// Bug #2 regression: two workers racing the same uncached `.bzl` must produce ONE eval
 /// (one `own`) and one waiter (`ready`) — a double-eval would mint two provider identities.
 #[test]

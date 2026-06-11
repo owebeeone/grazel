@@ -383,12 +383,43 @@ pub(crate) fn ensure_analyzed<'v>(
             return Err(anyhow::anyhow!("loading `{label}`'s package failed: {e}").into());
         }
     }
-    if let Some(f) = {
-        let sess = session(eval);
-        let nidx = sess.deferred_natives.borrow().get(label).copied();
-        nidx.and_then(|i| sess.native_decls.borrow_mut()[i].take())
-    } {
-        return run_native_deferred(eval, label, f);
+    let nidx = { session(eval).deferred_natives.borrow().get(label).copied() };
+    if let Some(nidx) = nidx {
+        // F2 (demand futures): single-flight the FnOnce demand-run. Without the claim, the
+        // loser of a cross-thread race saw an empty slot with no results row yet and erred
+        // "neither a declared target nor a source file" — the wrong reason.
+        let key = crate::state::ResKey::Decl(label.to_string());
+        match crate::state::acquire_resource(session(eval), &key) {
+            crate::state::Acquire::Own => {
+                let f = { session(eval).native_decls.borrow_mut()[nidx].take() };
+                let res = match f {
+                    Some(f) => run_native_deferred(eval, label, f),
+                    // Consumed before the claim existed (a pre-claim drive) — the results/
+                    // memo fallthroughs below decide.
+                    None => Ok(()),
+                };
+                let outcome = match &res {
+                    Ok(()) => crate::state::FinishOutcome::Ok,
+                    // FnOnce: the run can never retry — cache the real error for waiters
+                    // and later demanders (the native_errors memo's wait-graph twin).
+                    Err(e) => crate::state::FinishOutcome::FailCached(e.to_string()),
+                };
+                crate::state::finish_resource(session(eval), &key, outcome);
+                return res;
+            }
+            // The runner recorded it — the caller re-reads results.
+            crate::state::Acquire::Ready => return Ok(()),
+            crate::state::Acquire::Failed(e) => {
+                return Err(
+                    anyhow::anyhow!("analysis of `{label}` previously failed: {e}").into()
+                );
+            }
+            // Same-thread re-entry / cross-thread dependency cycle: proceed-partial — the
+            // analyzing-set and the callers' error paths report it.
+            crate::state::Acquire::Reentry | crate::state::Acquire::CycleProceed => {
+                return Ok(());
+            }
+        }
     }
     analyze_deferred(eval, label)
 }
