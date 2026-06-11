@@ -221,3 +221,22 @@ tfrt family — our 835 denominator includes packages Bazel itself deletes. patc
 (shell) refuse loudly. Lockfile relocated to `<workspace>/razel-lock.json` (Bazel's
 MODULE.bazel.lock placement). Next: R4 — wire the materialized root into external
 resolution (vendored-first) and re-base the census.
+
+## Round delta — razelV3 round 37 (2026-06-11, stabilization lane — boundary parity)
+
+**The round-36 open question is CLOSED with a proof, not a guess (directive: 100% bazel
+compatibility — "figure out what it is"). Bazel-core's repo finalization, pinned by a
+controlled 2-impls × 4-archive-shapes matrix on bazel-7.7.0 (file:// archives: plain /
+WORKSPACE / WORKSPACE.bazel / MODULE.bazel, through bazel_tools' http_archive AND a
+TF-style custom rule):** a repo ending its rule with NONE of {WORKSPACE, WORKSPACE.bazel,
+MODULE.bazel, REPO.bazel} gets an empty WORKSPACE AND an empty REPO.bazel from core; ANY
+one present — even zero-byte — suppresses both. The "anomaly" dissolving the scatter:
+gemmlowp's upstream WORKSPACE is a 0-byte file in the archive. Second fidelity split read
+from both sources: TF/XLA `_tf_http_archive` SYMLINKS build_file/link_files; bazel_tools
+http_archive COPIES (7.7's workspace_and_buildfile writes BUILD.bazel only). The
+materializer now implements both (kind-switched). **Strict acceptance: `diff -r -x
+'*.marker'` — boundary files IN scope — is IDENTICAL on all 5 bazel-comparable repos.**
+Neither MODULE.bazel nor .bazelrc is involved (version-locked core behavior); the .bazelrc
+DOES gate other things (WORKSPACE-vs-bzlmod selection, deleted_packages) — rc consumption
+stays the registered RazelGaps item, now with two live consumers. RazelFetchPlan §4b
+records the proven rules. Next: R4 unchanged.

@@ -280,11 +280,7 @@ fn materialize(
     };
     std::fs::rename(&src, &target).map_err(|e| format!("place {}: {e}", target.display()))?;
     let _ = std::fs::remove_dir_all(&tmp);
-    // Boundary files (empty WORKSPACE/REPO.bazel): bazel-core plants these inconsistently
-    // per repo (round 36 ground truth: curl/FP16 both, gemmlowp WORKSPACE only, stablehlo/
-    // flatbuffers none) — they are zero-byte server-internal markers, not content. razel
-    // stays CONTENT-faithful and fabricates none; comparisons ignore empty markers
-    // (open question parked with Gianni — RazelFetchPlan §5).
+    // (Boundary files are written AFTER patches/links — see the end of this fn.)
     // Patches: repo.bzl applies ctx.patch(file, strip = 1).
     for pf in attr_list(spec, "patch_file") {
         let p = resolve_label(ws, &lock.vendored, &bare_root, &pf)?;
@@ -298,11 +294,22 @@ fn materialize(
         return Err(format!("`{name}` carries patch_cmds (shell) — unsupported, refusing silently-wrong"));
     }
     // build_file → BUILD.bazel (replacing the repo's own); link_files {label: relpath}.
+    // Fidelity split (round 36, read from both sources): TF-style `_tf_http_archive`
+    // SYMLINKS build_file/link_files (`ctx.symlink`); bazel_tools' `http_archive` COPIES
+    // its build_file (`ctx.file(ctx.read(...))`).
+    let symlink_mode = attr_str(spec, "kind").unwrap_or("").contains("_tf_http_archive");
+    let place = |srcp: &Path, dst: &Path| -> Result<(), String> {
+        let _ = std::fs::remove_file(dst);
+        if symlink_mode {
+            std::os::unix::fs::symlink(srcp, dst).map_err(|e| format!("symlink: {e}"))
+        } else {
+            std::fs::copy(srcp, dst).map(|_| ()).map_err(|e| format!("copy: {e}"))
+        }
+    };
     if let Some(bf) = attr_str(spec, "build_file") {
         let p = resolve_label(ws, &lock.vendored, &bare_root, bf)?;
         let _ = std::fs::remove_file(target.join("BUILD"));
-        let _ = std::fs::remove_file(target.join("BUILD.bazel"));
-        std::fs::copy(&p, target.join("BUILD.bazel")).map_err(|e| format!("build_file: {e}"))?;
+        place(&p, &target.join("BUILD.bazel")).map_err(|e| format!("build_file: {e}"))?;
     }
     if let Some(links) = spec.get("link_files").and_then(|v| v.as_object()) {
         for (label, rel) in links {
@@ -312,9 +319,19 @@ fn materialize(
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
             }
-            let _ = std::fs::remove_file(&dst);
-            std::fs::copy(&p, &dst).map_err(|e| format!("link_files `{label}`: {e}"))?;
+            place(&p, &dst).map_err(|e| format!("link_files `{label}`: {e}"))?;
         }
+    }
+    // Bazel-core boundary rule, PROVEN on 7.7.0 (round 36 matrix, 2 impls x 4 archive
+    // shapes; gemmlowp's upstream WORKSPACE is a 0-byte file — no anomalies): a repo
+    // ending its rule with NONE of these four files gets empty WORKSPACE + REPO.bazel;
+    // any ONE present (even empty) suppresses both writes.
+    let has_boundary = ["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "REPO.bazel"]
+        .iter()
+        .any(|f| target.join(f).exists());
+    if !has_boundary {
+        std::fs::write(target.join("WORKSPACE"), "").map_err(|e| format!("WORKSPACE: {e}"))?;
+        std::fs::write(target.join("REPO.bazel"), "").map_err(|e| format!("REPO.bazel: {e}"))?;
     }
     Ok(())
 }

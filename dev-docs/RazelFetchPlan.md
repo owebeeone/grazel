@@ -67,6 +67,31 @@ classes on the bigger corpus; re-run the seeding experiment behind deferred-sele
 - bzlmod/MODULE resolution: later arc (the snapshot's WORKSPACE chain is authoritative).
 - No Bazel-cache writes; no cache sharing until the central-cache (iroh) design exists.
 
+## §4b Bazel-core repo finalization (RESOLVED round 37 — was the round-36 open question)
+
+Proven empirically on bazel-7.7.0 (a 2-impls × 4-archive-shapes matrix with file:// repos,
+then validated against all five live TF repos with zero anomalies — gemmlowp's upstream
+WORKSPACE is a 0-byte file, which had masqueraded as an inconsistency):
+
+1. **Boundary rule (core, impl-independent):** when a repository rule completes and the
+   repo contains NONE of {WORKSPACE, WORKSPACE.bazel, MODULE.bazel, REPO.bazel}, core
+   writes an empty WORKSPACE **and** an empty REPO.bazel; if ANY one exists (even
+   zero-byte), core writes nothing. razel's materializer implements exactly this.
+2. **Symlink vs copy:** TF/XLA's `_tf_http_archive` SYMLINKS `build_file`/`link_files`
+   (`ctx.symlink`); bazel_tools' `http_archive` COPIES (`ctx.file(ctx.read(...))`,
+   7.7's `workspace_and_buildfile` writes BUILD.bazel only — no WORKSPACE handling left).
+   razel switches on the spec's `kind`. Symlink TARGETS necessarily differ (bazel links
+   into its own `external/xla`; razel into the workspace's `third_party/xla` — the same
+   file by construction); content-following diff is the equality that matters.
+3. Neither MODULE.bazel nor .bazelrc changes any of this — it is version-locked core
+   behavior (7.7.0). The .bazelrc DOES matter elsewhere (`--noenable_bzlmod
+   --enable_workspace` selects the WORKSPACE chain; `--deleted_packages` trims the package
+   universe) — rc-file consumption is the separate, already-registered RazelGaps item.
+
+Acceptance state: `diff -r -x '*.marker'` (markers = server-internal fetch-invalidation
+records, not repo content) is IDENTICAL on all five bazel-comparable repos, boundary files
+included.
+
 ## §5 Risks, ranked
 
 1. **Workspace-eval surface** — WORKSPACE-only natives/loads razel hasn't met; mitigated by
