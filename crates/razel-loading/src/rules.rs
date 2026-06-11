@@ -80,6 +80,33 @@ fn autoload_stub_globals(b: &mut GlobalsBuilder) {
         Ok(starlark::values::none::NoneType)
     }
 
+    /// Bazel's `fail(*args, msg=None, attr=None, sep=" ")` — the deprecated `attr` keyword
+    /// prefixes the message with the attribute name; starlark-rust's builtin rejects it.
+    /// SHADOWS the stdlib global (GlobalsBuilder is a map; later sets win — the no-fork
+    /// dialect lever, round 44).
+    fn fail<'v>(
+        #[starlark(args)] args: starlark::values::tuple::UnpackTuple<Value<'v>>,
+        #[starlark(require = named)] msg: Option<Value<'v>>,
+        #[starlark(require = named)] attr: Option<String>,
+        #[starlark(require = named)] sep: Option<String>,
+    ) -> anyhow::Result<starlark::values::none::NoneType> {
+        let sep = sep.unwrap_or_else(|| " ".to_string());
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(m) = msg {
+            parts.push(m.unpack_str().map(String::from).unwrap_or_else(|| m.to_string()));
+        }
+        parts.extend(
+            args.items
+                .iter()
+                .map(|a| a.unpack_str().map(String::from).unwrap_or_else(|| a.to_string())),
+        );
+        let body = parts.join(&sep);
+        match attr {
+            Some(a) => Err(anyhow::anyhow!("fail: attribute {a}: {body}")),
+            None => Err(anyhow::anyhow!("fail: {body}")),
+        }
+    }
+
     /// `toolchain()` declarations (round 43 — grpc registers clang-cl toolchains):
     /// record-only; real toolchain resolution is L3 surface.
     fn toolchain<'v>(
@@ -992,18 +1019,9 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
     let session = Session::default();
     let ast =
         AstModule::parse(name, detab_leading(src).into_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
-    let globals = GlobalsBuilder::extended_by(&[
-        LibraryExtension::StructType,
-        LibraryExtension::Print,
-        LibraryExtension::Map,
-        LibraryExtension::Filter,
-        LibraryExtension::Debug,
-        LibraryExtension::Json,
-        LibraryExtension::Partial,
-    ])
-    .with(rule_globals)
-    .with(engine_namespaces)
-    .build();
+    // ONE globals surface everywhere (round 44: a private duplicate here predated
+    // builder_base and silently missed later dialect additions — the shadowed fail()).
+    let globals = build_globals();
     let res: Result<(), String> = Module::with_temp_heap(|module| {
         crate::dialect::install_decl_store(&module);
         {

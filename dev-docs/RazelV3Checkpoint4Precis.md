@@ -348,3 +348,17 @@ also retired the `@platforms//cpu:aarch64` group-member class). Next plates: `fa
 keyword form (32 — dialect shim), @pypi posture (37+python cone), cpuinfo chain (22).
 64 bins; 3 gates; 6 sentinels; 2 rungolds. **Session curve: 307 → 420 (+113; 36.8% →
 50.3%).**
+
+## Round delta — razelV3 round 44 (2026-06-11, stabilization lane — the fail() shim)
+
+**420/835 held; the `fail(attr=…)` class (32) converted to its TRUE cause.** Bazel's
+`fail(*args, msg=, attr=, sep=)` keyword form now works via GLOBALS SHADOWING — the
+no-fork dialect lever (GlobalsBuilder is a map; later sets win), policy: shadow builtins →
+preprocess source (the tab precedent) → value-type seams; a fork of starlark-rust only if
+an operator/grammar wall survives a bazel-7.7.0 ground-truth check (none has — the one
+candidate, list+tuple, was Bazel-illegal too). The real find: `analyze_starlark` carried a
+PRIVATE pre-builder_base globals duplicate silently missing every later dialect addition —
+unified; ONE globals surface everywhere. The 32 packages now fail on grpc's own includes
+validation ("Path references a path above the execution root") — an include-path model
+plate, likely shared with the cpuinfo chain (22). 64 bins; 3 gates; 6 sentinels; 2
+rungolds.

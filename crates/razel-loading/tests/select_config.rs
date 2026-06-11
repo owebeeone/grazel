@@ -201,3 +201,23 @@ fn constraint_value_declaration_matches_host_in_selects() {
     assert_eq!(x.default_info, vec!["a/d.txt"], "non-host constraint falls to default");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Round 44: Bazel's `fail(*args, msg=None, attr=None, sep=" ")` — the deprecated `attr`
+/// keyword prefixes the message. starlark-rust's builtin rejects it; razel SHADOWS the
+/// global (GlobalsBuilder is a map — later sets win; no fork).
+#[test]
+fn fail_accepts_bazel_keyword_form() {
+    let src = r#"
+def _impl(ctx):
+    fail("boom", attr = "srcs")
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "x")
+"#;
+    let err = razel_loading::analyze_starlark("BUILD", src).unwrap_err();
+    assert!(
+        !err.contains("extra named parameter"),
+        "the Bazel keyword form must be ACCEPTED, not rejected: {err}"
+    );
+    assert!(err.contains("srcs") && err.contains("boom"), "attr prefixes the message: {err}");
+}
