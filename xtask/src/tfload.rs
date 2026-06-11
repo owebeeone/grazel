@@ -6,8 +6,9 @@ use razel_loading::{GlobalFlags, load_tree_report, load_tree_report_seeded, prep
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub(crate) fn tfload(root: &Path) -> Result<(), String> {
-    let ws = root.join("../third-party/tensorflow");
+/// Every package (dir with a BUILD file) under `<ws>/tensorflow`, sorted; `sample` keeps
+/// every Nth (the fast inner loop). Shared by `tfload` and `stress`.
+pub(crate) fn discover_packages(ws: &Path, sample: usize) -> Vec<String> {
     let mut packages = Vec::new();
     let mut stack = vec![ws.join("tensorflow")];
     while let Some(dir) = stack.pop() {
@@ -17,7 +18,7 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
             if p.is_dir() {
                 stack.push(p);
             } else if p.file_name().is_some_and(|f| f == "BUILD" || f == "BUILD.bazel") {
-                if let Ok(rel) = dir.strip_prefix(&ws) {
+                if let Ok(rel) = dir.strip_prefix(ws) {
                     packages.push(rel.to_string_lossy().to_string());
                 }
             }
@@ -25,15 +26,21 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     }
     packages.sort();
     packages.dedup();
+    if sample > 1 {
+        packages = packages.into_iter().step_by(sample).collect();
+    }
+    packages
+}
+
+pub(crate) fn tfload(root: &Path) -> Result<(), String> {
+    let ws = root.join("../third-party/tensorflow");
     // RAZEL_TFLOAD_SAMPLE=N: sweep every Nth package — the fast inner loop (seconds, not
     // minutes); the full sweep is for banking numbers.
-    if let Ok(n) = std::env::var("RAZEL_TFLOAD_SAMPLE") {
-        if let Ok(n) = n.parse::<usize>() {
-            if n > 1 {
-                packages = packages.into_iter().step_by(n).collect();
-            }
-        }
-    }
+    let sample = std::env::var("RAZEL_TFLOAD_SAMPLE")
+        .ok()
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(1);
+    let packages = discover_packages(&ws, sample);
     let mut flags = GlobalFlags::default();
     flags.external_base = Some(root.join("../third-party"));
     // RAZEL_TFLOAD_ONE=<pkg>[,<pkg>…]: print FULL errors (debugging a failure class). A comma

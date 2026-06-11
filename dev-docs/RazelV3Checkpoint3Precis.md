@@ -150,3 +150,22 @@ is now *enumerated* (the failure-class table + `RazelGaps.md`) rather than estim
    1:00 → 1:17 retry cost.
 5. **Deferred select()** (highway corpus named): retires the eager-composition class.
 6. **Scheduling** (waiters-work / spine breadth-first): the <10s wall push, after futures.
+
+## Round delta — razelV3 round 28 (2026-06-11, stabilization lane)
+
+**S2+S3 landed (`razelV3/sched-seam`): the wait-graph grew an observation seam.**
+`GlobalFlags::sched_hook` emits (point, key) at every coordination event — "enter" fires
+BEFORE the graph lock (tests may block there to script interleavings); outcomes
+("own"/"ready"/"reentry"/"cycle-proceed"/"takeover-timeout"/"finish-ok"/"finish-err") fire
+after. `RAZEL_TRACE_LOAD=1` prints the same stream (+wait/wake) — the throwaway instrument
+that caught the harvest-index and InFlight-leak bugs, made permanent. Three DETERMINISTIC
+regression tests replace re-run-and-hope for P4a bugs #2/#5/#6 (barrier-forced collisions:
+one .bzl eval + one ready; package cycle → cycle-proceed, zero timeouts; failed external
+load finishes its claim). Bugs #3/#4 stay guarded by parallel_parity (below the seam).
+
+**S1 landed (`razelV3/stress-harness`): `xtask stress`** — sequential baseline + N parallel
+sweeps; FAILS loudly on any takeover-timeout (livelock signature), coverage below band
+(default ≥90% of sequential — tighten to 100% when demand futures land), or
+parallel-slower-than-sequential (stall signature). Knobs: RAZEL_STRESS_{SAMPLE,RUNS,BAND_PCT}.
+First run: baseline 25/105 (sample-8), 3×12-thread runs 24/105 @ ~30s, 0 timeouts — OK.
+62 bins; 3 gates; 6 sentinels; 2 rungolds.

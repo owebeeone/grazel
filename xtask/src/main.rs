@@ -30,6 +30,7 @@ fn workspace_root() -> PathBuf {
 
 mod probe;
 mod rungold;
+mod stress;
 mod tfload;
 
 fn main() -> ExitCode {
@@ -46,6 +47,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("xtask tfload: FAIL — {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("stress") => match stress::stress(&workspace_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("xtask stress: FAIL — {e}");
                 ExitCode::FAILURE
             }
         },
