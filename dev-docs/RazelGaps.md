@@ -225,6 +225,21 @@ output (a regression guard), per the characterization header.
   not eval (the round-22 "40s at 2% CPU" reading). Post-P4a: real cycle detection (waits-for
   check) instead of the timeout, per the P3 plan note.
 
+## Round-33 register (2026-06-11)
+
+- **Cycle partial-state instance reads ABSORB silently (round-32 synthesis interaction).**
+  `DepTarget::at`'s round-32 absorbing synthesis fires whenever `providers` is empty —
+  including a STARLARK-rule dep whose captured instances are merely *invisible* (mid-flight
+  package read through a cycle: captures live on the producer's unfrozen heap, P4a bug #3).
+  The consumer's `dep[P].field` then absorbs instead of erroring. Sequential cycle re-entry
+  reads absorb identically, so coverage parity is honest — but the VALUE read under a cycle
+  can differ from the sequential one (absorbed vs real, timing-dependent), and
+  parallel_parity asserts Ok-ness, not values. Surfaced designing the F4 restart test
+  (RazelDemandFutures.md): the intended "does not provide" repro passed via absorption.
+  Retire with the instance-locality work (provider-map epic) or a value-asserting parity
+  fixture; the restart pass (F4) already re-runs failed entries, so only *silent-success*
+  divergence remains.
+
 ## Round-24 register (2026-06-11)
 
 - **Failed-package loads re-eval per consumer (perf debt; the purge fix's cost).** A failed

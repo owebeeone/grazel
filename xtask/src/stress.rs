@@ -1,12 +1,22 @@
 //! S1 (round 28): the pool STRESS harness — the P4a session's ad-hoc shell loops as a
 //! repeatable tool. One sequential baseline sweep, then N parallel sweeps; LOUD failure on
 //! any of: a takeover-timeout event (the livelock signature — counted via the S2 sched
-//! hook), parallel coverage below the band (default ≥90% of sequential — the known
-//! CycleProceed gap; tighten to 100% when demand futures land), or a parallel run slower
-//! than sequential (the stall signature).
+//! hook), parallel coverage below the band (default ≥99% of sequential — see below), or a
+//! parallel run slower than sequential (the stall signature).
+//!
+//! Band note (round 33): demand futures + the restart pass closed the CycleProceed gap —
+//! the residual ±~1% (5-of-321 full-tree) is a METRIC artifact, not an engine gap: the
+//! report scores a package Ok when its entry is a Ready no-op behind an earlier consumer's
+//! dep-load (declarations deferred, never driven), and entry-vs-dep-load ORDER differs by
+//! schedule. Every diff-package fails standalone-sequentially on a real registered wall
+//! (unvendored repos, ctx.executable). 100% needs the per-target report refinement
+//! (RazelGaps round-24) or those vendor decisions — Gianni's call either way. The default
+//! band is sample-aware: 99 on the full tree; 90 on sampled runs, where one artifact
+//! package is several percent of a ~25-package baseline.
 //!
 //! Knobs: RAZEL_STRESS_SAMPLE (every-Nth package, default 8 — the inner loop; 1 = full
-//! tree), RAZEL_STRESS_RUNS (parallel runs, default 3), RAZEL_STRESS_BAND_PCT (default 90).
+//! tree), RAZEL_STRESS_RUNS (parallel runs, default 3), RAZEL_STRESS_BAND_PCT (default
+//! 99 at sample=1, else 90).
 
 use crate::tfload::discover_packages;
 use razel_loading::{GlobalFlags, SchedHook, load_tree_report_with_threads};
@@ -49,7 +59,7 @@ pub(crate) fn stress(root: &Path) -> Result<(), String> {
     let ws = root.join("../third-party/tensorflow");
     let sample = env_num("RAZEL_STRESS_SAMPLE", 8);
     let runs = env_num("RAZEL_STRESS_RUNS", 3);
-    let band_pct = env_num("RAZEL_STRESS_BAND_PCT", 90);
+    let band_pct = env_num("RAZEL_STRESS_BAND_PCT", if sample == 1 { 99 } else { 90 });
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
     let packages = discover_packages(&ws, sample);
 

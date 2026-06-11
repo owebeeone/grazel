@@ -453,9 +453,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     }
 
     /// `genrule(name, srcs, outs, cmd)` — Bazel's generic shell rule (razelV3): ONE bash action
-    /// running `cmd` after Make-variable expansion (`$@`/`$<`/`$(SRCS)`/`$(OUTS)`/`$(location)`;
-    /// `$$` escapes). A src that is a label resolves to its files (demand-driven, E0c-deferred).
-    /// Unmodeled variables (`$(RULEDIR)`, tools=…) error loudly — registered debt, not silence.
+    /// running `cmd` after Make-variable expansion (`$@`/`$<`/`$(SRCS)`/`$(OUTS)`/`$(location)`/
+    /// `$(@D)`/`$(GENDIR)`/`$(BINDIR)`; `$$` escapes). A src that is a label resolves to its
+    /// files (demand-driven, E0c-deferred); `tools=`/`exec_tools=` join the location table +
+    /// inputs. Unmodeled variables (`toolchains=` make-var sources) error loudly — registered.
     fn genrule<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<Value<'v>>,

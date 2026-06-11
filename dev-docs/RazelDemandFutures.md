@@ -99,28 +99,39 @@ strand a waiter) and parks. Wakers, in order of arrival:
 - The 20s backstop (loud `decl-timeout` event; MUST be zero in practice — the finish
   sweep makes a silent strand structurally impossible, P4a bug #6's lesson).
 
-**Cycle handling:** proxy entries ride the same waits-for graph; the acquire-time walk
-already traverses `waiting`/`res` generically, so package↔declaration cycles detect with no
-new machinery. The variant rule: a **package** waiter in a cycle gets CycleProceed (today's
-semantics — it CAN proceed against partial state); a **declaration** waiter in a cycle does
-NOT wait (waiting would deadlock — the publisher is blocked on the waiter) and proceeds
-into today's fallthrough paths. Both orderings of the A↔B dance resolve: if A parks on
-Pkg(P2) first, B's decl-walk finds the cycle and B proceeds-partial; if B parks on Decl(T4)
-first, A's package-walk finds the cycle, A gets CycleProceed, drives on, and `record_target`
-wakes B — both packages succeed. Same-thread `Reentry` on a proxy entry (owner demanding
-its own pending decl from inside a nested module) proceeds-partial — that IS sequential's
-re-entry read, unchanged.
+**Cycle handling (the landed refinement):** proxy entries ride the same waits-for graph;
+the acquire-time walk traverses `waiting`/`res` generically, so package↔declaration cycles
+detect with no new machinery. The walk classifies the cycle's wait edges, and the variant
+rule is:
+- A **package** waiter in a cycle gets CycleProceed (today's semantics — it CAN proceed
+  against partial state).
+- A **declaration** waiter in a cycle **parks THROUGH it when the cycle carries a Pkg/Bzl
+  wait edge** — that edge is a *breaker*: a parked worker that resolves the cycle itself on
+  its next wake (CycleProceed / takeover). The decl waiter inserts its edge and
+  `notify_all`s so the breaker (which parked before this edge existed) re-walks. Both
+  orderings of the A↔B dance then succeed: whoever parks second hands the other the
+  CycleProceed.
+- An **all-Decl cycle** has no breaker — the publishers are all parked on each other (the
+  workers' drive loops ARE the publishers): a true cross-thread deadlock shape. The waiter
+  proceeds-partial (restart-eligible, §5).
+
+Same-thread `Reentry` on a proxy entry (owner demanding its own pending decl from inside a
+nested module) proceeds-partial — that IS sequential's re-entry read, unchanged. A Decl
+wait that hits the 20s backstop re-parks loudly instead of duplicating (there is nothing to
+take over — the body is non-local; the publish/sweep pair makes a silent strand
+structurally impossible).
 
 ## §5 The restart pass (what closes the LAST gap to ==)
 
-§4's futures make the lucky ordering win more often, but a declaration waiter that detects
-a cycle still proceeds-partial and fails — and which party is "lucky" is a coin flip per
-cycle. Sequential never flips this coin. **Decision: Skyframe's answer — restart.** A
-cross-thread partial read is *recorded*, and an entry-drive that failed after consuming one
-is *retried after the pool drains*:
+§4's breaker rule removes the ordering coin flip for mixed cycles, but the all-Decl shape
+still fails one side by design, and CycleProceed partial reads can still poison an entry
+that sequential ordering would have served. Sequential never makes these reads.
+**Decision: Skyframe's answer — restart.** A cross-thread partial read is *recorded*, and
+an entry-drive that failed after consuming one is *retried after the pool drains*:
 
-- `EvalStack` (per-thread, Session-owned — AD2-clean) gains a `partial_proceeds` counter,
-  incremented on package CycleProceed and on a declaration cycle-proceed. Both are
+- `EvalStack` (per-thread, Session-owned — AD2-clean) gains a `partial_reads` counter,
+  incremented on every CycleProceed grant, on an all-Decl cycle proceed, and on a
+  declaration wait whose owning package vanished (FailRetry mid-wait). All are
   cross-thread-only by construction (sequential re-entry takes the `Reentry` arm), so
   **threads=1 never sets it**.
 - The tree driver's worker loop snapshots the counter around each entry; a failed entry
