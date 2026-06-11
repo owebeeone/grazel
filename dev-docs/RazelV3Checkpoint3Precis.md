@@ -191,3 +191,22 @@ hands a depset where Bazel hands a list) and the eager-select srcs class is 53 p
 15 visible before (relay to the coverage lane: their item-2 fix is 3.5× bigger than briefed).
 62 bins; 3 gates; 6 sentinels; 2 rungolds. AIEdit registered mid-session — adoption + eval
 from the next session (tools load at session start).
+
+## Round delta — razelV3 round 30 (2026-06-11, stabilization lane)
+
+**Two classes killed (`razelV3/frozen-depsets`): frozen-depset uniformity (70 pkgs) and
+`Label.repo_name` (35 across three classes).** The depset root cause: provider fields read
+off frozen modules are `FrozenDepset`s, and every downcast was live-only — so
+`add_all(map_each=)` passed the WHOLE depset to the mapper (protobuf's proto_common.bzl:196,
+the `.count` error), `.to_list()` silently returned `[]`, and `depset(transitive=[frozen])`
+silently SKIPPED members. One helper (`depset_items`, both forms) at four sites; test
+reproduces the exact TF shape. `repo_name` is Bazel 7's alias of `workspace_name`
+(flatbuffers' build_defs.bzl:16 — also the root of the lite schema_fbs loader classes).
+
+**Sweep: 304/835 (+3 net) @ 6:01 — the classes CONVERTED into their next walls:**
+`@com_google_protobuf//python:protobuf_python does not provide the requested provider`
+(72, py-proto provider flow) and `native.package_relative_label` missing (62, a Bazel 7
+native — small binding). The 6:01 (was 1:16) is part honest (frozen depsets now traverse —
+real eval depth) and part the analysis-retry storm on the hot protobuf_python package
+(72 consumers × retryable analysis failure × re-eval; the declare-phase memo deliberately
+doesn't cache analysis failures) — diagnosis next. 62 bins; 3 gates; 6 sentinels; 2 rungolds.

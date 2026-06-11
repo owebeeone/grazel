@@ -4,6 +4,33 @@
 
 use razel_loading::{GlobalFlags, analyze_workspace_with};
 
+/// `Label.repo_name` (Bazel 7+ alias of `workspace_name` — flatbuffers' build_defs.bzl reads
+/// it): repo without `@`, `""` for the main workspace. Round 30.
+#[test]
+fn label_repo_name_member() {
+    let root = std::env::temp_dir().join(format!("razel-reponame-{}", std::process::id()));
+    let pkg = root.join("app");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("BUILD"),
+        r#"
+def _impl(ctx):
+    ext = Label("@some_repo//pkg:x")
+    args = [ext.repo_name, ext.workspace_name, Label("//app:t").repo_name]
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = args)
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "t")
+"#,
+    )
+    .unwrap();
+    let res = analyze_workspace_with(&root, "//app:t", GlobalFlags::default());
+    let _ = std::fs::remove_dir_all(&root);
+    let targets = res.unwrap();
+    let t = targets.iter().find(|t| t.name.ends_with(":t")).unwrap();
+    assert_eq!(t.actions[0].argv[1..], ["some_repo", "some_repo", ""]);
+}
+
 #[test]
 fn label_list_entry_resolves_to_a_source_file() {
     let root = std::env::temp_dir().join(format!("razel-filelabel-{}", std::process::id()));

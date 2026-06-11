@@ -396,13 +396,28 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
 
 /// The element VALUES of an `add_all` collection (list or depset; a scalar is itself) — kept as
 /// values so `map_each` sees live objects (File fields etc.) rather than pre-stringified paths.
+/// A depset's member values — LIVE or FROZEN form. A provider field read off a frozen module
+/// (protobuf's `proto_info.transitive_proto_path`) is a `FrozenDepset`; live-only downcasts
+/// silently treated it as "not a depset" (round 30: `add_all(map_each=)` passed the WHOLE
+/// depset to the mapper — TF's 70-pkg `.count` class; `.to_list()` returned `[]`;
+/// `depset(transitive=)` skipped members).
+pub(crate) fn depset_items<'v>(v: Value<'v>) -> Option<Vec<Value<'v>>> {
+    if let Some(d) = v.downcast_ref::<Depset>() {
+        return Some(d.items.clone());
+    }
+    if let Some(d) = v.downcast_ref::<FrozenDepset>() {
+        return Some(d.items.iter().map(|x| x.to_value()).collect());
+    }
+    None
+}
+
 fn flatten_values<'v>(v: Value<'v>) -> Vec<Value<'v>> {
     if let Some(list) = ListRef::from_value(v) {
         return list.iter().flat_map(flatten_values).collect();
     }
-    if let Some(d) = v.downcast_ref::<Depset>() {
+    if let Some(items) = depset_items(v) {
         // Items are live Values — return them directly so map_each sees File/.path etc.
-        return d.items.clone();
+        return items;
     }
     vec![v]
 }
@@ -596,11 +611,8 @@ pub(crate) fn depset_methods(b: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
         // LIVE members (T-001 semantics): File elements keep .path/.extension; consumers
-        // that want strings go through file_path at use.
-        let items: Vec<Value<'v>> = this
-            .downcast_ref::<Depset>()
-            .map(|d| d.items.clone())
-            .unwrap_or_default();
+        // that want strings go through file_path at use. Frozen form included (round 30).
+        let items: Vec<Value<'v>> = depset_items(this).unwrap_or_default();
         Ok(eval.heap().alloc(items))
     }
 }
@@ -609,8 +621,8 @@ pub(crate) fn depset_methods(b: &mut MethodsBuilder) {
 /// Extract member paths from a `DefaultInfo(files=…)` value: a [`Depset`]'s members,
 /// a list's elements (Files/strings), or a single value. Stringifies at use.
 pub(crate) fn extract_files(v: Value) -> Vec<String> {
-    if let Some(ds) = v.downcast_ref::<Depset>() {
-        return ds.items.iter().map(|v| file_path(*v)).collect();
+    if let Some(items) = depset_items(v) {
+        return items.iter().map(|v| file_path(*v)).collect();
     }
     if let Some(list) = ListRef::from_value(v) {
         return list.iter().map(file_path).collect();

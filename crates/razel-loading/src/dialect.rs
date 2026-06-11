@@ -696,9 +696,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             && let Some(list) = ListRef::from_value(t)
         {
             for dep in list.iter() {
-                if let Some(ds) = dep.downcast_ref::<Depset>() {
-                    for v in &ds.items {
-                        push(*v, &mut seen, &mut items);
+                // LIVE or FROZEN member depsets (round 30 — frozen ones were silently skipped).
+                if let Some(members) = crate::values::depset_items(dep) {
+                    for v in members {
+                        push(v, &mut seen, &mut items);
                     }
                 }
             }

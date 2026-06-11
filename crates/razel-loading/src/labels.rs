@@ -54,9 +54,10 @@ impl<'v> StarlarkValue<'v> for LabelV {
         match attribute {
             "package" => Some(heap.alloc(self.package.as_str())),
             "name" => Some(heap.alloc(self.name.as_str())),
-            // Bazel: workspace_name = repo name (no `@`; "" = main); workspace_root =
+            // Bazel: workspace_name = repo name (no `@`; "" = main); `repo_name` is its
+            // modern alias (Bazel 7+; flatbuffers' build_defs.bzl reads it); workspace_root =
             // `external/<repo>` for external labels, "" for main.
-            "workspace_name" => Some(heap.alloc(
+            "workspace_name" | "repo_name" => Some(heap.alloc(
                 self.repo.as_deref().map(|r| r.trim_start_matches('@')).unwrap_or(""),
             )),
             "workspace_root" => Some(match self.repo.as_deref() {

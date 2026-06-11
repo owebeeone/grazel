@@ -117,6 +117,15 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
 
 fn summarize(report: Vec<(String, Result<(), String>)>, total: usize) -> Result<(), String> {
     let ok = report.iter().filter(|(_, r)| r.is_ok()).count();
+    // RAZEL_TFLOAD_CLASS=<substr>: print the FIRST full error matching — the class-member
+    // debugger for order-dependent classes the ONE probe can't reach standalone.
+    if let Ok(pat) = std::env::var("RAZEL_TFLOAD_CLASS") {
+        if let Some((pkg, Err(e))) =
+            report.iter().find(|(_, r)| r.as_ref().is_err_and(|e| e.contains(&pat)))
+        {
+            println!("=== {pkg}: first `{pat}` member, full error ===\n{e}");
+        }
+    }
     // Failure classes: signature = the LAST line carrying an error message.
     let mut classes: BTreeMap<String, (usize, String)> = BTreeMap::new();
     for (pkg, r) in &report {

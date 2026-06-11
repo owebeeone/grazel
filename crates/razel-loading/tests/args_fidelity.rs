@@ -52,6 +52,55 @@ r(name = "t", srcs = ["a.c", "b.c"])
     assert_eq!(argv, &["tool", "p-a.c", "p-b.c"], "File elements kept .path through the depset");
 }
 
+/// FROZEN depsets behave like depsets (round 30 — the TF `depset has no attribute 'count'`
+/// class, 70 pkgs): a module-level depset freezes with its .bzl; the live-only downcasts made
+/// `add_all(map_each=)` pass the WHOLE depset to the mapper (protobuf's proto_common.bzl:196
+/// shape), `.to_list()` return `[]`, and `depset(transitive=[frozen])` skip members — all
+/// silently wrong.
+#[test]
+fn frozen_depsets_behave_like_depsets() {
+    let root = std::env::temp_dir().join(format!("razel-frozen-depset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("app/defs.bzl"),
+        "PATHS = depset([\"x/y\", \"z\"])\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("app/BUILD"),
+        r#"load("//app:defs.bzl", "PATHS")
+
+def _mapper(p):
+    return ["s-%d" % p.count("/")]
+
+def _impl(ctx):
+    args = ctx.actions.args()
+    args.add_all(PATHS, map_each = _mapper)
+    merged = depset(["m"], transitive = [PATHS])
+    args.add_all([str(len(PATHS.to_list())), str(len(merged.to_list()))])
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = [args])
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "t")
+"#,
+    )
+    .unwrap();
+    let res = razel_loading::analyze_workspace_with(
+        &root,
+        "//app:t",
+        razel_loading::GlobalFlags::default(),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let targets = res.unwrap();
+    let t = targets.iter().find(|t| t.name.ends_with(":t")).unwrap();
+    assert_eq!(
+        t.actions[0].argv,
+        ["tool", "s-1", "s-0", "2", "3"],
+        "map_each per element; to_list real; transitive merged"
+    );
+}
+
 /// `ctx.actions.write(…, is_executable = True)` chmods the output (the launcher-script shape).
 #[test]
 fn write_is_executable_chmods() {
