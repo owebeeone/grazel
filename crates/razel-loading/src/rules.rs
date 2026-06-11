@@ -873,11 +873,13 @@ pub fn load_tree_report_seeded(
     asts: Vec<(String, starlark::syntax::AstModule)>,
 ) -> (Vec<(String, Result<(), String>)>, Vec<String>) {
     // P4: N workers over a shared queue against ONE Session (Send+Sync, P1–P3).
-    // RAZEL_LOAD_THREADS=1 reproduces sequential behavior exactly.
+    // DEFAULT-ON since round 46 (decision: Gianni — the parity bar held since round 34:
+    // driven-work coverage equality, deterministic run-to-run, 0 livelock signatures).
+    // RAZEL_LOAD_THREADS=1 reproduces sequential behavior exactly (the escape hatch).
     let threads = std::env::var("RAZEL_LOAD_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(1);
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
     load_tree_report_with_threads(root, flags, packages, asts, threads)
 }
 

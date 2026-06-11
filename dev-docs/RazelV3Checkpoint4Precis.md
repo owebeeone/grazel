@@ -384,3 +384,20 @@ includes-validation plate (32) diagnosed to rules_cc cc_helper synthesizing `..`
 partially-absorbed inputs (instrumented session next). Remaining top: includes 32 +
 cpuinfo 22, cudnn_header host row (16), python chains converting deeper. 64 bins; 3
 gates; 6 sentinels; 2 rungolds. **Session curve: 307 → 458 (+151; 36.8% → 54.9%).**
+
+## Round delta — razelV3 round 46 (2026-06-12, stabilization lane — pool DEFAULT-ON)
+
+**The worker pool is the DEFAULT (decision: Gianni; the round-34 parity bar held for 12
+rounds): `load_tree_report` runs `available_parallelism` workers unless
+`RAZEL_LOAD_THREADS` says otherwise; `=1` is the exact-sequential escape hatch.** At
+round-45 depth: 455/835 @ 5:01 default vs 458 @ ~8:30 sequential (the ±3 is the known
+Ready-no-op artifact band) — 1.7× now, down from 4× at round-33 depth because the
+python/grpc spine deepened; the wall lever from here is real scheduling or the versioned
+store. **The seeding experiment re-ran post-deferred-select (its round-34 gate): the @xla
+cascade is GONE, wall 3:05 — but coverage 439 (−16, order-sensitive losses the restart
+pass doesn't reclaim under seeded ordering) — seeding stays opt-in.** Also recorded
+(Gianni, this round): the Session field-bag + protocol coordination is recognized
+suboptimal-by-design — the destination is a DICE/Skyframe-shaped VERSIONED node store
+(label-interned, (Label,Config)-keyed, snapshot reads) absorbing results/fold_cache/the
+futures protocol; triggers: a store-dominated profile or one more concurrency-patch class;
+design note to be banked before any rewrite. 64 bins; 3 gates; 6 sentinels; 2 rungolds.
