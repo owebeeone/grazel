@@ -214,6 +214,86 @@ fn declare_phase_failure_is_cached_package_in_error() {
     );
 }
 
+/// F3 (demand futures): a CycleProceed reader demanding a declaration its owner has NOT
+/// driven yet must WAIT for the owner's `record_target` (the per-declaration future), not
+/// error on the partial state. The forced order: p1 declares the demander BEFORE the
+/// demanded target (u1 first, t4 second); B (driving p2) is hook-held at its `//slow`
+/// demand — a key only B reaches, AFTER recording t2 and BEFORE demanding t4 — so the sole
+/// gated arrival rides the 5s release, inside which A deterministically graph-parks on p2
+/// (its u1 → t2 demand). B's t4 walk then always sees the cycle. Pre-fix: B cycle-proceeds
+/// into p1's earliest state and errors "`//p1:t4` is neither a declared target nor a source
+/// file". Post-fix: B parks on the declaration future; the insert wakes A (the package
+/// waiter), A cycle-proceeds (t2 IS recorded), drives t4, and the record publishes B
+/// onward. Consumers read dep FILES only (provider instances through a cycle remain the
+/// restart pass's contract — F4).
+#[test]
+fn cycle_reader_waits_for_undriven_declaration() {
+    let root = std::env::temp_dir().join(format!("razel-seam-declwait-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("defs")).unwrap();
+    std::fs::write(
+        root.join("defs/info.bzl"),
+        r#"def _lib_impl(ctx):
+    return [DefaultInfo(files = [])]
+
+lib = rule(implementation = _lib_impl, attrs = {})
+
+def _use_impl(ctx):
+    paths = []
+    for d in ctx.attr.deps:
+        for f in d.files:
+            paths.append(f.path)
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = paths)
+
+use = rule(implementation = _use_impl, attrs = {"deps": attr.label_list()})
+"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("defs/BUILD"), "").unwrap();
+    std::fs::create_dir_all(root.join("slow")).unwrap();
+    std::fs::write(root.join("slow/x.txt"), "x").unwrap();
+    std::fs::write(root.join("slow/BUILD"), "filegroup(name = \"x\", srcs = [\"x.txt\"])\n")
+        .unwrap();
+    std::fs::create_dir_all(root.join("p1")).unwrap();
+    std::fs::write(
+        root.join("p1/BUILD"),
+        "load(\"//defs:info.bzl\", \"lib\", \"use\")\n\
+         use(name = \"u1\", deps = [\"//p2:t2\"])\n\
+         lib(name = \"t4\")\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("p2")).unwrap();
+    std::fs::write(
+        root.join("p2/BUILD"),
+        "load(\"//defs:info.bzl\", \"lib\", \"use\")\n\
+         lib(name = \"t2\")\n\
+         use(name = \"mid\", deps = [\"//slow:x\"])\n\
+         use(name = \"u2\", deps = [\"//p1:t4\"])\n",
+    )
+    .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut flags = GlobalFlags::default();
+    flags.sched_hook = Some(hook_with_gate(events.clone(), |k| k == "slow"));
+    let (report, _) = load_tree_report_with_threads(
+        &root,
+        flags,
+        &["p1".to_string(), "p2".to_string()],
+        Vec::new(),
+        2,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    for (pkg, r) in &report {
+        assert!(r.is_ok(), "the cycle reader must wait for the declaration: {pkg}: {r:?}");
+    }
+    assert_eq!(count(&events, "takeover-timeout", ""), 0, "no waiter may hit the 20s backstop");
+    assert_eq!(
+        count(&events, "decl-done", "//p1:t4"),
+        1,
+        "the owner's record must publish the awaited declaration: {:?}",
+        events.lock().unwrap()
+    );
+}
+
 /// F2 (demand futures): two workers demanding the same DEFERRED NATIVE body (FnOnce —
 /// `Session.native_decls[i].take()`) must single-flight: the loser WAITS for the runner's
 /// record instead of seeing an empty slot and erroring "neither a declared target nor a

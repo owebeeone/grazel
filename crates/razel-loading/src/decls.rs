@@ -383,6 +383,29 @@ pub(crate) fn ensure_analyzed<'v>(
             return Err(anyhow::anyhow!("loading `{label}`'s package failed: {e}").into());
         }
     }
+    // F3 (demand futures): the label is DECLARED in a package mid-flight on another worker
+    // (the Session-wide `pending` map), but its body lives on that worker's heap —
+    // unreachable here (P4a bug #3). Wait for the owner's record (the per-declaration
+    // future) or the package's terminal sweep instead of erroring on partial state;
+    // an unwaitable wait (true dependency cycle / own-thread re-entry) proceeds-partial.
+    {
+        let pend_pkg = {
+            let sess = session(eval);
+            if sess.pending.borrow().contains_key(label) {
+                crate::state::pkg_of(label)
+            } else {
+                None
+            }
+        };
+        if let Some(pkg) = pend_pkg {
+            match crate::state::wait_pending_decl(session(eval), label, &pkg) {
+                crate::state::PendingWait::Published => return Ok(()),
+                // Terminal or unwaitable: the harvest / native / error paths below decide.
+                crate::state::PendingWait::PkgTerminal
+                | crate::state::PendingWait::Proceed => {}
+            }
+        }
+    }
     let nidx = { session(eval).deferred_natives.borrow().get(label).copied() };
     if let Some(nidx) = nidx {
         // F2 (demand futures): single-flight the FnOnce demand-run. Without the claim, the

@@ -350,21 +350,35 @@ fn acquire_resource_locked(sess: &Session, key: &ResKey) -> (Acquire, bool) {
             Some(PkgState::InFlight(tid)) if *tid == me => return (Acquire::Reentry, false),
             Some(PkgState::InFlight(owner)) => {
                 // Cycle check: owner → (what owner waits on) → its owner → … → me?
-                if walk_finds_cycle(&g, *owner, me) {
-                    // Packages: sequential re-entry semantics — proceed against the owner's
-                    // partial state, no duplicate eval. Declarations: a waiter in a cycle
-                    // must not park (its publisher is blocked on it) — proceed-partial.
-                    // `.bzl` modules: the module VALUE is required, so take the eval over
-                    // (duplicate; converges — the worst case is an illegal load cycle,
-                    // which the eval reports loudly).
-                    if matches!(key, ResKey::Pkg(_) | ResKey::Decl(_)) {
-                        return (Acquire::CycleProceed, false);
+                let mut wake_breaker = false;
+                if let Some(has_breaker) = walk_cycle_kind(&g, *owner, me) {
+                    match key {
+                        // Packages: sequential re-entry semantics — proceed against the
+                        // owner's partial state, no duplicate eval.
+                        ResKey::Pkg(_) => return (Acquire::CycleProceed, false),
+                        // Declarations: an all-Decl cycle is a true dependency cycle —
+                        // proceed-partial (callers report). A cycle with a Pkg/Bzl wait
+                        // edge has a BREAKER: that waiter cycle-proceeds (or takes over)
+                        // on its next wake — park THROUGH the cycle and wake it (it
+                        // parked before this edge existed).
+                        ResKey::Decl(_) if !has_breaker => {
+                            return (Acquire::CycleProceed, false);
+                        }
+                        ResKey::Decl(_) => wake_breaker = true,
+                        // `.bzl` modules: the module VALUE is required, so take the eval
+                        // over (duplicate; converges — the worst case is an illegal load
+                        // cycle, which the eval reports loudly).
+                        ResKey::Bzl(_) => {
+                            g.res.insert(key.clone(), PkgState::InFlight(me));
+                            *g.live.entry(key.clone()).or_default() += 1;
+                            return (Acquire::Own, false);
+                        }
                     }
-                    g.res.insert(key.clone(), PkgState::InFlight(me));
-                    *g.live.entry(key.clone()).or_default() += 1;
-                    return (Acquire::Own, false);
                 }
                 g.waiting.insert(me, key.clone());
+                if wake_breaker {
+                    sess.loaded_cv.notify_all();
+                }
                 trace_load("wait", key.name());
                 let (g2, t) = sess
                     .loaded_cv
@@ -374,6 +388,17 @@ fn acquire_resource_locked(sess: &Session, key: &ResKey) -> (Acquire, bool) {
                 g.waiting.remove(&me);
                 trace_load("wake", key.name());
                 if t.timed_out() {
+                    // A declaration wait cannot take over (the body is non-local); its
+                    // publisher is leak-proof (record publish / package-finish sweep), so
+                    // re-park loudly instead of duplicating.
+                    if matches!(key, ResKey::Decl(_)) {
+                        eprintln!(
+                            "razel: warning: declaration wait exceeded 20s; re-parking on `{}`",
+                            key.name()
+                        );
+                        trace_load("decl-timeout", key.name());
+                        continue;
+                    }
                     eprintln!(
                         "razel: warning: load wait timed out (unseen cycle?); duplicating `{}`",
                         key.name()
@@ -392,22 +417,33 @@ fn acquire_resource_locked(sess: &Session, key: &ResKey) -> (Acquire, bool) {
     }
 }
 
-/// Walk the waits-for chain from `start`: does it reach a resource `me` owns?
-fn walk_finds_cycle(g: &WaitGraph, start: std::thread::ThreadId, me: std::thread::ThreadId) -> bool {
+/// Walk the waits-for chain from `start`: `Some(has_breaker)` when it reaches a resource
+/// `me` owns (a cycle) — `has_breaker` = some wait edge in the chain is a Pkg/Bzl key,
+/// i.e. a parked worker that resolves the cycle itself on its next wake (CycleProceed /
+/// takeover). `None` = no cycle.
+fn walk_cycle_kind(
+    g: &WaitGraph,
+    start: std::thread::ThreadId,
+    me: std::thread::ThreadId,
+) -> Option<bool> {
     let mut cur = start;
+    let mut has_breaker = false;
     for _ in 0..128 {
-        let Some(next_key) = g.waiting.get(&cur) else { return false };
+        let Some(next_key) = g.waiting.get(&cur) else { return None };
+        if !matches!(next_key, ResKey::Decl(_)) {
+            has_breaker = true;
+        }
         match g.res.get(next_key) {
             Some(PkgState::InFlight(o2)) => {
                 if *o2 == me {
-                    return true;
+                    return Some(has_breaker);
                 }
                 cur = *o2;
             }
-            _ => return false,
+            _ => return None,
         }
     }
-    false
+    None
 }
 
 /// Finish an owned resource: Done on success (any cache insert MUST precede this — Ready
@@ -442,11 +478,143 @@ pub(crate) fn finish_resource(sess: &Session, key: &ResKey, outcome: FinishOutco
                 true
             }
         };
+        // F3: a package's terminal state sweeps its declarations' outstanding proxy
+        // futures — woken waiters re-resolve against the now-terminal package (harvest
+        // visible, or the failure surfaces). Leak-proof: no proxy entry outlives its
+        // package's InFlight window. Individually-finished Decl entries (native runs,
+        // published records) are terminal facts and stay.
+        if let ResKey::Pkg(p) = key {
+            g.res.retain(|k, st| {
+                !(matches!((k, st), (ResKey::Decl(l), PkgState::InFlight(_))
+                    if pkg_of(l).as_deref() == Some(p.as_str())))
+            });
+        }
         sess.loaded_cv.notify_all();
         may_purge
     };
     sched_event(sess, if ok { "finish-ok" } else { "finish-err" }, key.name());
     may_purge
+}
+
+/// F3 (demand futures): the result of waiting on a declaration of a MID-FLIGHT package.
+pub(crate) enum PendingWait {
+    /// The owner recorded the declaration (`record_target` published) — read `results`.
+    Published,
+    /// The owning package reached a terminal state — re-resolve via harvest / its error.
+    PkgTerminal,
+    /// Waiting is unsound here (owner is this thread, or a true dependency cycle) —
+    /// proceed against partial state; the callers' error paths report.
+    Proceed,
+}
+
+/// Wait for a declaration that is `pending` in a package another worker owns: its body
+/// lives on that worker's heap (P4a bug #3 — unreachable here), but its `record_target`
+/// IS cross-thread-visible. Creates a PROXY entry `Decl(label) = InFlight(pkg owner)` in
+/// the wait graph (atomically re-verifying the package is still mid-flight elsewhere),
+/// parks through the shared condvar, and resolves on publish or the package-finish sweep.
+/// Cycle rule as in [`acquire_resource`]: park through breaker-carrying cycles (waking the
+/// breaker), proceed-partial on all-Decl ones. Sequentially this NEVER waits (the owner is
+/// always this thread → `Proceed` with no events) — threads=1 behavior is untouched.
+pub(crate) fn wait_pending_decl(sess: &Session, label: &str, pkg: &str) -> PendingWait {
+    let me = std::thread::current().id();
+    let dkey = ResKey::Decl(label.to_string());
+    let pkey = ResKey::Pkg(pkg.to_string());
+    {
+        // Silent pre-check: only engage (and emit events) when the package is genuinely
+        // mid-flight on ANOTHER worker.
+        let g = sess.loaded.lock().expect("loaded poisoned");
+        match g.res.get(&pkey) {
+            Some(PkgState::InFlight(owner)) if *owner != me => {}
+            Some(PkgState::InFlight(_)) => return PendingWait::Proceed,
+            _ => return PendingWait::PkgTerminal,
+        }
+    }
+    sched_event(sess, "enter", label);
+    let outcome = wait_pending_decl_locked(sess, &dkey, &pkey, me);
+    let point = match outcome {
+        PendingWait::Published => "decl-published",
+        PendingWait::PkgTerminal => "decl-terminal",
+        PendingWait::Proceed => "decl-proceed",
+    };
+    sched_event(sess, point, label);
+    outcome
+}
+
+fn wait_pending_decl_locked(
+    sess: &Session,
+    dkey: &ResKey,
+    pkey: &ResKey,
+    me: std::thread::ThreadId,
+) -> PendingWait {
+    let mut g = sess.loaded.lock().expect("loaded poisoned");
+    loop {
+        let owner = match g.res.get(dkey) {
+            Some(PkgState::Done) => return PendingWait::Published,
+            // A terminal failure on the declaration itself (native FailCached) — the
+            // callers' memo paths serve the real error.
+            Some(PkgState::Failed(_)) => return PendingWait::PkgTerminal,
+            Some(PkgState::InFlight(t)) if *t == me => return PendingWait::Proceed,
+            Some(PkgState::InFlight(t)) => *t,
+            None => match g.res.get(pkey) {
+                // (Re)create the proxy, owned by the package's owner — the walk and the
+                // publish/sweep treat it exactly like a claimed resource.
+                Some(PkgState::InFlight(owner)) if *owner != me => {
+                    let owner = *owner;
+                    g.res.insert(dkey.clone(), PkgState::InFlight(owner));
+                    owner
+                }
+                Some(PkgState::InFlight(_)) => return PendingWait::Proceed,
+                _ => return PendingWait::PkgTerminal,
+            },
+        };
+        let mut wake_breaker = false;
+        if let Some(has_breaker) = walk_cycle_kind(&g, owner, me) {
+            if !has_breaker {
+                return PendingWait::Proceed;
+            }
+            wake_breaker = true;
+        }
+        g.waiting.insert(me, dkey.clone());
+        if wake_breaker {
+            sess.loaded_cv.notify_all();
+        }
+        trace_load("decl-wait", dkey.name());
+        let (g2, t) = sess
+            .loaded_cv
+            .wait_timeout(g, std::time::Duration::from_secs(20))
+            .expect("loaded poisoned");
+        g = g2;
+        g.waiting.remove(&me);
+        trace_load("decl-wake", dkey.name());
+        if t.timed_out() {
+            eprintln!(
+                "razel: warning: declaration wait exceeded 20s; re-parking on `{}`",
+                dkey.name()
+            );
+            trace_load("decl-timeout", dkey.name());
+        }
+    }
+}
+
+/// `record_target`'s wait-graph hook (F3): an InFlight `Decl(label)` entry — a waiter's
+/// proxy or a native runner's claim — completes the moment the target's row is recorded
+/// (the only cross-thread-visible completion that exists mid-eval; instances complete at
+/// package freeze). No-op (one mutex probe) when nobody registered interest.
+pub(crate) fn publish_decl(sess: &Session, label: &str) {
+    let published = {
+        let mut g = sess.loaded.lock().expect("loaded poisoned");
+        match g.res.get_mut(&ResKey::Decl(label.to_string())) {
+            Some(st @ PkgState::InFlight(_)) => {
+                *st = PkgState::Done;
+                sess.loaded_cv.notify_all();
+                true
+            }
+            _ => false,
+        }
+    };
+    if published {
+        sched_event(sess, "decl-done", label);
+    }
 }
 
 /// Finish a load this caller owned (see [`finish_resource`]); failures also purge the

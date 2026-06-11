@@ -23,7 +23,11 @@ pub(crate) fn record_target(sess: &Session, t: AnalyzedTarget) {
     crate::dds::assert_target(&mut crate::dds::session_dds(sess), &t, razel_dds::InstanceId::SINGLE)
         .expect("DDS assert: provider value/schema mismatch");
     sess.results.borrow_mut().insert(t.name.clone(), t.clone());
+    let label = t.name.clone();
     sess.state.borrow_mut().targets.push(t);
+    // F3 (demand futures): the row is now cross-thread-visible — complete any waiter's
+    // per-declaration future.
+    crate::state::publish_decl(sess, &label);
 }
 
 
