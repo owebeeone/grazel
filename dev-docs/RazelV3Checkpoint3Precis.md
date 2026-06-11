@@ -223,3 +223,19 @@ full sweep) shows max 5 re-evals for any key, 1-2 for packages — no analysis-r
 Round 30's depset/repo_name fixes opened the proto/python pipelines and razel now does ~5×
 more real single-core eval. The wall-time lever is the pool (demand futures + scheduling,
 queued next session), not a retry bug. 62 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 32 (2026-06-11, stabilization lane)
+
+**The protobuf_python provider class (72 pkgs) is DEAD (`razelV3/native-dep-providers`):
+`dep[PyInfo]` on a NATIVE-rule dep found 0 captured instances — native rules speak the DDS
+field channel and never capture Starlark providers.** Fix: `provider()` now records its
+DECLARED fields, and DepTarget's `at()` synthesizes an absorbing instance shaped by them
+when (and only when) the dep carries no captured providers — same-named folded projections
+ride along depset-wrapped, the rest absorb; Starlark-rule deps with real captured providers
+keep the loud "does not provide" error (its own guard test). Generic — no language names in
+core (C3c). **Sweep 307/835 @ 6:09; the converted consumers flowed into the eager-select
+srcs wall, growing it 53 → 79 — now the single biggest engine class and the coverage lane's
+item 2.** Also: the S2 gate helper's hard 2-party Barrier could hang the bin when the work
+queue handed both entries to one worker (today's "bank verification dead") — replaced with a
+distinct-thread timeout rendezvous (deterministic when the collision occurs, never hangs).
+62 bins; 3 gates; 6 sentinels; 2 rungolds.

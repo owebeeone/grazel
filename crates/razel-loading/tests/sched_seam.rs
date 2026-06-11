@@ -6,20 +6,47 @@
 //! parallel_parity.rs — they live below this seam.
 
 use razel_loading::{GlobalFlags, SchedHook, load_tree_report_with_threads};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 
-/// Collects every (point, key) event; releases a 2-party barrier when both workers ENTER
-/// an acquire whose key passes `gate` — the schedule-forcing trick: both workers are held
-/// at the contention point, then released together.
+/// Collects every (point, key) event; holds workers that ENTER an acquire whose key passes
+/// `gate` until TWO DISTINCT THREADS have arrived — the schedule-forcing trick. A 5s
+/// TIMEOUT rendezvous, not a hard barrier: under load the work queue can hand BOTH entries
+/// to ONE worker (no second party ever arrives), and a hard 2-party Barrier then hangs the
+/// whole bin — the collision simply didn't happen that run, and the tests' event assertions
+/// still hold. Once released (by rendezvous or timeout), later enters pass through.
 fn hook_with_gate(
     events: Arc<Mutex<Vec<(String, String)>>>,
     gate: impl Fn(&str) -> bool + Send + Sync + 'static,
 ) -> SchedHook {
-    let barrier = Arc::new(Barrier::new(2));
+    let state = Arc::new((
+        Mutex::new((std::collections::HashSet::<std::thread::ThreadId>::new(), false)),
+        std::sync::Condvar::new(),
+    ));
     SchedHook(Arc::new(move |point: &str, key: &str| {
         events.lock().unwrap().push((point.to_string(), key.to_string()));
         if point == "enter" && gate(key) {
-            barrier.wait();
+            let (lock, cv) = &*state;
+            let mut g = lock.lock().unwrap();
+            if g.1 {
+                return; // already released — pass through
+            }
+            g.0.insert(std::thread::current().id());
+            if g.0.len() >= 2 {
+                g.1 = true;
+                cv.notify_all();
+                return;
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !g.1 {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    g.1 = true; // solo run: release everyone, never hang
+                    cv.notify_all();
+                    break;
+                }
+                let (g2, _) = cv.wait_timeout(g, deadline - now).unwrap();
+                g = g2;
+            }
         }
     }))
 }

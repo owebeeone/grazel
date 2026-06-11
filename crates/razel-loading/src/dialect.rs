@@ -52,7 +52,20 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<Value<'v>> {
         let heap = eval.heap();
         let init = kw.get("init").copied().unwrap_or_else(Value::new_none);
-        let main = heap.alloc(ProviderCallable { init });
+        // `fields` may be a list of names or a dict {name: doc} (Bazel allows both).
+        let fields: Vec<String> = match kw.get("fields") {
+            Some(f) => {
+                if let Some(l) = starlark::values::list::ListRef::from_value(*f) {
+                    l.iter().filter_map(|v| v.unpack_str().map(String::from)).collect()
+                } else if let Some(d) = starlark::values::dict::DictRef::from_value(*f) {
+                    d.iter().filter_map(|(k, _)| k.unpack_str().map(String::from)).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        };
+        let main = heap.alloc(ProviderCallable { init, fields });
         Ok(if init.is_none() {
             main
         } else {

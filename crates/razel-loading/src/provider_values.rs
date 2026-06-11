@@ -21,6 +21,9 @@ use std::fmt;
 pub(crate) struct ProviderCallableGen<V: ValueLifetimeless> {
     /// The `init` callback (Starlark `None` ⇒ kwargs are the fields directly).
     pub(crate) init: V,
+    /// The DECLARED field names (`provider(fields=…)`): the synthesis shape for reads off
+    /// NATIVE-rule deps (round 32), and validation-grade metadata later. Empty if undeclared.
+    pub(crate) fields: Vec<String>,
 }
 
 
@@ -332,6 +335,38 @@ where
         // output groups don't flow.
         if index.to_string() == "OutputGroupInfo" {
             return Ok(_heap.alloc(crate::engine::AbsorbWith { overrides: Vec::new() }));
+        }
+        // A Starlark provider read off a NATIVE-rule dep (round 32 — protobuf_python's
+        // `dep[PyInfo]`, 72 pkgs): native rules speak the DDS field channel and capture no
+        // instances, so `self.providers` is empty BY CONSTRUCTION for them. Synthesize an
+        // absorbing instance shaped by the provider's DECLARED fields: a same-named folded
+        // projection rides along (depset-wrapped); the rest absorb (loading-grade; RazelGaps).
+        // Starlark-rule deps WITH captured providers keep the loud error below.
+        if self.providers.is_empty() {
+            let declared: Option<Vec<String>> =
+                if let Some(pc) = index.downcast_ref::<ProviderCallable<'v>>() {
+                    Some(pc.fields.clone())
+                } else {
+                    index.downcast_ref::<FrozenProviderCallable>().map(|pc| pc.fields.clone())
+                };
+            if let Some(declared) = declared {
+                let overrides: Vec<(String, Value<'v>)> = declared
+                    .iter()
+                    .filter_map(|f| {
+                        self.fields.iter().find(|(k, _)| k == f).map(|(_, v)| {
+                            let v = v.to_value();
+                            let wrapped = match starlark::values::list::ListRef::from_value(v) {
+                                Some(l) => _heap.alloc(crate::values::Depset {
+                                    items: l.iter().collect(),
+                                }),
+                                None => v,
+                            };
+                            (f.clone(), wrapped)
+                        })
+                    })
+                    .collect();
+                return Ok(_heap.alloc(crate::engine::AbsorbWith { overrides }));
+            }
         }
         Err(starlark::Error::new_other(anyhow::anyhow!(
             "target {} does not provide the requested provider {} (have {} pairs: {})",

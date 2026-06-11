@@ -76,3 +76,50 @@ bin(name = "b", deps = [":l"])
     let b = targets.iter().find(|t| t.name.ends_with("b")).unwrap();
     assert!(b.actions[0].argv.contains(&"l.o".to_string()));
 }
+
+/// Round 32 (protobuf_python's `dep[PyInfo]`, 72 pkgs): a Starlark provider read off a
+/// NATIVE-rule dep (the DDS field channel — no captured instances) synthesizes an absorbing
+/// instance shaped by the provider's DECLARED fields; members work in depset(transitive=)
+/// (absorbed ⇒ skipped). Starlark-rule deps with captured providers keep the LOUD error.
+#[test]
+fn registered_provider_reads_off_native_deps_absorb() {
+    let src = r#"
+PyInfo2 = provider(fields = ["transitive_sources", "imports"])
+
+def _use(ctx):
+    info = ctx.attr.deps[0][PyInfo2]
+    merged = depset(transitive = [info.imports])
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [],
+                    arguments = [str(len(merged.to_list()))])
+
+use = rule(implementation = _use, attrs = {"deps": attr.label_list()})
+filegroup(name = "rt", srcs = [])
+use(name = "t", deps = [":rt"])
+"#;
+    let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
+    let t = targets.iter().find(|t| t.name == "t").unwrap();
+    assert_eq!(t.actions[0].argv, ["tool", "0"], "declared-field synthesis + absorb-in-depset");
+}
+
+/// The guard: a dep whose rule RETURNED providers still errors loudly on a wrong index.
+#[test]
+fn missing_provider_on_starlark_dep_still_errors() {
+    let src = r#"
+AInfo = provider(fields = ["x"])
+BInfo = provider(fields = ["y"])
+
+def _lib(ctx):
+    return [AInfo(x = 1)]
+
+def _use(ctx):
+    info = ctx.attr.deps[0][BInfo]
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = [])
+
+lib = rule(implementation = _lib, attrs = {})
+use = rule(implementation = _use, attrs = {"deps": attr.label_list()})
+lib(name = "l")
+use(name = "t", deps = [":l"])
+"#;
+    let err = razel_loading::analyze_starlark("BUILD", src).unwrap_err();
+    assert!(err.contains("does not provide"), "loud error preserved: {err}");
+}
