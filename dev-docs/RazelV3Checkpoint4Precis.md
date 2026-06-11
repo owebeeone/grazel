@@ -191,3 +191,33 @@ external parse boundary — rules_ml_toolchain is tab-indented). Sequential swee
 (27/105 sample-8); 63 bins; 3 gates; 6 sentinels; 2 rungolds. Next: R2 fetcher + download
 cache (sha-verified, mirror-first), R3 materializer + external-resolution second base
 (vendored-first), R4 census re-base.
+
+## Round delta — razelV3 round 36 (2026-06-11, stabilization lane — fetch R2+R3, bazel ground truth)
+
+**Real Bazel ran on the tree (tools/bazel-7.7.0, the .bazelversion pin — Homebrew's 9.x
+removed WORKSPACE support) and razel's fetch pipeline now materializes BYTE-IDENTICAL repo
+trees: 5/5 bazel-comparable repos at ZERO content diffs** (curl, gemmlowp, FP16, stablehlo
+incl. its patch, flatbuffers incl. the link_files overlay — `flatbuffer_py_library` is now
+on disk; ruy + riegeli materialized razel-only). Ground truth confirmed the whole model:
+`.bazelrc` says `--noenable_bzlmod --enable_workspace` (the WORKSPACE chain IS authoritative
+— the 328-line MODULE.bazel is the opt-in `--config=bzlmod` future); output base =
+`_bazel_<user>/<md5(workspace path)>` (hash scheme verified byte-equal); repository cache =
+`cache/repos/v1/content_addressable/sha256/<sha>/file`, and **our lockfile's curl sha256 is
+the exact content-address bazel cached**. The materialized BUILD.bazel == @xla's curl.BUILD.
+
+**`xtask fetch <repo>…` (R2+R3 MVP, xtask-resident):** sha-pinned mirror-first download
+(curl + shasum, write-rename) into `_razel_<user>` — SIBLING root, Bazel-identical layout
+below (decision: Gianni) — then extract → strip_prefix → `patch -p1` (repo.bzl's exact
+semantics, read from source) → build_file→BUILD.bazel + link_files. Two findings the
+ground truth forced: (1) **bare label-string attrs on repository rules resolve against the
+DEFINING module's repo** — FP16's `//third_party/FP16:FP16.BUILD` exists only in @xla's
+tree; the spec's `kind` carries the defining module, so the resolver derives the root from
+it; tf_vendored specs (@xla→third_party/xla) come from the lockfile itself. (2) **Bazel-core
+plants zero-byte WORKSPACE/REPO.bazel boundary files INCONSISTENTLY per repo** (curl/FP16
+both, gemmlowp one, stablehlo/flatbuffers none) — razel stays content-faithful and
+fabricates none; comparisons ignore empty markers; the why is parked as an open question.
+Also noted for the census: TF's default config carries `--deleted_packages` over the whole
+tfrt family — our 835 denominator includes packages Bazel itself deletes. patch_cmds
+(shell) refuse loudly. Lockfile relocated to `<workspace>/razel-lock.json` (Bazel's
+MODULE.bazel.lock placement). Next: R4 — wire the materialized root into external
+resolution (vendored-first) and re-base the census.

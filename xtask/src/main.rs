@@ -37,7 +37,8 @@ mod tfload;
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next();
-    let check = args.next().as_deref() == Some("--check");
+    let rest: Vec<String> = args.collect();
+    let check = rest.first().map(String::as_str) == Some("--check");
     match cmd.as_deref() {
         Some("codegen") => codegen(check),
         Some("corpus") => corpus(check),
@@ -72,6 +73,16 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("fetch") => {
+            let names: Vec<String> = rest.clone();
+            match fetchcmd::fetch(&workspace_root(), &names) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("xtask fetch: FAIL — {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("capture-goldens") => capture_goldens(),
         other => {
             eprintln!(
