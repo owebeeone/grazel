@@ -235,20 +235,37 @@ pub(crate) enum PkgState {
     Failed(String),
 }
 
-/// The single-flight WAIT GRAPH (P4a): packages AND `.bzl` modules in one keyed map (keys are
-/// disjoint — `.bzl` keys carry a `:`, package keys never do), plus the waits-for edges that
-/// make cross-thread demand cycles DETECTABLE. Package↔bzl cycles are real (worker A's package
-/// loads a module owned by worker B whose eval demand-loads A's package), so the two resource
-/// kinds must share one graph and one lock.
+/// A wait-graph resource, TYPED (round 33): the former string keys discriminated package vs
+/// `.bzl` by `:`-in-key — unsound once target labels (which carry `:`) join the graph for
+/// demand futures. The variant drives cycle resolution; the name is the hook/trace rendering
+/// (unchanged strings: pkg name, bzl path).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ResKey {
+    Pkg(String),
+    Bzl(String),
+}
+
+impl ResKey {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            ResKey::Pkg(s) | ResKey::Bzl(s) => s,
+        }
+    }
+}
+
+/// The single-flight WAIT GRAPH (P4a): packages AND `.bzl` modules in one keyed map (typed —
+/// [`ResKey`]), plus the waits-for edges that make cross-thread demand cycles DETECTABLE.
+/// Package↔bzl cycles are real (worker A's package loads a module owned by worker B whose
+/// eval demand-loads A's package), so the resource kinds must share one graph and one lock.
 #[derive(Default)]
 pub(crate) struct WaitGraph {
-    pub(crate) res: std::collections::HashMap<String, PkgState>,
+    pub(crate) res: std::collections::HashMap<ResKey, PkgState>,
     /// worker → the resource key it is blocked on (one edge per parked worker).
-    pub(crate) waiting: std::collections::HashMap<std::thread::ThreadId, String>,
+    pub(crate) waiting: std::collections::HashMap<std::thread::ThreadId, ResKey>,
     /// CONCURRENT evaluations per key (cycle/timeout takeovers duplicate a load while the
     /// original owner is still evaluating). Failure cleanup must respect survivors: a failed
     /// finisher may only purge when it is the LAST live eval and nobody succeeded.
-    pub(crate) live: std::collections::HashMap<String, usize>,
+    pub(crate) live: std::collections::HashMap<ResKey, usize>,
 }
 
 /// What acquiring a resource grants the caller.
@@ -304,8 +321,8 @@ fn sched_event(sess: &Session, point: &str, key: &str) {
 /// scale they are dense — the previous 20s-timeout-only takeover degenerated into an
 /// hours-long livelock (every cycle edge cost a 20s sleep). The timeout stays as a backstop
 /// for waits the graph cannot see (it should never fire in practice — it prints loudly).
-pub(crate) fn acquire_resource(sess: &Session, key: &str) -> Acquire {
-    sched_event(sess, "enter", key);
+pub(crate) fn acquire_resource(sess: &Session, key: &ResKey) -> Acquire {
+    sched_event(sess, "enter", key.name());
     let (out, timed_out) = acquire_resource_locked(sess, key);
     let point = match out {
         Acquire::Own if timed_out => "takeover-timeout",
@@ -315,11 +332,11 @@ pub(crate) fn acquire_resource(sess: &Session, key: &str) -> Acquire {
         Acquire::CycleProceed => "cycle-proceed",
         Acquire::Failed(_) => "failed-cached",
     };
-    sched_event(sess, point, key);
+    sched_event(sess, point, key.name());
     out
 }
 
-fn acquire_resource_locked(sess: &Session, key: &str) -> (Acquire, bool) {
+fn acquire_resource_locked(sess: &Session, key: &ResKey) -> (Acquire, bool) {
     let me = std::thread::current().id();
     let mut g = sess.loaded.lock().expect("loaded poisoned");
     loop {
@@ -329,58 +346,62 @@ fn acquire_resource_locked(sess: &Session, key: &str) -> (Acquire, bool) {
             Some(PkgState::InFlight(tid)) if *tid == me => return (Acquire::Reentry, false),
             Some(PkgState::InFlight(owner)) => {
                 // Cycle check: owner → (what owner waits on) → its owner → … → me?
-                let mut cur = *owner;
-                let mut cycle = false;
-                for _ in 0..128 {
-                    let Some(next_key) = g.waiting.get(&cur) else { break };
-                    match g.res.get(next_key) {
-                        Some(PkgState::InFlight(o2)) => {
-                            if *o2 == me {
-                                cycle = true;
-                                break;
-                            }
-                            cur = *o2;
-                        }
-                        _ => break,
-                    }
-                }
-                if cycle {
-                    // Package keys (no `:`): sequential re-entry semantics — proceed against
-                    // the owner's partial state, no duplicate eval. `.bzl` keys: the module
-                    // VALUE is required, so take the eval over (duplicate; converges — the
-                    // worst case is an illegal load cycle, which the eval reports loudly).
-                    if !key.contains(':') {
+                if walk_finds_cycle(&g, *owner, me) {
+                    // Packages: sequential re-entry semantics — proceed against the owner's
+                    // partial state, no duplicate eval. `.bzl` modules: the module VALUE is
+                    // required, so take the eval over (duplicate; converges — the worst case
+                    // is an illegal load cycle, which the eval reports loudly).
+                    if matches!(key, ResKey::Pkg(_)) {
                         return (Acquire::CycleProceed, false);
                     }
-                    g.res.insert(key.to_string(), PkgState::InFlight(me));
-                    *g.live.entry(key.to_string()).or_default() += 1;
+                    g.res.insert(key.clone(), PkgState::InFlight(me));
+                    *g.live.entry(key.clone()).or_default() += 1;
                     return (Acquire::Own, false);
                 }
-                g.waiting.insert(me, key.to_string());
-                trace_load("wait", key);
+                g.waiting.insert(me, key.clone());
+                trace_load("wait", key.name());
                 let (g2, t) = sess
                     .loaded_cv
                     .wait_timeout(g, std::time::Duration::from_secs(20))
                     .expect("loaded poisoned");
                 g = g2;
                 g.waiting.remove(&me);
-                trace_load("wake", key);
+                trace_load("wake", key.name());
                 if t.timed_out() {
                     eprintln!(
-                        "razel: warning: load wait timed out (unseen cycle?); duplicating `{key}`"
+                        "razel: warning: load wait timed out (unseen cycle?); duplicating `{}`",
+                        key.name()
                     );
-                    g.res.insert(key.to_string(), PkgState::InFlight(me));
-                    *g.live.entry(key.to_string()).or_default() += 1;
+                    g.res.insert(key.clone(), PkgState::InFlight(me));
+                    *g.live.entry(key.clone()).or_default() += 1;
                     return (Acquire::Own, true);
                 }
             }
             None => {
-                g.res.insert(key.to_string(), PkgState::InFlight(me));
-                *g.live.entry(key.to_string()).or_default() += 1;
+                g.res.insert(key.clone(), PkgState::InFlight(me));
+                *g.live.entry(key.clone()).or_default() += 1;
                 return (Acquire::Own, false);
             }
         }
     }
+}
+
+/// Walk the waits-for chain from `start`: does it reach a resource `me` owns?
+fn walk_finds_cycle(g: &WaitGraph, start: std::thread::ThreadId, me: std::thread::ThreadId) -> bool {
+    let mut cur = start;
+    for _ in 0..128 {
+        let Some(next_key) = g.waiting.get(&cur) else { return false };
+        match g.res.get(next_key) {
+            Some(PkgState::InFlight(o2)) => {
+                if *o2 == me {
+                    return true;
+                }
+                cur = *o2;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Finish an owned resource: Done on success (any cache insert MUST precede this — Ready
@@ -388,16 +409,16 @@ fn acquire_resource_locked(sess: &Session, key: &str) -> (Acquire, bool) {
 /// caller may run FAILURE CLEANUP (purge): only the LAST live eval of the key may, and only
 /// when no concurrent eval succeeded — a takeover duplicate failing mid-way must not clobber
 /// the original owner's in-progress (or completed) results.
-pub(crate) fn finish_resource(sess: &Session, key: &str, outcome: FinishOutcome) -> bool {
+pub(crate) fn finish_resource(sess: &Session, key: &ResKey, outcome: FinishOutcome) -> bool {
     let ok = matches!(outcome, FinishOutcome::Ok);
     let may_purge = {
         let mut g = sess.loaded.lock().expect("loaded poisoned");
-        let live = g.live.entry(key.to_string()).or_default();
+        let live = g.live.entry(key.clone()).or_default();
         *live = live.saturating_sub(1);
         let last = *live == 0;
         let may_purge = match outcome {
             FinishOutcome::Ok => {
-                g.res.insert(key.to_string(), PkgState::Done);
+                g.res.insert(key.clone(), PkgState::Done);
                 false
             }
             // A concurrent eval already succeeded — a failure is moot; keep Done.
@@ -411,14 +432,14 @@ pub(crate) fn finish_resource(sess: &Session, key: &str, outcome: FinishOutcome)
             }
             FinishOutcome::FailCached(e) => {
                 // Package-in-error: cache the error; partial declares still purge.
-                g.res.insert(key.to_string(), PkgState::Failed(e));
+                g.res.insert(key.clone(), PkgState::Failed(e));
                 true
             }
         };
         sess.loaded_cv.notify_all();
         may_purge
     };
-    sched_event(sess, if ok { "finish-ok" } else { "finish-err" }, key);
+    sched_event(sess, if ok { "finish-ok" } else { "finish-err" }, key.name());
     may_purge
 }
 
@@ -426,7 +447,7 @@ pub(crate) fn finish_resource(sess: &Session, key: &str, outcome: FinishOutcome)
 /// package's partial results — but only when this was the LAST live eval of the package
 /// (takeover duplicates must not clobber a surviving owner's rows).
 pub(crate) fn finish_pkg_load(sess: &Session, pkg: &str, outcome: FinishOutcome) {
-    if finish_resource(sess, pkg, outcome) {
+    if finish_resource(sess, &ResKey::Pkg(pkg.to_string()), outcome) {
         purge_partial_package(sess, pkg);
     }
 }
@@ -446,9 +467,9 @@ pub(crate) enum BzlBegin {
 /// fails with "does not provide ... (have 1 pairs)"). Shares the package wait graph (mixed
 /// package↔bzl cycles resolve by takeover instead of deadlocking).
 pub(crate) fn begin_bzl_load(sess: &Session, key: &str) -> BzlBegin {
-    match acquire_resource(sess, key) {
+    match acquire_resource(sess, &ResKey::Bzl(key.to_string())) {
         Acquire::Own | Acquire::Reentry => BzlBegin::Own,
-        // CycleProceed/Failed are unreachable for `:`-keys (bzl cycles take over; bzl
+        // CycleProceed/Failed are unreachable for Bzl keys (bzl cycles take over; bzl
         // failures clear for retry — only packages cache errors).
         Acquire::Ready | Acquire::CycleProceed | Acquire::Failed(_) => BzlBegin::Ready,
     }
@@ -456,7 +477,11 @@ pub(crate) fn begin_bzl_load(sess: &Session, key: &str) -> BzlBegin {
 
 /// Finish an owned `.bzl` eval (see [`finish_resource`]; bzl failures always retry).
 pub(crate) fn finish_bzl_load(sess: &Session, key: &str, ok: bool) {
-    finish_resource(sess, key, if ok { FinishOutcome::Ok } else { FinishOutcome::FailRetry });
+    finish_resource(
+        sess,
+        &ResKey::Bzl(key.to_string()),
+        if ok { FinishOutcome::Ok } else { FinishOutcome::FailRetry },
+    );
 }
 
 /// A failed package eval must not poison its RESULTS either (the loaded-set twin): targets

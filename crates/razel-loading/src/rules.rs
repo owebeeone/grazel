@@ -535,7 +535,7 @@ impl LoadErr {
 }
 
 fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), String> {
-    match crate::state::acquire_resource(sess, pkg) {
+    match crate::state::acquire_resource(sess, &crate::state::ResKey::Pkg(pkg.to_string())) {
         crate::state::Acquire::Ready
         | crate::state::Acquire::Reentry
         | crate::state::Acquire::CycleProceed => return Ok(()),
@@ -721,7 +721,7 @@ pub fn load_tree_report_with_threads(
 }
 
 /// All packages the session finished loading (deps included) — the spine list. The wait
-/// graph also tracks `.bzl` modules (keys with `:`) — packages only here.
+/// graph also tracks `.bzl` modules and declarations — packages only here.
 fn loaded_done(session: &Session) -> Vec<String> {
     session
         .loaded
@@ -729,8 +729,10 @@ fn loaded_done(session: &Session) -> Vec<String> {
         .expect("loaded")
         .res
         .iter()
-        .filter(|(k, st)| !k.contains(':') && matches!(st, crate::state::PkgState::Done))
-        .map(|(k, _)| k.clone())
+        .filter_map(|(k, st)| match (k, st) {
+            (crate::state::ResKey::Pkg(p), crate::state::PkgState::Done) => Some(p.clone()),
+            _ => None,
+        })
         .collect()
 }
 
