@@ -283,3 +283,26 @@ lookup (23). Remaining top: eager-select 107 + highway 47 (coverage lane), ruy 4
 on selects.rs), @pypi 37+12 (stub-hub posture), tfrt make-var 9. Wall 7:12 sequential —
 deeper again; the pool default-on decision is worth ~5:30 of every sweep. 64 bins; 3
 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 40 (2026-06-11, stabilization lane — full select deferral)
+
+**The eager-select hybrid is RETIRED (Gianni released the selects.rs hold; the coverage
+lane never materialized — zero banks since round 27): `select()` NEVER resolves at load,
+exactly Bazel's model. Sweep 374 → 385/835 (46.1%), and the entire select failure family
+is DEAD: the 107-pkg typed-param class, highway's 47 (the "list+tuple" was the hybrid's
+OWN artifact — Bazel rejects that op too but never sees it: `[..]+select(..)` stays a
+select-expr; ground-truthed against bazel-7.7.0), and ruy's 46 (the eager probe errored on
+an unloaded `config_setting_group` member — at analysis the member demand-loads into the
+round-39 src/conditions host package).** Landed: always-defer select(); group members
+DEFER on load-forbidden probes; tuple-tolerant select-expr flattening; filegroup ×2 →
+str_attr_parts; genrule `cmd` string-selects via a scalar twin (`scalar_attr_parts` —
+protobuf upb's `cmd = select(..)` regressed the cc sentinel mid-round, caught by probe,
+fixed forward). The impl-time-select unit test rewritten to the attr form (Bazel-legal —
+Bazel has no select in impls; the hybrid had made it accidentally work).
+
+**New residue + hops (the conveyor's next plate):** native `deps=`-style attrs that
+stringify deferred selects — "dep `select({…})` not analyzed" 36 + "select-expr" 10
+(natives needing the str_attr_parts treatment on label attrs; MINE, round 41); @shardy 35
++ @cpuinfo 22+12 (vendor hops behind jit and ruy/lite — fetchable); @pypi 37+12 (posture);
+tf/cc `$(location :ops/…)` 23; tfrt make-var 9. Wall 8:00 sequential — the default-on
+pool decision now saves ~6:00/sweep. 64 bins; 3 gates; 6 sentinels; 2 rungolds.
