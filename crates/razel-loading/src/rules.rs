@@ -385,7 +385,7 @@ pub(crate) fn ruleset_modules(cc_toolchain: CcToolchainMode) -> Result<Vec<Rules
 /// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
 /// cross-package load appends, never clears).
 pub(crate) fn eval_build_src(session: &Session, name: &str, src: &str) -> Result<(), String> {
-    eval_build_src_in(session, name, src, None, true)
+    eval_build_src_in(session, name, src, None, true).map_err(|e| e.msg)
 }
 
 /// [`eval_build_src`] with a repo context: an EXTERNAL package's BUILD resolves its loads and
@@ -396,8 +396,8 @@ pub(crate) fn eval_build_src_in(
     src: &str,
     repo_ctx: Option<(String, String)>,
     drive_all: bool,
-) -> Result<(), String> {
-    let rulesets = ruleset_modules(session.global.cc_toolchain)?;
+) -> Result<(), LoadErr> {
+    let rulesets = ruleset_modules(session.global.cc_toolchain).map_err(LoadErr::declare)?;
     let globals = build_globals();
     let loader = BzlLoader {
         rulesets: &rulesets,
@@ -418,11 +418,11 @@ fn eval_build_src_inner(
     loader: &BzlLoader<'_>,
     globals: &Globals,
     drive_all: bool,
-) -> Result<(), String> {
+) -> Result<(), LoadErr> {
     let ast = match session.ast_cache.borrow_mut().remove(name) {
         Some(ast) => ast,
         None => AstModule::parse(name, src.to_owned(), &Dialect::Extended)
-            .map_err(|e| format!("{e}"))?,
+            .map_err(|e| LoadErr::declare(format!("{e}")))?,
     };
     Module::with_temp_heap(|module| {
         crate::dialect::install_decl_store(&module);
@@ -430,19 +430,26 @@ fn eval_build_src_inner(
             let mut eval = Evaluator::new(&module);
             eval.set_loader(loader);
             eval.extra = Some(session); // builtins read the Session via `session(eval)`
-            eval.eval_module(ast, globals).map_err(|e| format!("{e}"))?;
+            // DECLARE phase: an error here is Bazel's "package in error" (cacheable).
+            eval.eval_module(ast, globals).map_err(|e| LoadErr::declare(format!("{e}")))?;
         }
         // E0 phase 2: analyze the recorded declarations, demand-driven (forward refs resolve).
+        // ANALYSIS phase: failures are retryable — the declarations are fine.
         {
             let mut eval = Evaluator::new(&module);
             eval.set_loader(loader);
             eval.extra = Some(session);
-            crate::dialect::drive_decls(&mut eval, drive_all).map_err(|e| format!("{e}"))?;
+            crate::dialect::drive_decls(&mut eval, drive_all)
+                .map_err(|e| LoadErr { msg: format!("{e}"), pkg_in_error: false })?;
         }
         // Layer 0: stash the captured provider instances as plain dict/list/tuple values,
         // unroot the (unfreezable) decl store, freeze the module, harvest into the Session.
-        crate::dialect::stash_captured_for_freeze(&module, session).map_err(|e| format!("{e}"))?;
-        let fm = module.freeze().map_err(|e| format!("freeze: {e:?}"))?;
+        // Conservative: freeze/harvest failures stay retryable.
+        crate::dialect::stash_captured_for_freeze(&module, session)
+            .map_err(|e| LoadErr { msg: format!("{e}"), pkg_in_error: false })?;
+        let fm = module
+            .freeze()
+            .map_err(|e| LoadErr { msg: format!("freeze: {e:?}"), pkg_in_error: false })?;
         if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
             index_harvest(&owned, &session.cross_captured, &session.cross_index);
         }
@@ -512,22 +519,47 @@ pub(crate) fn load_package_entry(sess: &Session, pkg: &str) -> Result<(), String
     load_package_mode(sess, pkg, true)
 }
 
+/// A load failure, PHASE-TAGGED (round 29): `pkg_in_error` = the failure precedes or is in
+/// the DECLARE phase (missing repo/BUILD, read error, eval_module error) — Bazel's "package
+/// in error", cached so consumers don't re-evaluate. Analysis-phase (drive) failures stay
+/// retryable: the declarations are fine (cross_package_providers' contract).
+pub(crate) struct LoadErr {
+    pub(crate) msg: String,
+    pub(crate) pkg_in_error: bool,
+}
+
+impl LoadErr {
+    fn declare(msg: impl Into<String>) -> Self {
+        LoadErr { msg: msg.into(), pkg_in_error: true }
+    }
+}
+
 fn load_package_mode(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), String> {
-    if !crate::state::begin_pkg_load(sess, pkg) {
-        return Ok(());
+    match crate::state::acquire_resource(sess, pkg) {
+        crate::state::Acquire::Ready
+        | crate::state::Acquire::Reentry
+        | crate::state::Acquire::CycleProceed => return Ok(()),
+        // Package-in-error: the load ran once; serve the cached error (loud, no re-eval).
+        crate::state::Acquire::Failed(e) => return Err(e),
+        crate::state::Acquire::Own => {}
     }
     // EVERY exit after an owned begin must finish (P4a): an early `?` between begin and
     // finish leaked a dead InFlight entry — sequentially masked by re-entry semantics, under
     // the pool every later waiter parked into the 20s-timeout livelock ("deadlock" at TF
     // scale: each unvendored-repo demand cost every waiter a 20s quantum, forever).
     let res = load_package_body(sess, pkg, drive_all);
-    // A failed load must not poison the loaded-set (the guard would silently no-op retries
-    // and every later condition/dep in the package would report "not declared").
-    crate::state::finish_pkg_load(sess, pkg, res.is_ok());
-    res
+    let outcome = match &res {
+        Ok(()) => crate::state::FinishOutcome::Ok,
+        Err(e) if e.pkg_in_error => crate::state::FinishOutcome::FailCached(e.msg.clone()),
+        // Analysis failure must not poison the loaded-set (the guard would silently no-op
+        // retries and every later condition/dep would report "not declared").
+        Err(_) => crate::state::FinishOutcome::FailRetry,
+    };
+    crate::state::finish_pkg_load(sess, pkg, outcome);
+    res.map_err(|e| e.msg)
 }
 
-fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), String> {
+fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), LoadErr> {
     // Host-materialized packages (Bazel built-ins) take precedence over vendoring.
     if let Some(src) = crate::host::host_build(pkg) {
         let repo_ctx = pkg.strip_prefix('@').and_then(|rest| {
@@ -536,26 +568,26 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), S
         let prev = sess.set_current_pkg(Some(pkg.to_string()));
         let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), src, repo_ctx, drive_all);
         sess.set_current_pkg(prev);
-        return res.map_err(|e| e.to_string());
+        return res;
     }
     // External package (`@repo//pkg`): its BUILD lives under the vendored repo's root.
+    // Failures up to the eval are PRE-EVAL — the package is in error (cacheable).
     let pkg_dir = if let Some(rest) = pkg.strip_prefix('@') {
-        let (repo, sub) = rest.split_once("//").ok_or_else(|| format!("bad package `{pkg}`"))?;
-        let base = sess
-            .global
-            .external_base
-            .clone()
-            .ok_or_else(|| format!("external package `{pkg}` needs an external base"))?;
+        let (repo, sub) =
+            rest.split_once("//").ok_or_else(|| LoadErr::declare(format!("bad package `{pkg}`")))?;
+        let base = sess.global.external_base.clone().ok_or_else(|| {
+            LoadErr::declare(format!("external package `{pkg}` needs an external base"))
+        })?;
         [repo.to_string(), repo.replace('_', "-")]
             .iter()
             .map(|dir| base.join(dir))
             .find(|p| p.exists())
-            .ok_or_else(|| format!("external repo for `{pkg}` not vendored"))?
+            .ok_or_else(|| LoadErr::declare(format!("external repo for `{pkg}` not vendored")))?
             .join(sub)
     } else {
         sess.workspace
             .clone()
-            .ok_or("load_package called outside workspace mode")?
+            .ok_or_else(|| LoadErr::declare("load_package called outside workspace mode"))?
             .join(pkg)
     };
     // Pre-parsed AST present? Skip BOTH the read and the parse (the parallel pre-pass).
@@ -567,8 +599,10 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), S
             .iter()
             .map(|f| pkg_dir.join(f))
             .find(|p| p.exists())
-            .ok_or_else(|| format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))?;
-        std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                LoadErr::declare(format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))
+            })?;
+        std::fs::read_to_string(&build_path).map_err(|e| LoadErr::declare(e.to_string()))?
     };
 
     // Short borrows around the nested eval (the [R1] discipline): set current_pkg, drop the

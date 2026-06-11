@@ -152,6 +152,10 @@ pub(crate) struct Session {
     /// `DeclBody::Native` slots. Off-heap (the closures capture only plain unpacked attrs — no
     /// `Value`s — so they need no GC tracing and can live on the Session).
     pub(crate) native_decls: SyncCell<Vec<Option<NativeAnalyzeFn>>>,
+    /// Round 29: per-DECLARATION error memo for FAILED native analyses. Native bodies are
+    /// FnOnce — the first demander consumes the slot; if its run fails, later consumers would
+    /// see only "not analyzed" (wrong reason). The memo serves them the real error.
+    pub(crate) native_errors: SyncCell<std::collections::HashMap<String, String>>,
     /// Undriven NATIVE decls of completed packages: label → `native_decls` index. Native
     /// bodies capture only plain data, so they run on demand in any later eval (the
     /// cross-package twin of `deferred_decls`).
@@ -225,6 +229,10 @@ where
 pub(crate) enum PkgState {
     InFlight(std::thread::ThreadId),
     Done,
+    /// Round 29: a DECLARE-phase failure — Bazel's "package in error". The load ran once;
+    /// every later consumer reads this cached error (loud, no re-eval). Analysis-phase
+    /// failures clear instead (retryable — the round-24 unpoisoning semantics).
+    Failed(String),
 }
 
 /// The single-flight WAIT GRAPH (P4a): packages AND `.bzl` modules in one keyed map (keys are
@@ -257,6 +265,18 @@ pub(crate) enum Acquire {
     /// mid-eval declarations). Duplicating instead (the old takeover) bred divergent results
     /// and stale-owner windows.
     CycleProceed,
+    /// The resource is a CACHED package-in-error (declare-phase failure) — the caller
+    /// surfaces this error without re-evaluating.
+    Failed(String),
+}
+
+/// How an owned load ended — drives the wait-graph's terminal state (see [`PkgState`]).
+pub(crate) enum FinishOutcome {
+    Ok,
+    /// Analysis-phase failure: clear for retry (round-24 semantics).
+    FailRetry,
+    /// Declare-phase / pre-eval failure: cache as package-in-error.
+    FailCached(String),
 }
 
 /// The wait-graph trace (S3): `RAZEL_TRACE_LOAD=1` prints every coordination event — the
@@ -293,6 +313,7 @@ pub(crate) fn acquire_resource(sess: &Session, key: &str) -> Acquire {
         Acquire::Ready => "ready",
         Acquire::Reentry => "reentry",
         Acquire::CycleProceed => "cycle-proceed",
+        Acquire::Failed(_) => "failed-cached",
     };
     sched_event(sess, point, key);
     out
@@ -304,6 +325,7 @@ fn acquire_resource_locked(sess: &Session, key: &str) -> (Acquire, bool) {
     loop {
         match g.res.get(key) {
             Some(PkgState::Done) => return (Acquire::Ready, false),
+            Some(PkgState::Failed(e)) => return (Acquire::Failed(e.clone()), false),
             Some(PkgState::InFlight(tid)) if *tid == me => return (Acquire::Reentry, false),
             Some(PkgState::InFlight(owner)) => {
                 // Cycle check: owner → (what owner waits on) → its owner → … → me?
@@ -366,26 +388,32 @@ fn acquire_resource_locked(sess: &Session, key: &str) -> (Acquire, bool) {
 /// caller may run FAILURE CLEANUP (purge): only the LAST live eval of the key may, and only
 /// when no concurrent eval succeeded — a takeover duplicate failing mid-way must not clobber
 /// the original owner's in-progress (or completed) results.
-pub(crate) fn finish_resource(sess: &Session, key: &str, ok: bool) -> bool {
+pub(crate) fn finish_resource(sess: &Session, key: &str, outcome: FinishOutcome) -> bool {
+    let ok = matches!(outcome, FinishOutcome::Ok);
     let may_purge = {
         let mut g = sess.loaded.lock().expect("loaded poisoned");
         let live = g.live.entry(key.to_string()).or_default();
         *live = live.saturating_sub(1);
         let last = *live == 0;
-        let may_purge = if ok {
-            g.res.insert(key.to_string(), PkgState::Done);
-            false
-        } else if matches!(g.res.get(key), Some(PkgState::Done)) {
-            // A concurrent eval already succeeded — this failure is moot; keep Done.
-            false
-        } else if last {
-            g.res.remove(key);
-            true
-        } else {
-            // Survivors are still evaluating: leave THEIR InFlight claim in place (last-writer
-            // state may carry our id — restore is impossible without per-owner slots; the
-            // survivors' finish overwrites it) and do NOT purge.
-            false
+        let may_purge = match outcome {
+            FinishOutcome::Ok => {
+                g.res.insert(key.to_string(), PkgState::Done);
+                false
+            }
+            // A concurrent eval already succeeded — a failure is moot; keep Done.
+            _ if matches!(g.res.get(key), Some(PkgState::Done)) => false,
+            // Survivors are still evaluating: leave THEIR InFlight claim in place and do
+            // NOT purge (the last finisher reconciles).
+            _ if !last => false,
+            FinishOutcome::FailRetry => {
+                g.res.remove(key);
+                true
+            }
+            FinishOutcome::FailCached(e) => {
+                // Package-in-error: cache the error; partial declares still purge.
+                g.res.insert(key.to_string(), PkgState::Failed(e));
+                true
+            }
         };
         sess.loaded_cv.notify_all();
         may_purge
@@ -394,17 +422,11 @@ pub(crate) fn finish_resource(sess: &Session, key: &str, ok: bool) -> bool {
     may_purge
 }
 
-/// Begin loading `pkg`. True when THIS caller owns the load; false when already done or
-/// same-thread re-entry. Cross-thread in-flight: waits (cycle-safe — see [`acquire_resource`]).
-pub(crate) fn begin_pkg_load(sess: &Session, pkg: &str) -> bool {
-    matches!(acquire_resource(sess, pkg), Acquire::Own)
-}
-
-/// Finish a load this caller owned (see [`finish_resource`]); a failure also purges the
+/// Finish a load this caller owned (see [`finish_resource`]); failures also purge the
 /// package's partial results — but only when this was the LAST live eval of the package
 /// (takeover duplicates must not clobber a surviving owner's rows).
-pub(crate) fn finish_pkg_load(sess: &Session, pkg: &str, ok: bool) {
-    if finish_resource(sess, pkg, ok) {
+pub(crate) fn finish_pkg_load(sess: &Session, pkg: &str, outcome: FinishOutcome) {
+    if finish_resource(sess, pkg, outcome) {
         purge_partial_package(sess, pkg);
     }
 }
@@ -426,14 +448,15 @@ pub(crate) enum BzlBegin {
 pub(crate) fn begin_bzl_load(sess: &Session, key: &str) -> BzlBegin {
     match acquire_resource(sess, key) {
         Acquire::Own | Acquire::Reentry => BzlBegin::Own,
-        // CycleProceed is unreachable for `:`-keys (acquire takes bzl cycles over).
-        Acquire::Ready | Acquire::CycleProceed => BzlBegin::Ready,
+        // CycleProceed/Failed are unreachable for `:`-keys (bzl cycles take over; bzl
+        // failures clear for retry — only packages cache errors).
+        Acquire::Ready | Acquire::CycleProceed | Acquire::Failed(_) => BzlBegin::Ready,
     }
 }
 
-/// Finish an owned `.bzl` eval (see [`finish_resource`]).
+/// Finish an owned `.bzl` eval (see [`finish_resource`]; bzl failures always retry).
 pub(crate) fn finish_bzl_load(sess: &Session, key: &str, ok: bool) {
-    finish_resource(sess, key, ok);
+    finish_resource(sess, key, if ok { FinishOutcome::Ok } else { FinishOutcome::FailRetry });
 }
 
 /// A failed package eval must not poison its RESULTS either (the loaded-set twin): targets

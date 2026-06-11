@@ -72,11 +72,12 @@ pub(crate) fn resolve_dep<'v>(
     // Workspace mode: lazy-load the dep's package if absent. The borrow in the condition is dropped
     // before `load_package` recurses into a nested eval (the [R1] discipline — a held `results`
     // borrow across the nested eval would double-borrow-panic).
+    let mut dep_load_err = None;
     if sess.results.borrow().get(&canon).is_none()
         && sess.workspace.is_some()
         && let Some(pkg) = pkg_of(&canon)
     {
-        let _ = load_package(sess, &pkg);
+        dep_load_err = load_package(sess, &pkg).err();
     }
     let results = sess.results.borrow();
     let Some(t) = results.get(&canon) else {
@@ -120,6 +121,15 @@ pub(crate) fn resolve_dep<'v>(
         };
         if let Some(path) = on_disk {
             return Ok(DepInfo { libs: vec![path], canon, fields: Default::default() });
+        }
+        // A failed dep-package load SURFACES (round 29 — was swallowed: a missing-vendor
+        // chain reported the wrong-reason "not analyzed"; loud errors over silent-wrong).
+        if let Some(e) = dep_load_err {
+            return Err(anyhow::anyhow!("loading dep `{canon}`'s package failed: {e}"));
+        }
+        // A consumed-and-failed native body (round 29): serve the memo'd real error.
+        if let Some(e) = sess.native_errors.borrow().get(&canon) {
+            return Err(anyhow::anyhow!("analysis of `{canon}` previously failed: {e}"));
         }
         return Err(anyhow::anyhow!(
             "dep `{label}` not analyzed — declare it before its users (cyclic or missing package)"

@@ -169,3 +169,25 @@ sweeps; FAILS loudly on any takeover-timeout (livelock signature), coverage belo
 parallel-slower-than-sequential (stall signature). Knobs: RAZEL_STRESS_{SAMPLE,RUNS,BAND_PCT}.
 First run: baseline 25/105 (sample-8), 3×12-thread runs 24/105 @ ~30s, 0 timeouts — OK.
 62 bins; 3 gates; 6 sentinels; 2 rungolds.
+
+## Round delta — razelV3 round 29 (2026-06-11, stabilization lane)
+
+**The failure memo + error UN-MUFFLING (`razelV3/failed-memo`) — and the un-muffling is the
+headline: the class table was lying.** Landed: (1) `PkgState::Failed` — DECLARE-phase/pre-eval
+package failures (missing repo/BUILD, eval_module errors) cache as Bazel's "package in error";
+consumers get the real error with zero re-eval; analysis-phase failures stay retryable
+(cross_package_providers' contract, preserved). (2) `resolve_dep` SURFACES failed dep-package
+loads (was `let _ =` — a missing-vendor chain reported the wrong-reason "not analyzed").
+(3) Failed CONSUMED native bodies (FnOnce — first demander takes the slot) memo their real
+error per declaration; later consumers see "analysis of X previously failed: <cause>" instead
+of "not analyzed". Test-first via the S2 seam (own-count == 1 asserted through hook events).
+
+**Sweep: 301/835 @ 1:16.** Wall neutral — the round-24 "retry cost" attribution was partly
+wrong (the 1:00→1:17 drift tracks +33 coverage, not retries). Coverage −2: sticky-failure
+semantics — two order-luck packages now fail deterministically (Bazel-faithful: one
+invocation, one analysis verdict). **The real yield: the un-muffled class table exposed the
+true frontier** — `depset has no attribute 'count'` (70 pkgs, NEW top engine class: razel
+hands a depset where Bazel hands a list) and the eager-select srcs class is 53 pkgs, not the
+15 visible before (relay to the coverage lane: their item-2 fix is 3.5× bigger than briefed).
+62 bins; 3 gates; 6 sentinels; 2 rungolds. AIEdit registered mid-session — adoption + eval
+from the next session (tools load at session start).

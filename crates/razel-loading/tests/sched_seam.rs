@@ -133,6 +133,60 @@ use = rule(implementation = _use_impl, attrs = {"deps": attr.label_list()})
     );
 }
 
+/// The PkgState::Failed memo (round 29): a DECLARE-phase package failure (here: pre-eval —
+/// the dep repo is not vendored) is Bazel's "package in error" — it must evaluate ONCE and
+/// serve every later consumer the CACHED error. Before the memo, the purge-retry semantics
+/// re-evaluated the failing package per consumer (the 1:00 → 1:17 sweep regression).
+/// Analysis-phase failures stay retryable (guarded by cross_package_providers).
+#[test]
+fn declare_phase_failure_is_cached_package_in_error() {
+    let root = std::env::temp_dir().join(format!("razel-seam-memo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    // Two consumers of the same failing package: `c` fails pre-eval (unvendored dep repo
+    // inside its BUILD via a load — simplest: c's BUILD itself is fine but deps the repo).
+    std::fs::create_dir_all(root.join("c")).unwrap();
+    std::fs::write(
+        root.join("c/BUILD"),
+        "filegroup(name = \"c\", srcs = [\"@unvendored_zzz//:x\"])\n",
+    )
+    .unwrap();
+    for pkg in ["a", "b"] {
+        std::fs::create_dir_all(root.join(pkg)).unwrap();
+        std::fs::write(
+            root.join(pkg).join("BUILD"),
+            format!("filegroup(name = \"{pkg}\", srcs = [\"//c:c\"])\n"),
+        )
+        .unwrap();
+    }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ev = events.clone();
+    let mut flags = GlobalFlags::default();
+    flags.external_base = Some(root.clone());
+    flags.sched_hook = Some(SchedHook(Arc::new(move |p: &str, k: &str| {
+        ev.lock().unwrap().push((p.to_string(), k.to_string()));
+    })));
+    // SEQUENTIAL: the memo is about retry semantics, not races.
+    let (report, _) = load_tree_report_with_threads(
+        &root,
+        flags,
+        &["a".to_string(), "b".to_string()],
+        Vec::new(),
+        1,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    for (pkg, r) in &report {
+        assert!(r.is_err(), "{pkg} must surface c's package-in-error loudly: {r:?}");
+        let msg = r.as_ref().unwrap_err();
+        assert!(msg.contains("not vendored"), "{pkg} must carry the REAL error: {msg}");
+    }
+    assert_eq!(
+        count(&events, "own", "@unvendored_zzz"),
+        1,
+        "the failing dep load must run ONCE — later consumers read the cached error: {:?}",
+        events.lock().unwrap()
+    );
+}
+
 /// Bug #2 regression: two workers racing the same uncached `.bzl` must produce ONE eval
 /// (one `own`) and one waiter (`ready`) — a double-eval would mint two provider identities.
 #[test]

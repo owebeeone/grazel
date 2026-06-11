@@ -408,9 +408,17 @@ fn run_native_deferred<'v>(
         Some(p) => sess.set_current_pkg(Some(p)),
         None => sess.current_pkg(),
     };
-    let res = f(eval).map_err(Into::into);
+    let res: starlark::Result<()> = f(eval).map_err(Into::into);
     session(eval).set_current_pkg(prev);
     session(eval).analyzing_remove(label);
+    if let Err(e) = &res {
+        // The body is consumed (FnOnce) — memo the error so later consumers get the REAL
+        // reason instead of "not analyzed" (round 29).
+        session(eval)
+            .native_errors
+            .borrow_mut()
+            .insert(label.to_string(), e.to_string());
+    }
     res
 }
 
@@ -860,6 +868,12 @@ fn resolve_label_attr_inner<'v>(
                             providers: Vec::new(),
                         }));
                         continue;
+                    }
+                    if let Some(e) = sess.native_errors.borrow().get(&dep) {
+                        return Err(anyhow::anyhow!(
+                            "analysis of `{dep}` previously failed: {e}"
+                        )
+                        .into());
                     }
                     return Err(anyhow::anyhow!(
                         "`{dep}` is neither a declared target nor a source file in \
