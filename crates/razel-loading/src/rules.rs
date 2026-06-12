@@ -811,7 +811,8 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
         .ok_or_else(|| {
             LoadErr::declare(format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))
         })?;
-    // E-package in the MAIN repo: the boundary guard (§3c rule 2 — S1: warn, S3: error).
+    // E-package in the MAIN repo: the boundary guard (§3c rule 2 — warning during
+    // S1 only; a hard ERROR since S3d: boundary divergence must not be warnable).
     if build_path.file_name().is_some_and(|f| f == "BUILD.razel") && !pkg.starts_with('@') {
         if let Some(root) = sess.workspace.as_deref() {
             let ignore = std::fs::read_to_string(root.join(".bazelignore")).ok();
@@ -820,7 +821,7 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
                 ignore.as_deref(),
                 pkg,
             ) {
-                eprintln!("{w}");
+                return Err(LoadErr::declare(w));
             }
         }
     }

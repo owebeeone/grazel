@@ -62,8 +62,8 @@ pub(crate) fn resolve_build_file(
 
 /// The boundary guard (§3c rule 2), pure for testability: in a DUAL workspace, an
 /// E-package must sit under a `.bazelignore`d subtree, else the two engines disagree on
-/// package boundaries (glob/subpackage shadowing). Returns the warning text when the
-/// guard trips. S1 contract: WARNING; becomes an ERROR at S3.
+/// package boundaries (glob/subpackage shadowing). Returns the diagnostic when the
+/// guard trips. Warning during S1 only; a hard ERROR since S3d.
 pub fn e_mode_guard(
     root_is_dual: bool,
     bazelignore: Option<&str>,
@@ -82,9 +82,9 @@ pub fn e_mode_guard(
         return None;
     }
     Some(format!(
-        "WARNING: razel-native package `{pkg}` (BUILD.razel) is not under a .bazelignore'd \
-         subtree of this dual workspace — bazel and razel will disagree on package \
-         boundaries there. Add the subtree to .bazelignore. (E-mode boundary guard; \
-         this becomes an ERROR at S3.)"
+        "razel-native package `{pkg}` (BUILD.razel) is not under a .bazelignore'd \
+         subtree of this dual workspace — bazel and razel would disagree on package \
+         boundaries there. Add the subtree to .bazelignore. (E-mode boundary guard, \
+         §3c rule 2.)"
     ))
 }

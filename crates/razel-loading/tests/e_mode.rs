@@ -149,7 +149,33 @@ fn nearest_boundary_wins() {
     let _ = std::fs::remove_dir_all(&outer);
 }
 
-// ── the boundary guard (spike §3c rule 2; WARNING at S1, ERROR at S3) ────────
+// ── the boundary guard (spike §3c rule 2; WARNING at S1, ERROR since S3) ─────
+
+/// S3d: in a DUAL workspace, loading an un-ignored E-package is now a hard ERROR
+/// (boundary divergence must not be warnable in production use — review fix).
+#[test]
+fn dual_workspace_unignored_e_package_errors_at_load() {
+    let ws = fixture("guard-err");
+    write(&ws.join("WORKSPACE"), "");
+    write(&ws.join("srv/BUILD.razel"), "filegroup(name = \"s\")\n");
+    let err = analyze_workspace_with(&ws, "//srv:s", GlobalFlags::default())
+        .expect_err("unignored E-package in a dual workspace is an error");
+    assert!(err.contains(".bazelignore"), "{err}");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// …and the SAME package loads once the subtree is .bazelignore'd (the guard's
+/// whole point: bazel formally blind ⇒ no divergence).
+#[test]
+fn bazelignored_e_package_loads_in_dual_workspace() {
+    let ws = fixture("guard-ok");
+    write(&ws.join("WORKSPACE"), "");
+    write(&ws.join(".bazelignore"), "srv\n");
+    write(&ws.join("srv/BUILD.razel"), "filegroup(name = \"s\")\n");
+    let targets = analyze_workspace_with(&ws, "//srv:s", GlobalFlags::default()).unwrap();
+    assert!(targets.iter().any(|t| t.name == "//srv:s"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
 
 /// In a DUAL workspace (bazel boundary grammar at the root), an E-package must live
 /// under a `.bazelignore`d subtree — otherwise bazel sees an unignored dir whose

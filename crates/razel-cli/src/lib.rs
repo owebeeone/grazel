@@ -353,8 +353,45 @@ fn cmd_version(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// rc-lite (S3d, V3sh1): the WORKSPACE layer only of `.bazelrc` then `.razelrc` —
+/// command-scoped lines (`build --flag …`), comments/blanks skipped, bazel's command
+/// inheritance (`run` ⊃ `build` ⊃ `common`). No `import`, no `--config`, no
+/// system/home layers: those are S6, which grows the layer list around this same
+/// parse. `.razelrc` is the razel-only DELTA (§3): applied AFTER `.bazelrc` (bazel
+/// never reads it); CLI args follow all rc flags, so the command line always wins.
+fn rc_lite_flags(workspace: &Path, commands: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for rc in [".bazelrc", ".razelrc"] {
+        let Ok(src) = std::fs::read_to_string(workspace.join(rc)) else { continue };
+        for line in src.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if let Some((cmd, rest)) = t.split_once(char::is_whitespace)
+                && commands.contains(&cmd)
+            {
+                out.extend(rest.split_whitespace().map(String::from));
+            }
+        }
+    }
+    out
+}
+
+/// Parse args twice when rc files apply: once to find the workspace, then with the
+/// workspace's rc-lite flags PREPENDED (rc first ⇒ explicit CLI flags override).
+fn parse_opts_with_rc(commands: &[&str], args: &[String]) -> Result<Opts, ExitCode> {
+    let pre = parse_opts(args)?;
+    let rc = rc_lite_flags(&pre.workspace, commands);
+    if rc.is_empty() {
+        return Ok(pre);
+    }
+    let merged: Vec<String> = rc.into_iter().chain(args.iter().cloned()).collect();
+    parse_opts(&merged)
+}
+
 fn cmd_build(args: &[String]) -> ExitCode {
-    let o = match parse_opts(args) {
+    let o = match parse_opts_with_rc(&["common", "build"], args) {
         Ok(o) => o,
         Err(c) => return c,
     };
@@ -396,7 +433,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
 /// daemon path becomes the Command service's `run` method at S3c (client #1 holds —
 /// this function IS the future service client's rendering half).
 fn cmd_run(args: &[String]) -> ExitCode {
-    let o = match parse_opts(args) {
+    let o = match parse_opts_with_rc(&["common", "build", "run"], args) {
         Ok(o) => o,
         Err(c) => return c,
     };
@@ -713,6 +750,65 @@ mod tests {
 
     fn p(a: &[&str]) -> Opts {
         parse_opts(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    fn rc_ws(tag: &str, bazelrc: &str, razelrc: &str) -> std::path::PathBuf {
+        let ws = std::env::temp_dir().join(format!("razel-rc-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        if !bazelrc.is_empty() {
+            std::fs::write(ws.join(".bazelrc"), bazelrc).unwrap();
+        }
+        if !razelrc.is_empty() {
+            std::fs::write(ws.join(".razelrc"), razelrc).unwrap();
+        }
+        ws
+    }
+
+    #[test]
+    fn rc_lite_scopes_inherits_and_layers() {
+        // Command scoping + `common` + comments; `.razelrc` flags come AFTER
+        // `.bazelrc` (the delta layer), CLI args after both (tested via merge order).
+        let ws = rc_ws(
+            "scope",
+            "# comment\ncommon --a\nbuild --b\ntest --never\n",
+            "build --c\n",
+        );
+        assert_eq!(rc_lite_flags(&ws, &["common", "build"]), vec!["--a", "--b", "--c"]);
+        // run inherits build (+common); test-scoped lines stay out.
+        assert_eq!(
+            rc_lite_flags(&ws, &["common", "build", "run"]),
+            vec!["--a", "--b", "--c"]
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rc_lite_flags_reach_parse_and_cli_wins() {
+        // .razelrc sets a disk cache; the parsed Opts carry it…
+        let ws = rc_ws("parse", "", "build --disk_cache /tmp/rc-cache\n");
+        let args: Vec<String> =
+            vec!["t".into(), "-C".into(), ws.display().to_string()];
+        let o = parse_opts_with_rc(&["common", "build"], &args).unwrap();
+        assert_eq!(o.cache.as_deref(), Some(std::path::Path::new("/tmp/rc-cache")));
+        // …and an explicit CLI flag OVERRIDES the rc layer.
+        let args: Vec<String> = vec![
+            "t".into(),
+            "-C".into(),
+            ws.display().to_string(),
+            "--disk_cache".into(),
+            "/tmp/cli-cache".into(),
+        ];
+        let o = parse_opts_with_rc(&["common", "build"], &args).unwrap();
+        assert_eq!(o.cache.as_deref(), Some(std::path::Path::new("/tmp/cli-cache")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rc_lite_absent_files_are_silent() {
+        let ws = rc_ws("none", "", "");
+        assert!(rc_lite_flags(&ws, &["common", "build"]).is_empty());
+        let _ = std::fs::remove_dir_all(&ws);
     }
     fn err(a: &[&str]) -> bool {
         parse_opts(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()).is_err()
