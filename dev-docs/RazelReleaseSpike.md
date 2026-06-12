@@ -2,7 +2,7 @@
 
 *2026-06-12. Decision (Gianni): pivot — not abandon — from TF coverage to a usable-subset
 release, because the real goal is unblocked development of the iroh/razel-powered gryth
-server (rust + ts stack). TF stays the depth verifier; the `third-party/examples` tree
+server (ts/npm stack — rust is RAZEL'S implementation language, not gryth's). TF stays the depth verifier; the `third-party/examples` tree
 (bazelbuild/examples) is the LOW BAR and the new goldens corpus. "If I can have a limping
 along razel, I can make progress on that path which does not depend on a full TF capable
 builder."*
@@ -16,22 +16,29 @@ next bank, not as drift. The mode matrix (§3c) + the C3c gate partition the cod
 the honest risk to simultaneity is BANDWIDTH (the previous "parallel lane" never
 materialized) — default cadence is interleaved-by-round, gryth track leads.
 
-**Track G — gryth unlock (leads):**
-- **G1. Rust binary link + `razel run`** — build AND run a rust executable (the server
-  dev loop is build-run-test; `run` was missing from the plan entirely). Golden: a hello
-  binary, output-compared.
-- **G2. Cargo.lock crate pipeline** — THE unlock (iroh ⇒ ~hundreds of crates): the @pypi
-  method re-aimed; crate_universe's on-disk shapes as ground truth. Acceptance: an
-  iroh-importing hello server builds.
-- **G3. `razel test` for rust + the parallel executor/`--jobs`** — rust test binaries run
-  standalone (NO runfiles prerequisite — that chain is cc/sh-shaped, track B); the
-  executor is shared infra scheduled here because iroh-scale dep trees demand it.
-- **G4. E-mode core** — BUILD.razel/MODULE.razel filename + boundary-walk support (cheap);
-  guards + strict-mode interplay trail. NOTE: gryth STARTS in plain bazel grammar (zero
-  wait, and it doubles as a dual-build dogfood corpus); it flips to E-mode when the first
-  glade-native target exists.
+**Track G — gryth unlock (leads). Corrected 2026-06-12: gryth is TS/NPM** (rust is what
+razel itself is written in — cargo-built, self-hosting is not a goal here). Consequence:
+razel-native js/ts rules will be SIMPLE razel shapes, not aspect-rules_js mimicry — which
+makes E-mode the day-1 grammar for gryth (its BUILD files use razel-native rules, so
+bazel-grammar start would need shims for no benefit; sovereignty is the honest mode).
+
+- **G1. E-mode core** — BUILD.razel/MODULE.razel filename + boundary-walk support; XOR
+  rule; guards + strict-mode interplay can trail. Cheap (same evaluator, new filenames) —
+  and now load-bearing for everything after it.
+- **G2. npm lockfile pipeline** — the @pypi method's THIRD application: package-lock.json
+  / pnpm-lock.yaml carry integrity hashes; fetch tarballs from registry.npmjs.org,
+  verify, materialize node_modules (razel-native layout first; aspect-rules_js shapes are
+  a track-B concern if ever needed). Acceptance: gryth-ui's dep tree materializes.
+- **G3. js/ts rules + `razel run`** — razel-native `ts_project`-lite (tsc action),
+  `js_binary` (node runner); `razel run` lands here (the dev loop is build-run-test).
+  Acceptance: a gryth hello server runs via razel.
+- **G4. `razel test` (vitest/jest exec) + the parallel executor/`--jobs`** — js test
+  runners exec standalone (no runfiles prerequisite — that chain stays track B); the
+  executor is shared infra scheduled here.
 - **G5 (later).** Glade/derivation targets, iroh-distributed cache/registry, content-key
-  action cache for dev-loop incrementality.
+  action cache for dev-loop incrementality. Rust-ecosystem support (rules_rust binaries,
+  Cargo.lock pipeline) moves to track B's ladder — it serves bazel-compat corpora, not
+  gryth.
 
 **Track B — bazel compat (interleaves; the examples tree is its scoreboard):**
 - **B1. cc linking** (`c++-link-executable` action_config + File-ification) +
