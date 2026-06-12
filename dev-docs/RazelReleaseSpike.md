@@ -232,3 +232,95 @@ package discovery, shim dispatch) — lands with §1.2's bazelrc work.
 - `razel build//run/test` work on cpp-tutorial + a rust binary/test golden.
 - A gryth-shaped rust crate with crates.io deps builds and tests via razel.
 - TF sweep ≥ 455/835 throughout (the no-regress floor).
+
+## §5 The step-by-step plan (exit conditions and all)
+
+Process invariants for every step: roll-build (each lands green: `cargo test --workspace`
++ gates + sentinels), TF sweep ≥455 at every bank, goldens always diffed in
+`--strict_bazel`, commit + tag `razelV3/<step>`, round delta to the checkpoint-4 précis,
+debts to RazelGaps. Track G leads; B interleaves where marked.
+
+**S1 (G1) — E-mode core.**
+Scope: boundary walk-up (`MODULE.razel` joins `MODULE.bazel`/`REPO.bazel`/`WORKSPACE[.bazel]`);
+`BUILD.razel` in package discovery; the XOR rule (coexistence with `BUILD[.bazel]` = loud
+error); a `strict_bazel` GlobalFlags bool that makes E-packages invisible (full rc wiring
+waits for S6); `.bazelignore`-guard check as a warning first.
+Exit: fixture workspace (MODULE.razel root, BUILD.razel packages) loads and analyzes;
+coexistence errors; the same fixture under strict mode shows ZERO razel packages; suite +
+TF floor green.
+
+**S2 (G2) — npm lockfile pipeline.**
+Scope: `fetch-npm`: parse the lock gryth actually uses (package-lock v3 lists literal
+`node_modules/...` paths — materialization follows the lock verbatim; pnpm-lock decision
+made HERE by looking at gryth-dev, not guessed); integrity hashes are sha512 → cache under
+`cache/repos/v1/content_addressable/sha512/…` (same schema, new digest dir); registry
+tarballs fetched, verified, extracted to the locked node_modules layout.
+Exit: tiny-lockfile fixture materializes; integrity mismatch fails loud; offline re-run =
+100% cache hits; ACCEPTANCE: a real gryth package.json/lock materializes and
+`node -e "require(...)"` smoke-passes.
+
+**S3 (G3) — js/ts rules + `razel run`.**
+Scope: razel-native rulepack: `js_binary` (node entry + node_modules dep), `ts_project`-lite
+(one tsc action; inputs srcs+tsconfig+typings, outputs js); the `razel run` CLI verb
+(walk-up root → build → exec, exit code passthrough). Host node/tsc resolved like the cc
+host toolchain (non-hermetic, digest-logged — same posture).
+Exit: hello `js_binary` runs with stdout golden; 2-file `ts_project` compiles with output
+golden; ACCEPTANCE (the spike's heart): a gryth hello server in a razel-native module
+builds and runs via `razel run`.
+
+**S4 (B1) — cc linking + the goldens harness.**
+Scope: `c++-link-executable` action_config (adopted config) + Native-path link +
+File-ification of link artifacts; the examples goldens harness (capture/verify split over
+per-example workspaces, strict mode wired); cpp-tutorial stage1–3 as the first corpus.
+Exit: stage1–3 build AND RUN; binary stdout goldens green; normalized aquery graph parity
+green (deviations documented, not silent); harness joins the probe sentinels.
+
+**S5 (G4) — `razel test` + the parallel executor.**
+Scope: `razel test` verb (build → exec → exit-code protocol → test.log + summary line);
+`js_test` (vitest/jest exec — standalone, NO runfiles); the parallel action executor in
+razel-build with `--jobs`/`-j` (independent actions concurrent; `-j1` byte-identical).
+Exit: green/red js tests behave; `razel test //...` over a gryth fixture; measured
+wall-clock win on N independent actions; `-j1` outputs byte-equal to serial.
+
+**S6 (B2) — bazelrc + full `--strict_bazel` + discovery hardening.**
+Scope: rc parsing (system → workspace → home → flag; command scoping; `--config`;
+`import`; `.razelrc` layered after); full strict semantics (rc/MODULE.razel skipped,
+razel-only flags rejected); walk-up discovery shared by all verbs; `.bazelignore`.
+Exit: flags-parsing-tutorial outcomes match bazel-7.7.0 (golden); TF's `.bazelrc`
+consumed (`--deleted_packages` trims the census denominator — re-baseline the floor,
+expected UP); strict mode becomes the harness default by construction.
+
+**S7 (B3) — runfiles → cc_test/sh_test + `razel query`.**
+Scope: runfiles staging (the registered ❌); cc_test/sh_test execution; the query verb
+(deps/rdeps/pattern over the existing razel-analysis machinery).
+Exit: query-quickstart goldens green (normalized output parity); a cc_test passes under
+its runfiles tree; sh_test works.
+
+**S8 (shared) — content-keyed action cache.**
+Scope: action key = content digests of inputs incl. the resolved tool (the registered
+toolchain-invalidation item); rebuild-without-change short-circuits.
+Exit: second build of an unchanged tree = 100% action-cache hits, measured; `touch`ing a
+source invalidates exactly its cone.
+
+**S9 (B4) — java tier, then go/gazelle tier.**
+Scope: javac/jar action-grade natives (java-tutorial), java-maven scope-checked at the
+time; then `ctx.actions.write` + go natives (go-tutorial) and the gazelle workflow
+(run-the-binary + analyze its output).
+Exit: java-tutorial builds+runs golden; go-tutorial golden; gazelle round-trips on a
+fixture.
+
+**Spike exit (the release bar):** S1–S6 done ⇒ gryth develops under razel (build/run/test
+from a razel-native module, deps from the npm lock, dev loop parallel and cached-enough)
+AND the bazel story is honest (cpp-tutorial + flags goldens strict-green, TF ≥455, every
+capability claim golden-backed). S7–S9 harden the compat track and can trail the gryth
+unlock without blocking it.
+
+**Decision points en route (Gianni):** gryth-dev bootstrap moment (first MODULE.razel in
+that repo — after S3); pnpm vs npm lock reality-check at S2; the TF floor re-baseline at
+S6 (deleted_packages changes the denominator); java-maven scope at S9.
+
+**Named risks:** single-lane bandwidth (tracks interleave by round unless a second session
+materializes — history says don't assume it); node/tsc host non-hermeticity (accepted,
+digest-logged, same as cc); npm lock-format drift (v3 assumed, verified at S2); the
+goldens harness inheriting parity-normalizer gaps (deviations must be DOCUMENTED per
+golden, never absorbed silently).
