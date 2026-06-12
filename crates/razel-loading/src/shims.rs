@@ -36,6 +36,7 @@ pub(crate) fn rules_cc_module_native() -> Result<FrozenModule, String> {
         let ast = AstModule::parse(
             "@rules_cc",
             "cc_binary = native_cc_binary\ncc_library = native_cc_library\n\
+             cc_test = native_cc_binary\n\
              def _cc_import_impl(ctx):\n    return [DefaultInfo(files = [])]\n\
              cc_import = rule(implementation = _cc_import_impl, attrs = {})\n"
                 .to_owned(),

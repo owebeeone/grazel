@@ -144,6 +144,29 @@ fn js_rules(b: &mut GlobalsBuilder) {
         analyze_js_binary(session(eval), name, entry_point, unpack_strs(srcs))
     }
 
+    fn native_js_library<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] data: Option<UnpackList<Value<'v>>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        // Grouping rule (aspect surface): no actions; DefaultInfo = the srcs.
+        // Resolution stays node's walk-up — the library is graph structure.
+        let _ = (deps, data);
+        let sess = session(eval);
+        let srcs_q: Vec<String> = unpack_strs(srcs).iter().map(|s| qualify(sess, s)).collect();
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            deps: Vec::new(),
+            actions: Vec::new(),
+            default_info: srcs_q,
+            providers: Default::default(),
+        });
+        Ok(NoneType)
+    }
+
     fn native_ts_project<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
@@ -163,7 +186,8 @@ pub(crate) fn module() -> Result<FrozenModule, String> {
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse(
             "@aspect_rules_js",
-            "js_binary = native_js_binary\njs_test = native_js_test\nts_project = native_ts_project\n"
+            "js_binary = native_js_binary\njs_test = native_js_test\n\
+             js_library = native_js_library\nts_project = native_ts_project\n"
                 .to_owned(),
             &Dialect::Extended,
         )

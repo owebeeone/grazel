@@ -21,15 +21,15 @@ examples.rs owns the per-verb columns for its members). Re-run to refresh.
 | bzlmod/06-specify_dev_dependency | 1 | 0 | ``: error: Module has no symbol `version` |
 | bzlmod/06-specify_dev_dependency/lib_a | 1 | 1 | — |
 | bzlmod/utils/librarian | 1 | 1 | — |
-| configurations | 10 | 2 | `attaching_transitions_to_rules`: error: Module has no symbol `piece` |
+| configurations | 10 | 1 | `attaching_transitions_to_rules`: error: Module has no symbol `piece` |
 | configurations/auto_configured_builds | 7 | 7 | — |
 | configurations/auto_configured_builds/custom_flags_impl | 1 | 1 | — |
-| configurations/cc_test | 1 | 0 | ``: error: Module has no symbol `cc_test` |
+| configurations/cc_test | 1 | 0 | ``: Traceback (most recent call last): |
 | cpp-tutorial/stage1 | 1 | 1 | — |
 | cpp-tutorial/stage2 | 1 | 1 | — |
 | cpp-tutorial/stage3 | 2 | 2 | — |
 | flags-parsing-tutorial | 1 | 1 | — |
-| frontend | 21 | 1 | ``: error: Module has no symbol `js_library` |
+| frontend | 21 | 5 | ``: error: unsupported load path `@npm//:defs.bzl` (only //pkg:f.bzl, :f.bzl, or a vendored @r |
 | go-tutorial/stage1 | 1 | 0 | ``: error: unsupported load path `@rules_go//go:def.bzl` (only //pkg:f.bzl, :f.bzl, or a vendo |
 | go-tutorial/stage2 | 2 | 0 | ``: error: unsupported load path `@rules_go//go:def.bzl` (only //pkg:f.bzl, :f.bzl, or a vendo |
 | go-tutorial/stage3 | 2 | 0 | ``: error: unsupported load path `@rules_go//go:def.bzl` (only //pkg:f.bzl, :f.bzl, or a vendo |

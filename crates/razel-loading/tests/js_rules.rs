@@ -96,3 +96,22 @@ fn js_binary_requires_entry() {
     assert!(err.contains("entry_point"), "{err}");
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// `js_library` (aspect surface): a grouping rule — no actions, DefaultInfo = srcs.
+/// Gates the `frontend` example (21 packages load through it).
+#[test]
+fn js_library_groups_srcs() {
+    let ws = fixture("jslib");
+    write(
+        &ws.join("lib/BUILD.razel"),
+        "load(\"@aspect_rules_js//js:defs.bzl\", \"js_library\")\n\
+         js_library(name = \"l\", srcs = [\"a.js\", \"b.js\"])\n",
+    );
+    write(&ws.join("lib/a.js"), "");
+    write(&ws.join("lib/b.js"), "");
+    let targets = analyze_workspace_with(&ws, "//lib:l", GlobalFlags::default()).unwrap();
+    let t = targets.iter().find(|t| t.name == "//lib:l").expect("target");
+    assert!(t.actions.is_empty(), "grouping rule: no actions");
+    assert_eq!(t.default_info, vec!["lib/a.js".to_string(), "lib/b.js".to_string()]);
+    let _ = std::fs::remove_dir_all(&ws);
+}

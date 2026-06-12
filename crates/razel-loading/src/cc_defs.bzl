@@ -117,3 +117,7 @@ def _cc_binary_impl(ctx):
     return [DefaultInfo(files = [out])]
 
 cc_binary = rule(implementation = _cc_binary_impl, attrs = {})
+
+# cc_test: analysis-wise a cc executable; the test protocol (exit codes, test.log,
+# summary) is the `test` verb's job, not the rule's.
+cc_test = rule(implementation = _cc_binary_impl, attrs = {})
