@@ -336,10 +336,16 @@ per-example workspaces, strict mode wired); cpp-tutorial stage1–3 as the first
 Exit: stage1–3 build AND RUN; binary stdout goldens green; normalized aquery graph parity
 green (deviations documented, not silent); harness joins the probe sentinels.
 
-**S5 (G4) — `razel test`.**
+**S5 (G4) — `razel test`, FOLDED INTO the examples burn-down (Gianni, 2026-06-13:
+"get all the other commands working — test especially — when you tackle examples").**
 Scope: `razel test` verb (build → exec → exit-code protocol → test.log + summary line);
-`js_test` (vitest/jest exec — standalone, NO runfiles).
-Exit: green/red js tests behave; `razel test //...` over a gryth fixture.
+`js_test` (vitest/jest exec — standalone, NO runfiles); AND the examples corpus
+exercises EVERY verb per example, not just build: the survey/goldens harness grows
+columns for build / run / test / affected (each example's runnable + test targets
+enumerated; cc_test/sh_test/java_test as the corpus presents them), so "example green"
+means the whole verb surface is green there.
+Exit: green/red js tests behave; `razel test //...` over a gryth fixture; the examples
+survey reports per-verb status (the burn-down table).
 **S5x (shared, TRIGGERED not scheduled) — the parallel action executor + `--jobs`/`-j`.**
 Pulled forward only when the gryth dev loop MEASURES slow (review fix: not required to
 prove the roadmap); otherwise lands with S8. Exit when built: independent actions
