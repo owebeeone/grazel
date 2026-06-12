@@ -98,6 +98,20 @@ pub fn run(args: &[String]) -> ExitCode {
 /// surface is deliberately narrow (`--scope`, `-C`/`--workspace`) until razel-cli
 /// itself grows a daemon-routed run to delegate to.
 fn grazel_run(args: &[String]) -> ExitCode {
+    // --no_daemon (survey P1): razel's own local run verb, verbatim.
+    if args.iter().any(|a| a == "--no_daemon" || a == "--no-daemon") {
+        let mut rest: Vec<String> = vec!["run".into()];
+        rest.extend(
+            args.iter()
+                .filter(|a| {
+                    a.as_str() != "--no_daemon"
+                        && a.as_str() != "--no-daemon"
+                        && !a.starts_with("--scope=")
+                })
+                .cloned(),
+        );
+        return razel_cli::run(&rest);
+    }
     let mut flag_scope = None;
     let mut target = None;
     let mut prog_args: Vec<String> = vec![];
@@ -143,21 +157,30 @@ fn grazel_run(args: &[String]) -> ExitCode {
     }
 }
 
-/// Daemon-route a razel verb: peel ONLY `--scope` (grazel-namespaced), ensure
-/// the scope daemon (hello → membership → output lock), delegate with
-/// `--daemon --socket <scope socket>` injected. Explicit user routing
-/// (`--daemon`/`--socket` present) wins: delegate VERBATIM, inject nothing.
+/// Daemon-route a razel verb: peel ONLY the grazel-namespaced flags (`--scope`,
+/// `--no_daemon`), ensure the scope daemon (hello → membership → output lock),
+/// delegate with `--daemon --socket <scope socket>` injected. Explicit user
+/// routing (`--daemon`/`--socket` present) wins: delegate VERBATIM, inject
+/// nothing. `--no_daemon` (survey P1) is the escape hatch: razel-LOCAL
+/// semantics, no daemon started, no injection — razel's own default behavior.
 fn routed_razel_verb(args: &[String]) -> ExitCode {
     if args.iter().any(|a| a == "--daemon" || a == "--socket" || a.starts_with("--socket=")) {
         return razel_cli::run(args);
     }
     let mut flag_scope = None;
+    let mut no_daemon = false;
     let mut rest: Vec<String> = Vec::with_capacity(args.len());
     for a in args {
-        match a.strip_prefix("--scope=") {
-            Some(v) => flag_scope = Some(v.to_string()),
-            None => rest.push(a.clone()),
+        if let Some(v) = a.strip_prefix("--scope=") {
+            flag_scope = Some(v.to_string());
+        } else if a == "--no_daemon" || a == "--no-daemon" {
+            no_daemon = true;
+        } else {
+            rest.push(a.clone());
         }
+    }
+    if no_daemon {
+        return razel_cli::run(&rest);
     }
     // Workspace for SCOPE RESOLUTION only — razel's -C/--workspace is scanned
     // non-destructively; the flag itself still reaches razel's parser.
@@ -217,6 +240,37 @@ fn grazel_verb(args: &[String]) -> ExitCode {
             );
             Ok(ExitCode::SUCCESS)
         }
+        // Survey P2: enumerate every scope under the grazel home, liveness-checked.
+        ["scope"] if flags.list => {
+            paths::grazel_home(env_opt("GRAZEL_HOME").as_deref(), env_opt("HOME").as_deref())
+                .map(|home| {
+                    let mut names = std::collections::BTreeSet::new();
+                    for dir in [home.join(".uds"), home.join("scopes")] {
+                        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                            names.insert(entry.file_name().to_string_lossy().to_string());
+                        }
+                    }
+                    if names.is_empty() {
+                        println!("no scopes under {}", home.display());
+                    }
+                    for name in names {
+                        let alive = paths::ScopePaths::new(&home, &name)
+                            .map(|p| {
+                                daemon::status_lines(&p).iter().any(|l| l == "alive=true")
+                            })
+                            .unwrap_or(false);
+                        println!("scope={name} alive={alive}");
+                    }
+                    ExitCode::SUCCESS
+                })
+        }
+        // Survey P2: read-only status — works on a wedged daemon (no wire calls).
+        ["daemon", "status"] => resolve_paths(flags.scope.as_deref(), &workspace).map(|p| {
+            for line in daemon::status_lines(&p) {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }),
         // Debug/plumbing view of §1e resolution; key=value, consumed by ws-test.
         ["scope"] => resolve_paths(flags.scope.as_deref(), &workspace).map(|p| {
             println!("scope={}", p.scope);
@@ -315,7 +369,7 @@ fn grazel_verb(args: &[String]) -> ExitCode {
             }),
         _ => {
             eprintln!(
-                "usage: grazel <scope | shutdown [--all] | daemon run|ping|stop | ws test [--stage=N|--list]> [--scope=S] [--workspace=DIR]\n       or any razel verb (build/affected/subscribe/…) — razel's surface verbatim"
+                "usage: grazel <scope [--list] | shutdown [--all] | daemon run|ping|stop|status | ws test [--stage=N|--list]> [--scope=S] [--workspace=DIR]\n       or any razel verb (build/affected/subscribe/…) — razel's surface verbatim; --no_daemon for razel-local semantics"
             );
             Ok(ExitCode::from(64)) // EX_USAGE, razel's convention
         }

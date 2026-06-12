@@ -52,6 +52,8 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "ws-stream-equivalence", run: ws_stream_equivalence },
         Stage { name: "js-client-roundtrip", run: js_client_roundtrip },
         Stage { name: "shutdown-verb", run: shutdown_verb },
+        Stage { name: "no-daemon-escape", run: no_daemon_escape },
+        Stage { name: "daemon-status", run: daemon_status },
     ]
 }
 
@@ -982,6 +984,124 @@ fn shutdown_verb(ctx: &StageCtx) -> Result<(), String> {
         return Err("--all with --scope was accepted".into());
     }
     Ok(())
+}
+
+/// Survey P1: `--no_daemon` = razel-local semantics under grazel — the build
+/// succeeds and NO daemon artifact (socket, daemon.json) is created.
+fn no_daemon_escape(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("BUILD"), RUN_BUILD).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("hello.c"), RUN_SRC).map_err(|e| e.to_string())?;
+    let ws_abs = ws.canonicalize().map_err(|e| e.to_string())?.display().to_string();
+    let out = Command::new(&ctx.grazel_bin)
+        .current_dir(&ws)
+        .env("GRAZEL_HOME", &home)
+        .env_remove("GRAZEL_SCOPE")
+        // ABSOLUTE -C works around razel's relative-workspace staging bug
+        // (inbox 0010 — bare and `-C .` both fail cold); drop when fixed.
+        .args(["build", "hello", "--no_daemon", "-C", &ws_abs])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "--no_daemon build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    if home.join(".uds").exists() || home.join("scopes").exists() {
+        return Err("--no_daemon created daemon artifacts under the grazel home".into());
+    }
+    // run --no_daemon: razel's local run verb — program output + exit code 7.
+    let out = Command::new(&ctx.grazel_bin)
+        .current_dir(&ws)
+        .env("GRAZEL_HOME", &home)
+        .args(["run", "hello", "--no_daemon", "-C", &ws_abs])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.code() != Some(7)
+        || !String::from_utf8_lossy(&out.stdout).contains("hello-from-grazel-run")
+    {
+        return Err(format!(
+            "run --no_daemon: exit {:?}, stdout {:?}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout)
+        ));
+    }
+    if home.join(".uds").exists() {
+        return Err("run --no_daemon started a daemon".into());
+    }
+    Ok(())
+}
+
+/// Survey P2: read-only observability — live, dead-stale, and empty scopes all
+/// render without error (and without any wire call).
+fn daemon_status(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    let status = |scope: &str| -> Result<HashMap<String, String>, String> {
+        let out = Command::new(&ctx.grazel_bin)
+            .current_dir(&ws)
+            .env("GRAZEL_HOME", &home)
+            .env_remove("GRAZEL_SCOPE")
+            .args(["daemon", "status", &format!("--scope={scope}")])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(format!("status {scope} errored: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect())
+    };
+    let result = (|| {
+        // Live: status agrees with ping (pid, liveness, membership, port).
+        let pid = pid_of(&ping(ctx, &home, &ws, Some("live"), false)?)?;
+        let st = status("live")?;
+        if st.get("alive").map(String::as_str) != Some("true")
+            || st.get("pid") != Some(&pid.to_string())
+        {
+            return Err(format!("live status wrong: {st:?}"));
+        }
+        let ws_c = ws.canonicalize().map_err(|e| e.to_string())?;
+        if !st.get("member").is_some_and(|m| m.contains(&ws_c.display().to_string())) {
+            return Err(format!("live status lacks the member: {st:?}"));
+        }
+        if st.get("http_port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(0) == 0 {
+            return Err(format!("live status lacks http_port: {st:?}"));
+        }
+        // Dead-stale: SIGKILL leaves daemon.json; status says alive=false, no error.
+        let mut victim = spawn_daemon(ctx, &home, &ws, &["daemon", "run", "--scope=stale"])?;
+        let stale_paths = ScopePaths::new(&home, "stale")?;
+        eventually("stale daemon up", || stale_paths.socket.exists())?;
+        victim.kill().map_err(|e| e.to_string())?;
+        victim.wait().map_err(|e| e.to_string())?;
+        let st = status("stale")?;
+        if st.get("alive").map(String::as_str) != Some("false") {
+            return Err(format!("stale status not alive=false: {st:?}"));
+        }
+        // Empty: never-started scope renders daemon=none, exit 0.
+        let st = status("never")?;
+        if st.get("daemon").map(String::as_str) != Some("none") {
+            return Err(format!("empty status missing daemon=none: {st:?}"));
+        }
+        // scope --list sees live=true and stale=false.
+        let out = Command::new(&ctx.grazel_bin)
+            .current_dir(&ws)
+            .env("GRAZEL_HOME", &home)
+            .args(["scope", "--list"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        let listing = String::from_utf8_lossy(&out.stdout).to_string();
+        if !listing.contains("scope=live alive=true") || !listing.contains("scope=stale alive=false") {
+            return Err(format!("scope --list wrong:\n{listing}"));
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "live");
+    result
 }
 
 // --- GR4a: the HTTP edge (GrazelHttpEdge.md) -----------------------------------

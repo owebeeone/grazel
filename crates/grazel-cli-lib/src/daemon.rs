@@ -393,6 +393,48 @@ pub fn run(opts: ServeOpts) -> Result<(), String> {
     }
 }
 
+/// One field out of daemon.json — hand-parsed (three-field artifact, no JSON
+/// dep by workspace policy; same posture as dial's pid read).
+fn json_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let rest = text.split(&format!("\"{key}\":")).nth(1)?.trim_start();
+    if let Some(stripped) = rest.strip_prefix('"') {
+        stripped.split('"').next()
+    } else {
+        Some(rest.split([',', '}']).next()?.trim())
+    }
+}
+
+/// Read-only scope observability (survey P2): daemon.json + members/ + socket
+/// presence + a pid liveness probe. Filesystem ONLY — no wire calls, so it
+/// works on a WEDGED daemon. key=value lines, the `scope` verb convention.
+pub fn status_lines(paths: &ScopePaths) -> Vec<String> {
+    let mut out = vec![
+        format!("scope={}", paths.scope),
+        format!("socket={}", paths.socket.display()),
+        format!("socket_present={}", paths.socket.exists()),
+    ];
+    match std::fs::read_to_string(&paths.daemon_json) {
+        Ok(dj) => {
+            let pid: Option<u32> = json_field(&dj, "pid").and_then(|p| p.parse().ok());
+            out.push(format!("pid={}", pid.map_or("?".into(), |p| p.to_string())));
+            out.push(format!("alive={}", pid.is_some_and(crate::dial::pid_alive)));
+            for key in ["version", "protocol", "http_port"] {
+                if let Some(v) = json_field(&dj, key) {
+                    out.push(format!("{key}={v}"));
+                }
+            }
+        }
+        Err(_) => out.push("daemon=none".into()),
+    }
+    let members = paths.state_dir.join("members");
+    for entry in std::fs::read_dir(&members).into_iter().flatten().flatten() {
+        if let Ok(line) = std::fs::read_to_string(entry.path()) {
+            out.push(format!("member={}", line.trim()));
+        }
+    }
+    out
+}
+
 /// The dial-side hello: build/wire versions + WORKSPACE ROOT (§1e).
 pub fn req_hello(workspace_root: &Path) -> Cbor {
     let hello = Hello {
