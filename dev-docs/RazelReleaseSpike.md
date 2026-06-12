@@ -7,25 +7,43 @@ server (rust + ts stack). TF stays the depth verifier; the `third-party/examples
 along razel, I can make progress on that path which does not depend on a full TF capable
 builder."*
 
-## §1 The needs ladder (Gianni's list, re-graded against gryth)
+## §1 Two tracks (re-laddered 2026-06-12 — the goal is GRYTH UNLOCKED, verified honest)
 
-1. **Linking** — cc AND rust executables (the registered `c++-link-executable`
-   action_config + File-ification; rust binary path beside the existing lib golden).
-   Highest perceived-value-per-effort on the board.
-2. **The parallel action executor + `--jobs`/`-j`** — execution-phase parallelism in
-   razel-build (the flag parses today; the work is the scheduling loop). The
-   content-digest action-cache key (registered) lands here too. NOTE the mapping of
-   record: `--jobs` = execution actions; the loading pool = `--loading_phase_threads`.
-3. **Runfiles → `razel test`** — runfiles is the hidden structural item (registered ❌):
-   test runners, gazelle's runner rule, sh_test all stage through it. Then cc_test/rust
-   test MVP (build + run + exit code + test.log shape).
-4. **Cargo.lock crate fetching** — the actual gryth unlock (iroh ⇒ crates.io deps): the
-   @pypi pipeline re-aimed — lockfile carries sha256s, resolve crates.io URLs, extract,
-   generate BUILDs (crate_universe's shapes as ground truth, same byte-parity method).
-5. **java + gazelle** — demoted to examples-tier (nothing in gryth is java; gazelle-core
-   emits go). They ride the low-bar ladder: java-tutorial/java-maven and go-tutorial
-   rungs, in that order, after 1–4.
+**The decoupling mechanism that lets the tracks run simultaneously:** every bazel-compat
+claim is verified by `--strict_bazel` goldens (§3d) and the TF sweep floor (≥455) — a
+gryth-track engine change that bends Bazel semantics surfaces as a strict-mode diff at the
+next bank, not as drift. The mode matrix (§3c) + the C3c gate partition the code surfaces;
+the honest risk to simultaneity is BANDWIDTH (the previous "parallel lane" never
+materialized) — default cadence is interleaved-by-round, gryth track leads.
 
+**Track G — gryth unlock (leads):**
+- **G1. Rust binary link + `razel run`** — build AND run a rust executable (the server
+  dev loop is build-run-test; `run` was missing from the plan entirely). Golden: a hello
+  binary, output-compared.
+- **G2. Cargo.lock crate pipeline** — THE unlock (iroh ⇒ ~hundreds of crates): the @pypi
+  method re-aimed; crate_universe's on-disk shapes as ground truth. Acceptance: an
+  iroh-importing hello server builds.
+- **G3. `razel test` for rust + the parallel executor/`--jobs`** — rust test binaries run
+  standalone (NO runfiles prerequisite — that chain is cc/sh-shaped, track B); the
+  executor is shared infra scheduled here because iroh-scale dep trees demand it.
+- **G4. E-mode core** — BUILD.razel/MODULE.razel filename + boundary-walk support (cheap);
+  guards + strict-mode interplay trail. NOTE: gryth STARTS in plain bazel grammar (zero
+  wait, and it doubles as a dual-build dogfood corpus); it flips to E-mode when the first
+  glade-native target exists.
+- **G5 (later).** Glade/derivation targets, iroh-distributed cache/registry, content-key
+  action cache for dev-loop incrementality.
+
+**Track B — bazel compat (interleaves; the examples tree is its scoreboard):**
+- **B1. cc linking** (`c++-link-executable` action_config + File-ification) +
+  cpp-tutorial stage1–3 goldens — the strict-mode goldens HARNESS bring-up rides here.
+- **B2. bazelrc parsing + `--strict_bazel` plumbing + walk-up root discovery +
+  `.bazelignore`** — the CLI verbs (`build`/`run`/`test`/`query`) become real here, serving
+  BOTH tracks.
+- **B3. Runfiles → cc_test/sh_test; `query` verb** (query-quickstart golden).
+- **B4. java tier (java-tutorial/java-maven), then go/gazelle tier (go-tutorial).**
+
+Shared acceptance: TF sweep ≥455 at every bank (both tracks); examples goldens
+strict-green per B-rung; gryth-repo-builds per G-rung.
 ## §2 Goldens-first (the examples corpus)
 
 Small examples, easy to verify — exactly the parity-harness shape razel already has
