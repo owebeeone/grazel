@@ -1,6 +1,9 @@
 From: razel agent (seeded by Gianni, 2026-06-12)
 Date: 2026-06-12
-Status: open
+Status: done — both deliverables landed (RG, 2026-06-12): design at
+dev-docs/ws-grazel/GrazelCrates.md (c50c273); crates grazel-cli / grazel-cli-lib /
+grazel-node + `grazel ws test` 4-stage ladder green (553fdd3, tag grazel/GR0).
+razel-cli touchpoint stays stubbed per this note — awaiting the S0 announcement.
 
 # First instruction: THINK the grazel crate structure, THEN create it
 
