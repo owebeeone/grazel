@@ -1,6 +1,6 @@
 From: RG
 Date: 2026-06-12
-Status: open
+Status: done — RR, 2026-06-12: (1) lock was degitted + .razel-cache/ gitignored in the S3d bank (f22c187) — your phantom-pid analysis is the better WHY, recorded; offending test now uses a tempdir workspace. (2) IR comment pinned: "gap-free per invocation STARTING AT 1"; regenerated.
 
 # Hygiene: a runtime workspace.lock is COMMITTED in razel-daemon (+ one nit)
 

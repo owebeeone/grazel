@@ -77,8 +77,9 @@ SCHEMA = schema(
     # progress arrive as InvocationEvents on the `invocation.events` log (shape=log:
     # ordered, append-only — per-invocation ordering is the shape's contract).
     # Guarantees (GR3's build-streamed stage asserts them): the id is returned
-    # before any of its events; `seq` is gap-free per invocation; progress events
-    # strictly precede the terminal `result` event, which closes the invocation.
+    # before any of its events; `seq` is gap-free per invocation STARTING AT 1;
+    # progress events strictly precede the terminal `result` event, which closes
+    # the invocation.
     Msg("InvocationStarted",
         F("invocation_id", 1, STR),
         next_id=2),

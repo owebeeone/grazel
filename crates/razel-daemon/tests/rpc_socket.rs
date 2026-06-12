@@ -46,8 +46,11 @@ fn wait_for(socket: &Path) {
 fn version_over_the_socket() {
     let socket = sock("ver");
     let cache = tempfile::tempdir().unwrap();
+    // tempdir workspace, NOT the crate dir: serve() takes the §1b writer lock in
+    // its workspace, and a lock under the source tree pollutes git (RG inbox 0007).
+    let ws = tempfile::tempdir().unwrap();
     spawn(
-        Server::new(PathBuf::from("."), cache.path().to_path_buf()),
+        Server::new(ws.path().to_path_buf(), cache.path().to_path_buf()),
         socket.clone(),
     );
     wait_for(&socket);
