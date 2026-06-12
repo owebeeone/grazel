@@ -262,7 +262,7 @@ fn build_through_a_spawned_daemon() {
 
     // Build through the daemon.
     let out = razel()
-        .args(["build", "//x:widget", "--daemon", "--socket", &socket, "-C"])
+        .args(["build", "//:widget", "--daemon", "--socket", &socket, "-C"])
         .arg(ws.path())
         .output()
         .unwrap();

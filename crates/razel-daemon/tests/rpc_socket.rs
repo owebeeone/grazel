@@ -79,7 +79,10 @@ fn build_over_the_socket_produces_a_real_object() {
     );
     wait_for(&socket);
 
-    let resp = rpc::call(&socket, &rpc::req_build("//x:widget")).unwrap();
+    // Root-package label (the fixture's BUILD is at the ws root): the loader-capable
+    // daemon path resolves packages FOR REAL now (RG 0008) — the old single-BUILD
+    // path silently ignored a bogus `//x` package here.
+    let resp = rpc::call(&socket, &rpc::req_build("//:widget")).unwrap();
     let r = BuildResult::from_cbor(&rpc::payload(&resp).unwrap());
     assert_eq!(r.status, BuildStatus::Built, "msg: {:?}", r.message);
     assert_eq!(r.outputs.len(), 1);

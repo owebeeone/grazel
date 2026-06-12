@@ -343,19 +343,34 @@ impl Inner {
             .next()
             .unwrap_or(&target_arg)
             .to_string();
-
-        let build_path = ["BUILD", "BUILD.bazel"]
-            .iter()
-            .map(|f| self.workspace.join(f))
-            .find(|p| p.exists())
-            .ok_or_else(|| format!("no BUILD in {}", self.workspace.display()))?;
-        let build_src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
         let cache = Cache::new(&self.cache_dir).map_err(|e| e.to_string())?;
-        let targets = self.warm_analyze(&build_src)?;
+
+        // RG 0008: the daemon rides the SAME loader-capable pipeline as razel-local
+        // (`load()` must work through the front door — §1d byte-identical claim).
+        // `//label` → the workspace loader; bare name → the warm single-BUILD path
+        // (digest-keyed re-analysis skip; the workspace path goes warm with the
+        // committed-snapshot work).
+        let report = if target_arg.starts_with("//") {
+            razel_build::build_workspace_with(
+                &self.workspace,
+                &target_arg,
+                &cache,
+                razel_build::GlobalFlags::default(),
+            )
+        } else {
+            let build_path = ["BUILD", "BUILD.bazel"]
+                .iter()
+                .map(|f| self.workspace.join(f))
+                .find(|p| p.exists())
+                .ok_or_else(|| format!("no BUILD in {}", self.workspace.display()))?;
+            let build_src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
+            let targets = self.warm_analyze(&build_src)?;
+            execute(&targets, &name, &self.workspace, &cache)
+        };
 
         // Build success vs. action failure both yield a BuildResult (Built/Failed);
         // Err is reserved for protocol/IO problems (no BUILD, unreadable, …).
-        let result = match execute(&targets, &name, &self.workspace, &cache) {
+        let result = match report {
             Ok(report) => BuildResult {
                 target: target_arg,
                 status: if report.executed == 0 {

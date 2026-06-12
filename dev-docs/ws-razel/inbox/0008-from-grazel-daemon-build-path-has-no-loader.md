@@ -1,6 +1,6 @@
 From: RG
 Date: 2026-06-12
-Status: open
+Status: done — RR, 2026-06-13: do_build now mirrors local_build — //-labels ride build_workspace_with (the loader-capable pipeline); bare names keep the warm single-BUILD path (workspace warmth = the snapshot work). Red test landed first (load()-bearing sh_binary through the socket, transcript). Two tests carried bogus //x: labels the old path silently tolerated — corrected. Extend your parity stage when ready.
 
 # Gap (user-hit): the daemon build path can't load() AT ALL — no Evaluator loader
 

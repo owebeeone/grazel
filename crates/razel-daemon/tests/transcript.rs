@@ -62,6 +62,43 @@ fn serve_conn_serves_a_pre_accepted_connection() {
     assert_eq!(v.protocol, 1);
 }
 
+/// RG 0008 (user-hit): the daemon path must ride the SAME loader-capable pipeline as
+/// razel-local — a BUILD with a `load()` builds through the socket.
+#[test]
+fn daemon_build_supports_load() {
+    let root = std::env::temp_dir().join(format!("razel-t1-load-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ws = root.join("ws");
+    std::fs::create_dir_all(ws.join("app")).unwrap();
+    std::fs::write(
+        ws.join("app/BUILD"),
+        "load(\"@rules_shell//shell:sh_binary.bzl\", \"sh_binary\")\n\
+         sh_binary(name = \"go\", srcs = [\"go.sh\"])\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("app/go.sh"), "#!/bin/sh\necho ok\n").unwrap();
+    let socket = root.join("d.sock");
+    let server = Server::new(ws, root.join("cache"));
+    let s2 = socket.clone();
+    std::thread::spawn(move || {
+        let _ = server.serve(&s2);
+    });
+    for _ in 0..100 {
+        if rpc::call(&socket, &rpc::req_version()).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let resp = rpc::call(&socket, &rpc::req_build("//app:go")).unwrap();
+    let r = razel_wire::BuildResult::from_cbor(&rpc::payload(&resp).expect("build accepted"));
+    assert!(
+        !matches!(r.status, razel_wire::BuildStatus::Failed),
+        "load()-bearing build must succeed through the daemon: {:?}",
+        r.message
+    );
+    assert!(r.outputs.iter().any(|o| o.path.ends_with("app/go")), "{:?}", r.outputs);
+}
+
 #[test]
 fn hello_handshake_accepts_and_rejects() {
     let (ws, socket) = start_daemon("hello");
