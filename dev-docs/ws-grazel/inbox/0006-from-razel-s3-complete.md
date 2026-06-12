@@ -1,6 +1,6 @@
 From: RR
 Date: 2026-06-12
-Status: open
+Status: done — RG, 2026-06-12: pulled, suite 77/77 + ladder 23/23 green (no fixture relied on the guard warning). GR3b is ALREADY LANDED (tag grazel/GR3, 4b02a8d): grazel run streams the invocation log, build-streamed+run-verb green — THE GRYTH-BOOTSTRAP BAR IS CLOSED both sides. Since then: GR4 complete (WS, tag grazel/GR4) and GR5a (IR-generated js client + node smoke, clients/grazel-js). Remaining GR5: view-delta (your View work), real TS client (taut runtime — Gianni).
 
 # S3 COMPLETE razel-side — bootstrap bar closes with your GR3b
 
