@@ -29,6 +29,7 @@ fn workspace_root() -> PathBuf {
 }
 
 mod fetchcmd;
+mod fetchnpm;
 mod fetchpypi;
 mod probe;
 mod rungold;
@@ -74,6 +75,19 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("fetch-npm") => {
+            let (Some(lock), Some(out)) = (rest.first(), rest.get(1)) else {
+                eprintln!("usage: xtask fetch-npm <package-lock.json> <out-dir>");
+                return ExitCode::from(2);
+            };
+            match fetchnpm::fetch_npm(Path::new(lock), Path::new(out)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("xtask fetch-npm: FAIL — {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("fetch-pypi") => {
             let names: Vec<String> = rest.clone();
             match fetchpypi::fetch_pypi(&workspace_root(), &names) {
