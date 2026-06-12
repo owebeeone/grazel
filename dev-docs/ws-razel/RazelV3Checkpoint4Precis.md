@@ -449,3 +449,26 @@ Named holes held: no postinstall, no gyp, no auth, no .bin shims.
 **Suite 73/73, gates OK (arrow gate live); engine untouched since s1-emode (TF 455 cited).**
 Two-agent cadence: RG consumed S0 all-clear same-day; inboxes 0001/0002/0003 both
 directions all flipped done. Next: S3 (js/ts shims + server skeleton + run verb + rc-lite).
+
+## Round delta — razelV3 round 49 (2026-06-12, ws-razel lane — S3a+S3b)
+
+**S3a** `@razel_js//` rulepack (js_rules.rs, the sh_rules pattern — C3c clean):
+`js_binary(name, entry, srcs, node_modules)` — ONE action writing a launcher that
+execs the SOURCE entry (`$(dirname $0)/<entry>`); node's walk-up finds the workspace's
+fetch-npm node_modules (physical adjacency, ESM included). NO runfiles assembly — the
+sandbox stages declared outputs only (first attempt assembled runfiles, sandbox ate
+them — the right v1 is launcher-from-source; bazel-faithful runfiles = the later
+runfiles step). `ts_project`-lite: ONE tsc action (target's own typescript or host
+PATH), outputs declared .ts→.js under `<name>_out/`. 4 tests.
+**S3b** `razel run <target> [-- args]`: build → exec DefaultInfo[0], args + exit-code
+propagated, build failure never execs. 3 e2e tests THROUGH THE REAL BIN
+(CARGO_BIN_EXE — bin→lib→engine→node).
+**ACCEPTANCE (the spike's heart, met):** a gryth hello http server in a razel-native
+module (MODULE.razel + BUILD.razel) imports @owebeeone/grip-core through the
+S2-materialized node_modules and reports "up on :<port> (grip-core: 54 exports)" via
+`razel run`. Suite 75/75, gates+probe green, TF 455/835 floor held.
+**Cross-lane:** RG's GR1 complete (10-stage ladder; S0 stub retired — grazel verbs
+delegate to razel_cli::run; Hello consumed). Gianni via GR1: grazeld default = NO
+idle-out (scope service); PublicSurfaces §1 amended accordingly.
+**S3 remaining:** S3c server skeleton (Command/run + invocation stream + hello server
+impl + T0/T1 — RG 0004's batched shapes), S3d rc-lite + guard→ERROR.

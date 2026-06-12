@@ -16,7 +16,10 @@ daemon per scope, §1e; everything in this section describes each daemon.) Mecha
 
 - **Workspace handles.** Lifecycle.open(path) → a workspace handle; every other call is
   handle-scoped. Opening the same root twice yields the same context (refcounted); the
-  daemon idles out when no workspace is open.
+  daemon idles out when no workspace is open. *(Amended 2026-06-12, Gianni via the
+  GR1 round: GRAZELD's default is NO idle-out — a scope daemon runs indefinitely as
+  the scope's service; `--idle-timeout` is opt-in. razeld keeps the idle-out default;
+  workspace handles stay refcounted in both.)*
 - **Isolation = one core ACTOR per workspace** (§1c): own Session lifecycle, own
   single-writer command queue, own committed snapshot + views, own watches. No shared
   mutable state between workspaces. Shared infra is read-only/content-addressed only:
