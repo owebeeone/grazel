@@ -25,14 +25,24 @@ impossible.
   Bazel-compatible set with Bazel semantics + razel-only flags incl. `--strict_bazel`),
   exit codes, output contracts. Bazel-compat portions track Bazel's semantics (strict mode
   is the oracle); razel-only portions version with the server API.
-- **S-B: The server API** (the third-party programmatic surface). Four services:
-  - **Command** — build/run/test/fetch invocations with structured results.
-  - **Query** — the graph oracle: targets, deps/rdeps, providers, actions, packages;
-    razel-analysis's existing machinery formalized.
-  - **Events** — a structured build-event stream, BEP-*shaped* (modeled in taut; a
-    literal-protobuf BEP adapter is a later optional bridge to bazel-ecosystem tooling —
-    see §4).
-  - **Lifecycle** — workspace open/status/invalidate, file-watch subscription, shutdown.
+- **S-B: The server API** (the third-party programmatic surface). Five services, all
+  STREAM-FIRST (§4b — nothing long-running ever blocks a caller):
+  - **Command** — build/run/test/fetch. Returns an invocation id IMMEDIATELY; results,
+    diagnostics and PROGRESS ("300/2000 BUILD files loaded", "action k/n") arrive as
+    events on the invocation's stream. The engine's existing observation seam
+    (`sched_hook`, round 28) is the progress source — instrumentation already in place.
+  - **Query** — one-shot graph oracle against the last COMMITTED snapshot: targets,
+    deps/rdeps, providers, actions, packages (razel-analysis formalized).
+  - **View** — a SUBSCRIBED query: initial snapshot + ordered DELTAS as the workspace
+    changes (file edit → invalidation → re-evaluation → view delta). The gryth-ui
+    primitive: live build-graph views updating in real time. Deliberately GRIP-SHAPED —
+    a view is a producer gryth's taps consume 1:1; razel-side the natural seam is the
+    DDS (demand-driven by design).
+  - **Events** — the global feed: file-change events, invalidations, build
+    failures/diagnostics, service lifecycle. BEP-*shaped* in taut (a literal-protobuf
+    BEP adapter stays a later optional bridge — §4).
+  - **Lifecycle** — workspace open/status/invalidate, watch control, hosted-service
+    supervision, shutdown.
 - **S-C: Workspace file contracts.** BUILD[.bazel]/MODULE.bazel/.bazelrc consumed with
   Bazel semantics; `BUILD.razel`/`MODULE.razel`/`.razelrc` per the V3sh1 §3 definitions.
 - **S-D: Artifact formats.** `razel-lock.json`, the cache layouts (Bazel-mirrored below
@@ -67,13 +77,43 @@ S-B, never the native surface: a literal-protobuf BEP emitter for bazel-ecosyste
 a BSP shim for IDEs, both optional and later; the native Events service is BEP-*shaped*
 in taut.
 
+## §4b The streaming model (Gianni, 2026-06-12 — multi-client, event-driven)
+
+**Connections are long-lived and multiplexed.** Many clients hold open connections
+concurrently; the framing carries subscription/stream ids over the same framed-CBOR
+transport (UDS first; the iroh fabric later carries it unchanged). Browser clients are
+GRYTH'S edge concern — the gryth service bridges daemon streams to WebSocket for
+gryth-ui; the daemon itself stays transport-minimal.
+
+**Nothing long blocks.** A 5-minute graph load answers in milliseconds with an invocation
+id and streams progress; the CLI is just a renderer of the same stream gryth consumes
+(client #1 discipline holds — the progress bar IS the public API).
+
+**The live loop:** watcher fires → invalidation enters the single-writer queue (§1c — a
+watch-triggered re-evaluation is an ordinary invocation) → on commit, the new snapshot
+swaps in → per active View, the daemon diffs committed snapshots and emits deltas.
+V1 delta mechanics are deliberately COARSE (snapshot diff per commit — correct, and cheap
+at gryth scale); the versioned store upgrades this to fine-grained deltas without
+changing the View contract — the API is shaped for where the store is going, not for
+what it is today.
+
+**Fan-out and dedup:** subscriptions are keyed by canonical query — N clients asking the
+same view share ONE materialized view with N subscribers. Event delivery is per-client
+ordered; slow consumers get bounded buffers + drop-with-resync (a client can always
+re-request the snapshot), never unbounded daemon memory.
+
+(Open, marked not-yet-defined: the view query language's expressiveness v1 — start with
+the razel-analysis primitives (targets/deps/rdeps by pattern) and grow by gryth's pull;
+resync/backpressure tuning; auth for non-local transports — iroh-era.)
+
 ## §5 Gryth's MVP slice (what the driving consumer needs first)
 
-Open workspace → build/run/test a target → query deps/rdeps/targets → subscribe to events
-→ invalidate on file change. This slice IS V3sh1 S3+S5's server: the `run` verb lands as
-the Command service's first method with the CLI as its first client; Query formalizes
-what razel-analysis already computes; Events can begin as the existing progress lines
-structured, growing toward BEP.
+Open workspace → build/run/test with streamed progress → query deps/rdeps/targets →
+SUBSCRIBE a live view → file-change events drive view deltas. This slice IS V3sh1 S3+S5's
+server: the `run` verb lands as the Command service's first method with the CLI as its
+first client; Query formalizes what razel-analysis already computes; Events/Views begin
+as the sched_hook stream structured + coarse snapshot-diff views, growing toward BEP and
+fine-grained deltas respectively.
 
 ## §6 Anti-goals
 
