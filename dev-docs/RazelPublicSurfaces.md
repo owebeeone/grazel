@@ -256,8 +256,12 @@ lock there).
 The server API and razel-native CLI surface version together (semver discipline; a
 compatibility window once gryth depends on it — pre-1.0, breaking changes allowed but
 CHANGELOG'd per release). Bazel-compat surfaces have no independent version: their
-contract is "what bazel-7.7.0 does," enforced by strict-mode goldens; the pinned bazel
-version is itself part of the public claim and bumps deliberately.
+contract is "what the PINNED bazel does," enforced by strict-mode goldens — and the
+pin is PER GOLDENS TIER (amended 2026-06-12, Gianni: the machine's bazel is the
+oracle): the EXAMPLES tier (the low bar) pins the capture machine's current bazel,
+recorded in each tier's README and bumped deliberately by re-capture (today: 9.1.1);
+the TF tier carries the semantics of its corpus's own `.bazelversion` (7.7.0). A
+pinned version is part of the public claim either way.
 
 ## §4 Protocol: TAUT, not gRPC (decision: Gianni 2026-06-12)
 
