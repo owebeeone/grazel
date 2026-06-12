@@ -50,6 +50,7 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "build-streamed", run: build_streamed },
         Stage { name: "run-verb", run: run_verb },
         Stage { name: "ws-stream-equivalence", run: ws_stream_equivalence },
+        Stage { name: "js-client-roundtrip", run: js_client_roundtrip },
     ]
 }
 
@@ -880,6 +881,59 @@ fn ws_stream_equivalence(ctx: &StageCtx) -> Result<(), String> {
         Ok(())
     })();
     stop_scope(ctx, &home, &ws, "wse");
+    result
+}
+
+/// GR5a: the gryth attach point, proven from node — the IR-GENERATED js client
+/// (clients/grazel-js) decodes the live grazeld over HTTP + WS. Host-node
+/// posture: non-hermetic, version digest-logged here, loud if absent.
+fn js_client_roundtrip(ctx: &StageCtx) -> Result<(), String> {
+    let node_version = Command::new("node")
+        .arg("--version")
+        .output()
+        .map_err(|_| "host node missing — GR5 takes the cc-toolchain posture: install node ≥22")?;
+    eprintln!(
+        "  [host-node digest] {}",
+        String::from_utf8_lossy(&node_version.stdout).trim()
+    );
+    // Dev-tree posture (same as build-parity's razel-bin requirement): the
+    // committed client lives at <repo>/clients/grazel-js relative to the bin.
+    let client_dir = ctx
+        .grazel_bin
+        .ancestors()
+        .find(|p| p.join("clients/grazel-js/smoke.js").is_file())
+        .map(|p| p.join("clients/grazel-js"))
+        .ok_or("clients/grazel-js/smoke.js not found above the grazel binary (dev tree required)")?;
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("BUILD"), RUN_BUILD).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("hello.c"), RUN_SRC).map_err(|e| e.to_string())?;
+    let result = (|| {
+        ping(ctx, &home, &ws, Some("js"), false)?;
+        let port = http_port_of(&home, "js")?;
+        let ws_c = ws.canonicalize().map_err(|e| e.to_string())?;
+        let out = Command::new("node")
+            .arg(client_dir.join("smoke.js"))
+            .arg(port.to_string())
+            .arg(&ws_c)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() || !stdout.contains("smoke-ok") {
+            return Err(format!(
+                "smoke client failed ({}):\n{stdout}{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        for marker in ["hello-ok", "run-ok", "events-ok"] {
+            if !stdout.contains(marker) {
+                return Err(format!("missing {marker} in smoke output:\n{stdout}"));
+            }
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "js");
     result
 }
 
