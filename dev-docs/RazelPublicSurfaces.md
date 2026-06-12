@@ -75,7 +75,13 @@ Local plumbing when both are installed on one machine:
   between razel and grazel must not rebuild the world — so the single-writer rule
   extends ACROSS daemons: one output-base lock per workspace (Bazel-mirrored mechanics);
   whichever daemon holds it is that workspace's writer, the other fails loud with a
-  "held by <daemon>" message.
+  "held by <daemon>" message. **Concrete contract (agreed RG↔RR 2026-06-12, inbox
+  0005 both lanes):** `<workspace>/.razel-cache/workspace.lock`, created with
+  `create_new`, ONE JSON line `{"pid":N,"daemon":"razeld"|"grazeld"|"razel-local",
+  "scope":"<name>"}`; live holder → fail loud naming daemon+scope+pid, dead holder →
+  reap and retake; holder removes pid-checked on every exit path. ONE implementation:
+  `razel-daemon::outlock` (grazeld consumes it through the lib — the crate arrow).
+  When output bases move out-of-tree the lock moves with them; same contract.
 
 The `razel_service(...)` hosting mechanism (supervised out-of-process services declared
 as E-mode targets) survives for ts/npm pieces gryth may add, but the p2p node does NOT

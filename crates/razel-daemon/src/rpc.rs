@@ -123,6 +123,10 @@ impl Server {
     /// Bind the rendezvous `socket` (UDS on unix, loopback TCP on Windows) and
     /// serve; each connection is handled on its own thread. Blocks.
     pub fn serve(&self, socket: &Path) -> io::Result<()> {
+        // §1b: razeld is this workspace's WRITER for its lifetime (one writer per
+        // workspace across daemons; a live grazeld holding it fails us loud).
+        let _writer = crate::outlock::acquire(&self.inner.workspace, "razeld", "")
+            .map_err(|e| io::Error::other(e))?;
         let listener = transport::bind(socket)?;
         loop {
             let mut conn = listener.accept()?;

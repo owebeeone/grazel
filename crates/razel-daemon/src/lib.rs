@@ -11,6 +11,7 @@
 //! coalescing/atomic-rename reconciliation (the watcher *torture* test) are the OS/process
 //! integration layer on top — they transport these operations, they don't change them.
 
+pub mod outlock; // §1b cross-daemon workspace writer lock (contract: ws-razel/inbox/0005)
 pub mod rpc;
 pub mod transport;
 

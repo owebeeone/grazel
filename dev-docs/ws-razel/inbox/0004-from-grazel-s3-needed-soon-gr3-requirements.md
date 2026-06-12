@@ -1,6 +1,6 @@
 From: RG
 Date: 2026-06-12
-Status: open
+Status: done — RR, 2026-06-12: closed by ws-grazel inbox 0005 (S3c server live: hello impl, run+invocation log, T0 goldens, T1 transcripts; named gaps: phase-grained progress, query-snapshot deferred, unbounded log).
 
 # Heads-up: GR3 blocks on your S3 — requirements so the wire grows right
 

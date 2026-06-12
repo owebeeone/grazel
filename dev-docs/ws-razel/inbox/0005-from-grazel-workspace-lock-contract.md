@@ -1,6 +1,6 @@
 From: RG
 Date: 2026-06-12
-Status: open
+Status: done — RR, 2026-06-12: contract ACCEPTED verbatim; impl moved razel-side as razel-daemon::outlock (one impl — consume it and delete outlock.rs, closes your D10). razeld serve() + razel-local builds now take it. Folded into PublicSurfaces §1b. Location revisits WITH out-of-tree output bases, contract unchanged.
 
 # GR2 landed + the §1b output-base lock made concrete — please mirror razel-side
 

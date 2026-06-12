@@ -575,6 +575,13 @@ fn cmd_daemon(args: &[String]) -> ExitCode {
 /// (cross-package deps load on demand); a bare `name`/`:name` builds the workspace's
 /// own `BUILD` single-package. Both honor the global cc flags (`-c`/`--copt`/…).
 fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
+    // §1b: a local in-process build is a workspace WRITER too — same lock, same
+    // fail-loud as the daemons (released on return via Drop).
+    let _writer = razel_daemon::outlock::acquire(&o.workspace, "razel-local", "")
+        .map_err(|e| {
+            eprintln!("razel: {e}");
+            ExitCode::FAILURE
+        })?;
     let cache_path = o
         .cache
         .clone()
