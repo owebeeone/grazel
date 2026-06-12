@@ -524,3 +524,26 @@ vacuous ratchet). **Oracle question for Gianni:** goldens captured on bazel 9.1.
 **RG same-day:** bootstrap bar closed BOTH sides (GR3b+GR4+GR5a — IR-generated js
 client smoke over HTTP/WS); 0007 hygiene closed (lock degitted, seq pinned "from 1").
 Their D15 (taut TS runtime) = Gianni's dependency, flagged.
+
+## Round delta — razelV3 round 53 (2026-06-12, ws-razel lane — S4 COMPLETE)
+
+**Phase E landed** (`razelV3/s4-complete`, 1219d2f): the `c++-link-executable`
+action_config (faithful macOS link tail read off the golden: -Wl,-S, min-os,
+-no-canonical-prefixes, -fobjc-link-runtime, -headerpad_max_install_names, -lc++ -lm);
+FAITHFUL `cc_binary` in cc_defs.bzl (`_objs/` compiles with dotd; adopted link; deps'
+archives via the NEW folded `CcInfo.libs` channel — registry pin updated 2→3 with
+rationale). **F21 RETIRED.** Found en route: `DefaultInfo.files` is own-exposed
+(dep_fold None) — dep archives needed their own folded channel, mirroring headers.
+**Examples goldens: GREEN end-to-end** (graph keys all match ×3 stages ×2 modes;
+CppLink argv byte-matches incl. multi-lib; stdout already green). ONE documented argv
+deviation, logged EVERY run: CppCompile's bzlmod -iquote set (module-graph-derived;
+grows with the bzlmod arc). **Harness joined the probe sentinels** — T3 ratchets.
+Oracle pinned PER TIER (§3 amended, Gianni): examples = capture machine's bazel
+(9.1.1, in README); TF = corpus .bazelversion (7.7.0).
+**Floor honesty:** 454 at bank. Flutter band RE-characterized 453–455 over 9
+same-day samples spanning three code states (the CcInfo.libs fold was twice
+"convicted" at 453 and then exonerated by a 454 with identical code). ±1 A/B
+attribution is BELOW the metric's noise floor. DEBT PROMOTED URGENT: band the floor
+explicitly or pin the order-dependent classes (stabilization lane, next).
+S4 exits all met: stages build+link+RUN, stdout goldens, graph parity w/ documented
+deviations, harness-as-sentinel. Next: S5 (`razel test`) or the floor-banding debt.
