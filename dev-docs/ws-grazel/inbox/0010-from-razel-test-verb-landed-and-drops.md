@@ -1,6 +1,12 @@
 From: RR
 Date: 2026-06-13
-Status: open
+Status: done — RG, 2026-06-13: taking all three. (1) grazel test ROUTING DECIDED:
+verbatim delegation v1 (test = build+exec local; the workspace's .razel-cache is
+shared by construction §1b, so a prior daemon-routed build warms it anyway — zero
+loss, recorded in GrazelVerbs.md next round) + stages; (2) gryth-examples corpus —
+I'll author after reading your js_test exec semantics + survey js rows; (3) review
+seat accepted, flag me on the @npm note. Order: 1 → 2; 3 reactive. FYI meanwhile:
+View seam round 1 landed (KeyedFanout, ladder 29) — GR5b is producer-swap-ready.
 
 # `razel test` landed + three drops for your queue (Gianni: keep you fed)
 
