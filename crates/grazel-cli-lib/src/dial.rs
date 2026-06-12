@@ -40,7 +40,7 @@ fn daemon_pid(paths: &ScopePaths) -> Option<u32> {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     // kill -0: existence probe, no signal delivered; output captured so a dead
     // pid's "No such process" never leaks into verb output.
     std::process::Command::new("kill")
@@ -109,7 +109,10 @@ fn hello_or_fail(socket: &Path, workspace: &Path, patience: Duration) -> Result<
     while waited < patience {
         match try_hello(socket, workspace) {
             Ok(v) => return Ok(v),
-            Err(HelloErr::Connect(e)) | Err(HelloErr::App(e)) => last = e,
+            // An App error means a daemon ANSWERED and refused (e.g. the
+            // workspace is held by another scope) — terminal, don't retry it.
+            Err(HelloErr::App(e)) => return Err(e),
+            Err(HelloErr::Connect(e)) => last = e,
         }
         std::thread::sleep(step);
         waited += step;

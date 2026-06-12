@@ -48,6 +48,24 @@ pub fn read_rc_scope(workspace: &Path) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// §1e config arrow: razel must never become grazel-aware, so a grazel key in
+/// `.razelrc` is an ERROR pointing at the right file — not a silently-read value.
+fn check_razelrc(workspace: &Path) -> Result<(), String> {
+    let rc = workspace.join(".razelrc");
+    let Ok(text) = std::fs::read_to_string(&rc) else {
+        return Ok(());
+    };
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("service_scope=") {
+            return Err(format!(
+                "{}: grazel key `service_scope` in .razelrc — grazel config belongs in .grazelrc (§1e)",
+                rc.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the scope per the §1e chain. `flag`/`env` are the already-extracted
 /// `--scope=` and `GRAZEL_SCOPE` values; `workspace` is where `.grazelrc` lives.
 pub fn resolve(
@@ -55,6 +73,7 @@ pub fn resolve(
     env: Option<&str>,
     workspace: &Path,
 ) -> Result<String, String> {
+    check_razelrc(workspace)?;
     let chosen = match (flag, env) {
         (Some(f), _) => f.to_string(),
         (None, Some(e)) => e.to_string(),

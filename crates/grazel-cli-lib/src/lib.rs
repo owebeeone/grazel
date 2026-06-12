@@ -8,6 +8,7 @@
 
 pub mod daemon;
 pub mod dial;
+pub mod outlock;
 pub mod paths;
 pub mod scope;
 pub mod wstest;
@@ -37,6 +38,7 @@ struct GrazelFlags {
     workspace: Option<PathBuf>,
     stage: Option<String>,
     idle_timeout: Option<u64>,
+    member_idle_timeout: Option<u64>,
     no_autostart: bool,
 }
 
@@ -52,6 +54,8 @@ fn split_args(args: &[String]) -> (GrazelFlags, Vec<String>) {
             flags.stage = Some(v.to_string());
         } else if let Some(v) = a.strip_prefix("--idle-timeout=") {
             flags.idle_timeout = v.parse().ok();
+        } else if let Some(v) = a.strip_prefix("--member-idle-timeout=") {
+            flags.member_idle_timeout = v.parse().ok();
         } else if a == "--no_autostart" || a == "--no-autostart" {
             flags.no_autostart = true;
         } else {
@@ -82,6 +86,9 @@ fn grazel_verb(args: &[String]) -> ExitCode {
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+    // Canonical roots everywhere (member identity, locks): /var vs /private/var
+    // on macOS must not look like two workspaces.
+    let workspace = workspace.canonicalize().unwrap_or(workspace);
 
     let verbs: Vec<&str> = rest.iter().map(String::as_str).collect();
     let result: Result<ExitCode, String> = match verbs.as_slice() {
@@ -104,13 +111,15 @@ fn grazel_verb(args: &[String]) -> ExitCode {
             .and_then(|p| {
                 daemon::run(daemon::ServeOpts {
                     paths: p,
-                    workspace: workspace.clone(),
                     // grazeld runs INDEFINITELY by default (Gianni, 2026-06-12):
                     // it's the long-lived scope service (razeld keeps Bazel's
                     // idle-out posture; that's razel's lane). Proper service
                     // management (launchd/systemd) is the eventual home — debt D8.
                     // --idle-timeout stays as an opt-in (ws-test exercises it).
                     idle_timeout: flags.idle_timeout.map(Duration::from_secs),
+                    member_idle_timeout: Duration::from_secs(
+                        flags.member_idle_timeout.unwrap_or(30 * 60),
+                    ),
                 })
             })
             .map(|()| ExitCode::SUCCESS),

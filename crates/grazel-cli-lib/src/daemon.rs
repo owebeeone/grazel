@@ -1,21 +1,26 @@
 //! grazeld = `grazel` in daemon mode (§1d one-binary rule), riding the
-//! razel-daemon LIB (the allowed dependency direction; GrazelWorkstream GR1).
+//! razel-daemon LIB (the allowed dependency direction; GR1 + GR2).
 //!
-//! The serve loop is grazel's own (hello / shutdown / idle-out are scope-daemon
-//! concerns razel doesn't have); everything razel-shaped (`version`, `build`,
-//! `affected`) delegates to `razel_daemon::rpc::Server::dispatch`, same envelope:
-//! 4-byte BE length prefix + CBOR map `{1: method, 2: args}` per request,
-//! `{1: ok, 2: payload, 3: error}` per response. `build.subscribe` through
-//! grazeld is a recorded debt until GR3 wires streaming over the scope socket.
+//! A scope daemon serves a workspace COLLECTION (GrazelScopes.md): a member map
+//! `root → handle`, each handle a `razel_daemon::rpc::Server` bound to that root
+//! with engine state in the workspace's own `.razel-cache/` (§1b: output bases
+//! are not keyed by distribution or scope). Members are PINNED (scope.rc,
+//! opened at start, never idle) or DYNAMIC (opened by hello, idle out on the
+//! member sweep). The daemon itself runs indefinitely unless `--idle-timeout`.
+//!
+//! Envelope: 4-byte BE length prefix + CBOR map `{1: method, 2: args}` request,
+//! `{1: ok, 2: payload, 3: error}` response — razel-daemon's, verbatim.
+//! `build.subscribe` through grazeld is debt D2 until GR3 wires streaming.
 
+use crate::outlock;
 use crate::paths::ScopePaths;
 use razel_daemon::{rpc, transport};
 use razel_wire::{Cbor, Hello, VersionInfo, decode, encode};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -32,9 +37,11 @@ pub fn advertised_protocol() -> i64 {
 
 pub struct ServeOpts {
     pub paths: ScopePaths,
-    pub workspace: PathBuf,
-    /// Exit after this long with no connection activity. None = no idle-out.
+    /// Exit after this long with no connection activity. None (the default) =
+    /// grazeld runs indefinitely — it's the long-lived scope service (debt D8).
     pub idle_timeout: Option<Duration>,
+    /// Close DYNAMIC members idle this long. Memberships idle; the daemon doesn't.
+    pub member_idle_timeout: Duration,
 }
 
 // --- framing (the razel-daemon envelope; its helpers are private) ------------
@@ -63,20 +70,94 @@ fn err(msg: &str) -> Cbor {
     Cbor::Map(vec![(1, Cbor::Bool(false)), (3, Cbor::Text(msg.into()))])
 }
 
-// --- the daemon ---------------------------------------------------------------
+/// FNV-1a 64 — member filenames (short, stable, no extra dep).
+fn digest16(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+// --- members ------------------------------------------------------------------
+
+struct Member {
+    server: rpc::Server,
+    pinned: bool,
+    last_used: Instant,
+}
 
 struct State {
     paths: ScopePaths,
-    inner: rpc::Server,
     advertised: i64,
     active: AtomicUsize,
     last_done: Mutex<Instant>,
+    members: Mutex<HashMap<PathBuf, Member>>,
 }
 
 impl State {
-    /// Remove the rendezvous artifacts and exit — the one way out, shared by
-    /// `shutdown` and the idle watchdog, so a live socket always means a live pid.
+    fn member_file(&self, root: &Path) -> PathBuf {
+        self.paths
+            .state_dir
+            .join("members")
+            .join(digest16(&root.display().to_string()))
+    }
+
+    /// Open (or touch) a member: output-base lock first — the §1b single-writer
+    /// claim — then the handle and the observability file (GrazelScopes.md).
+    fn open_member(&self, root: &Path, pinned: bool) -> Result<(), String> {
+        let root = root
+            .canonicalize()
+            .map_err(|e| format!("workspace {}: {e}", root.display()))?;
+        let mut members = self.members.lock().unwrap();
+        if let Some(m) = members.get_mut(&root) {
+            m.last_used = Instant::now();
+            return Ok(());
+        }
+        outlock::acquire(&root, &self.paths.scope)?;
+        let mfile = self.member_file(&root);
+        std::fs::create_dir_all(mfile.parent().unwrap()).map_err(|e| e.to_string())?;
+        let kind = if pinned { "pinned" } else { "dynamic" };
+        std::fs::write(&mfile, format!("{kind} {}\n", root.display())).map_err(|e| e.to_string())?;
+        members.insert(
+            root.clone(),
+            Member {
+                server: rpc::Server::new(root.clone(), root.join(".razel-cache")),
+                pinned,
+                last_used: Instant::now(),
+            },
+        );
+        Ok(())
+    }
+
+    fn close_member(&self, members: &mut HashMap<PathBuf, Member>, root: &Path) {
+        members.remove(root);
+        outlock::release(root);
+        let _ = std::fs::remove_file(self.member_file(root));
+    }
+
+    /// Close dynamic members idle past `timeout`.
+    fn sweep_members(&self, timeout: Duration) {
+        let mut members = self.members.lock().unwrap();
+        let idle: Vec<PathBuf> = members
+            .iter()
+            .filter(|(_, m)| !m.pinned && m.last_used.elapsed() > timeout)
+            .map(|(root, _)| root.clone())
+            .collect();
+        for root in idle {
+            self.close_member(&mut members, &root);
+        }
+    }
+
+    /// Remove every claim and rendezvous artifact, then exit — the one way out
+    /// (shutdown verb + idle watchdog), so a live socket always means a live pid.
     fn cleanup_and_exit(&self) -> ! {
+        let mut members = self.members.lock().unwrap();
+        let roots: Vec<PathBuf> = members.keys().cloned().collect();
+        for root in roots {
+            self.close_member(&mut members, &root);
+        }
         let _ = std::fs::remove_file(&self.paths.socket);
         let _ = std::fs::remove_file(&self.paths.daemon_json);
         std::process::exit(0)
@@ -89,7 +170,14 @@ impl State {
         };
         match method.as_str() {
             "hello" => {
-                let _hello = Hello::from_cbor(req.get(2)); // workspace_root: GR2 routes on it
+                let hello = Hello::from_cbor(req.get(2));
+                // Protocol check FIRST: a mismatched client is about to restart
+                // us (§1e) — it must not cause lock churn. The client compares.
+                if hello.protocol == self.advertised
+                    && let Err(e) = self.open_member(Path::new(&hello.workspace_root), false)
+                {
+                    return write_frame(conn, &encode(&err(&e)));
+                }
                 let v = VersionInfo {
                     version: BUILD_VERSION.to_string(),
                     protocol: self.advertised,
@@ -104,12 +192,31 @@ impl State {
                 conn,
                 &encode(&err("build.subscribe via grazeld arrives with GR3")),
             ),
-            _ => write_frame(conn, &encode(&self.inner.dispatch(&req))),
+            _ => {
+                // Interim routing (debt D9): the wire's requests don't carry a
+                // workspace until GR3's invocation envelope — route to the sole
+                // member, refuse ambiguity rather than guess.
+                let mut members = self.members.lock().unwrap();
+                let resp = match members.len() {
+                    0 => err("no workspace member: hello first"),
+                    1 => {
+                        let m = members.values_mut().next().expect("len checked");
+                        m.last_used = Instant::now();
+                        m.server.dispatch(&req)
+                    }
+                    n => err(&format!(
+                        "scope {:?} serves {n} workspaces; per-invocation routing arrives with GR3",
+                        self.paths.scope
+                    )),
+                };
+                drop(members);
+                write_frame(conn, &encode(&resp))
+            }
         }
     }
 }
 
-/// Create the scope dirs (sockets dir user-only), record daemon.json, serve.
+/// Create the scope dirs, claim pinned workspaces, record daemon.json, serve.
 /// Blocks for the daemon's lifetime; exits the PROCESS on shutdown/idle-out.
 pub fn run(opts: ServeOpts) -> Result<(), String> {
     let paths = &opts.paths;
@@ -135,16 +242,38 @@ pub fn run(opts: ServeOpts) -> Result<(), String> {
     std::fs::write(&paths.daemon_json, json)
         .map_err(|e| format!("{}: {e}", paths.daemon_json.display()))?;
 
-    let listener =
-        transport::bind(&paths.socket).map_err(|e| format!("bind {}: {e}", paths.socket.display()))?;
     let state = Arc::new(State {
         paths: paths.clone(),
-        inner: rpc::Server::new(opts.workspace, paths.state_dir.join("cache")),
         advertised,
         active: AtomicUsize::new(0),
         last_done: Mutex::new(Instant::now()),
+        members: Mutex::new(HashMap::new()),
     });
 
+    // Pinned workspaces (scope.rc `pinned=` lines): claimed AT START, loud on
+    // failure — a scope whose pin is held elsewhere must not come up half-bound.
+    let scope_rc = paths.state_dir.join("scope.rc");
+    if let Ok(text) = std::fs::read_to_string(&scope_rc) {
+        for line in text.lines().map(str::trim) {
+            if let Some(root) = line.strip_prefix("pinned=") {
+                state
+                    .open_member(Path::new(root.trim()), true)
+                    .map_err(|e| format!("pinned workspace: {e}"))?;
+            }
+        }
+    }
+
+    let listener =
+        transport::bind(&paths.socket).map_err(|e| format!("bind {}: {e}", paths.socket.display()))?;
+
+    {
+        let state = state.clone();
+        let member_idle = opts.member_idle_timeout;
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(200));
+            state.sweep_members(member_idle);
+        });
+    }
     if let Some(timeout) = opts.idle_timeout {
         let state = state.clone();
         std::thread::spawn(move || loop {

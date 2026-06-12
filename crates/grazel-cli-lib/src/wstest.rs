@@ -38,6 +38,12 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "stale-socket-recovery", run: stale_socket_recovery },
         Stage { name: "graceful-shutdown", run: graceful_shutdown },
         Stage { name: "idle-out", run: idle_out },
+        Stage { name: "grazel-key-in-razelrc-errors", run: grazel_key_in_razelrc_errors },
+        Stage { name: "scope-routing", run: scope_routing },
+        Stage { name: "pinned-membership", run: pinned_membership },
+        Stage { name: "dynamic-membership-idle-out", run: dynamic_membership_idle_out },
+        Stage { name: "double-claim-fails-loud", run: double_claim_fails_loud },
+        Stage { name: "two-scopes-concurrent", run: two_scopes_concurrent },
     ]
 }
 
@@ -182,13 +188,12 @@ fn uds_namespace(ctx: &StageCtx) -> Result<(), String> {
 // --- GR1: the dial-procedure stages (§1e) ------------------------------------
 
 /// `grazel daemon ping` with a controlled env; parses key=value output.
-/// `fake_protocol` plants GRAZEL_FAKE_WIRE_PROTOCOL (the documented test seam —
-/// only an already-running daemon's ADVERTISED protocol is affected).
+/// `scope: None` exercises rc/default resolution instead of the flag.
 fn ping(
     ctx: &StageCtx,
     home: &Path,
     ws: &Path,
-    scope: &str,
+    scope: Option<&str>,
     no_autostart: bool,
 ) -> Result<HashMap<String, String>, String> {
     let mut cmd = Command::new(&ctx.grazel_bin);
@@ -196,14 +201,17 @@ fn ping(
         .env_remove("GRAZEL_SCOPE")
         .env_remove("GRAZEL_FAKE_WIRE_PROTOCOL")
         .env("GRAZEL_HOME", home)
-        .args(["daemon", "ping", &format!("--scope={scope}")]);
+        .args(["daemon", "ping"]);
+    if let Some(s) = scope {
+        cmd.arg(format!("--scope={s}"));
+    }
     if no_autostart {
         cmd.arg("--no_autostart");
     }
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "ping {scope} failed ({}): {}",
+            "ping {scope:?} failed ({}): {}",
             out.status,
             String::from_utf8_lossy(&out.stderr)
         ));
@@ -253,10 +261,10 @@ fn eventually(what: &str, mut f: impl FnMut() -> bool) -> Result<(), String> {
 fn cold_autostart(ctx: &StageCtx) -> Result<(), String> {
     let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
     std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
-    if ping(ctx, &home, &ws, "cold", true).is_ok() {
+    if ping(ctx, &home, &ws, Some("cold"), true).is_ok() {
         return Err("--no_autostart dialed a daemon that cannot exist".into());
     }
-    let m = ping(ctx, &home, &ws, "cold", false)?;
+    let m = ping(ctx, &home, &ws, Some("cold"), false)?;
     let result = (|| {
         let pid = pid_of(&m)?;
         if !pid_alive(pid) {
@@ -277,8 +285,8 @@ fn warm_dial(ctx: &StageCtx) -> Result<(), String> {
     let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
     std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
     let result = (|| {
-        let first = pid_of(&ping(ctx, &home, &ws, "warm", false)?)?;
-        let second = pid_of(&ping(ctx, &home, &ws, "warm", false)?)?;
+        let first = pid_of(&ping(ctx, &home, &ws, Some("warm"), false)?)?;
+        let second = pid_of(&ping(ctx, &home, &ws, Some("warm"), false)?)?;
         if first != second {
             return Err(format!("warm dial respawned: pid {first} → {second}"));
         }
@@ -306,7 +314,7 @@ fn version_handshake(ctx: &StageCtx) -> Result<(), String> {
     let _reap = Reap(vec![mismatched]);
     let result = (|| {
         eventually("mismatched daemon up", || paths.socket.exists())?;
-        let m = ping(ctx, &home, &ws, "hs", false)?;
+        let m = ping(ctx, &home, &ws, Some("hs"), false)?;
         if m.get("protocol").map(String::as_str) != Some("1") {
             return Err(format!("post-handshake daemon still wrong: {m:?}"));
         }
@@ -341,7 +349,7 @@ fn stale_socket_recovery(ctx: &StageCtx) -> Result<(), String> {
         return Err("SIGKILL removed the socket?! stage premise broken".into());
     }
     let result = (|| {
-        let new_pid = pid_of(&ping(ctx, &home, &ws, "stale", false)?)?;
+        let new_pid = pid_of(&ping(ctx, &home, &ws, Some("stale"), false)?)?;
         if new_pid == old_pid {
             return Err("dial returned the killed daemon's pid".into());
         }
@@ -355,7 +363,7 @@ fn stale_socket_recovery(ctx: &StageCtx) -> Result<(), String> {
 fn graceful_shutdown(ctx: &StageCtx) -> Result<(), String> {
     let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
     std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
-    let pid = pid_of(&ping(ctx, &home, &ws, "bye", false)?)?;
+    let pid = pid_of(&ping(ctx, &home, &ws, Some("bye"), false)?)?;
     let paths = ScopePaths::new(&home, "bye")?;
     let out = Command::new(&ctx.grazel_bin)
         .current_dir(&ws)
@@ -380,6 +388,212 @@ fn graceful_shutdown(ctx: &StageCtx) -> Result<(), String> {
         return Err("second `daemon stop` errored on a stopped scope".into());
     }
     Ok(())
+}
+
+// --- GR2: service scopes for real (GrazelScopes.md) ---------------------------
+
+/// Member files under `<state>/members/` — contents are `<kind> <root>` lines.
+fn members_of(home: &Path, scope: &str) -> Result<Vec<String>, String> {
+    let dir = ScopePaths::new(home, scope)?.state_dir.join("members");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(vec![]);
+    };
+    Ok(entries
+        .filter_map(|e| std::fs::read_to_string(e.ok()?.path()).ok())
+        .map(|s| s.trim().to_string())
+        .collect())
+}
+
+fn spawn_daemon(ctx: &StageCtx, home: &Path, ws: &Path, args: &[&str]) -> Result<Child, String> {
+    Command::new(&ctx.grazel_bin)
+        .current_dir(ws)
+        .env("GRAZEL_HOME", home)
+        .env_remove("GRAZEL_SCOPE")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())
+}
+
+/// §1e config arrow: a grazel key in `.razelrc` is an ERROR (razel must never
+/// become grazel-aware).
+fn grazel_key_in_razelrc_errors(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join(".razelrc"), "service_scope=oops\n").map_err(|e| e.to_string())?;
+    let out = Command::new(&ctx.grazel_bin)
+        .current_dir(&ws)
+        .env("GRAZEL_HOME", &home)
+        .arg("scope")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Err("service_scope in .razelrc was accepted".into());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !stderr.contains(".razelrc") || !stderr.contains(".grazelrc") {
+        return Err(format!("error doesn't point from .razelrc to .grazelrc: {stderr}"));
+    }
+    Ok(())
+}
+
+/// An rc-bound workspace's hello lands its membership in the RIGHT scope's state.
+fn scope_routing(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join(".grazelrc"), "service_scope=routed\n").map_err(|e| e.to_string())?;
+    let result = (|| {
+        let m = ping(ctx, &home, &ws, None, false)?; // rc decides, not flag/env
+        if m.get("scope").map(String::as_str) != Some("routed") {
+            return Err(format!("rc binding ignored: {m:?}"));
+        }
+        let routed = members_of(&home, "routed")?;
+        // Member roots are canonical (daemon-side); canonicalize the expectation.
+        let ws_str = ws.canonicalize().map_err(|e| e.to_string())?.display().to_string();
+        if !routed.iter().any(|l| l.contains(&ws_str)) {
+            return Err(format!("workspace not a member of scope routed: {routed:?}"));
+        }
+        if !members_of(&home, "default")?.is_empty() {
+            return Err("workspace leaked into the default scope".into());
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "routed");
+    result
+}
+
+/// scope.rc-pinned workspaces are claimed and opened AT DAEMON START — no hello.
+fn pinned_membership(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    let paths = ScopePaths::new(&home, "pin")?;
+    std::fs::create_dir_all(&paths.state_dir).map_err(|e| e.to_string())?;
+    std::fs::write(paths.state_dir.join("scope.rc"), format!("pinned={}\n", ws.display()))
+        .map_err(|e| e.to_string())?;
+    let child = spawn_daemon(ctx, &home, &ws, &["daemon", "run", "--scope=pin"])?;
+    let _reap = Reap(vec![child]);
+    let result = (|| {
+        eventually("pin daemon up", || paths.socket.exists())?;
+        let members = members_of(&home, "pin")?;
+        let want = format!("pinned {}", ws.canonicalize().map_err(|e| e.to_string())?.display());
+        if !members.iter().any(|l| l == &want) {
+            return Err(format!("no pinned member {want:?}: {members:?}"));
+        }
+        if !ws.join(".razel-cache/workspace.lock").is_file() {
+            return Err("pinned open took no output-base lock".into());
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "pin");
+    result
+}
+
+/// A dynamic member idles out (lock + member file released) while the DAEMON
+/// stays up — memberships idle, grazeld doesn't.
+fn dynamic_membership_idle_out(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    let paths = ScopePaths::new(&home, "dyn")?;
+    let child = spawn_daemon(
+        ctx,
+        &home,
+        &ws,
+        &["daemon", "run", "--scope=dyn", "--member-idle-timeout=1"],
+    )?;
+    let _reap = Reap(vec![child]);
+    let result = (|| {
+        eventually("dyn daemon up", || paths.socket.exists())?;
+        let pid = pid_of(&ping(ctx, &home, &ws, Some("dyn"), false)?)?;
+        let lock = ws.join(".razel-cache/workspace.lock");
+        if members_of(&home, "dyn")?.is_empty() || !lock.is_file() {
+            return Err("hello opened no dynamic member/lock".into());
+        }
+        eventually("member idle-out", || {
+            members_of(&home, "dyn").is_ok_and(|m| m.is_empty()) && !lock.exists()
+        })?;
+        if !pid_alive(pid) {
+            return Err("daemon died with its member — only the MEMBERSHIP idles".into());
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "dyn");
+    result
+}
+
+/// One scope per workspace, enforced: the second scope's claim is refused LOUD,
+/// naming the holder (§1b cross-daemon single-writer).
+fn double_claim_fails_loud(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let first = ping(ctx, &home, &ws, Some("left"), false)?;
+        let holder_pid = pid_of(&first)?;
+        let second = ping(ctx, &home, &ws, Some("right"), false);
+        let Err(e) = second else {
+            return Err("second scope claimed an already-held workspace".into());
+        };
+        if !e.contains("held by") || !e.contains("left") || !e.contains(&holder_pid.to_string()) {
+            return Err(format!("refusal doesn't name the holder (scope left, pid {holder_pid}): {e}"));
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "left");
+    stop_scope(ctx, &home, &ws, "right");
+    result
+}
+
+/// The GR2 exit: two fixture workspaces in different scopes BUILD concurrently —
+/// real `build` wire calls racing into two daemons.
+fn two_scopes_concurrent(ctx: &StageCtx) -> Result<(), String> {
+    const BUILD: &str = r#"
+def _impl(ctx):
+    out = ctx.attr.name + ".o"
+    ctx.actions.run(executable="/usr/bin/cc", outputs=[out], inputs=[ctx.attr.src],
+                    arguments=["-c", ctx.attr.src, "-o", out])
+    return [DefaultInfo(files=[out])]
+cc_obj = rule(implementation=_impl, attrs={"src":1})
+cc_obj(name="widget", src="widget.c")
+"#;
+    let home = ctx.tmp.join("home");
+    let mut sockets = vec![];
+    for scope in ["ca", "cb"] {
+        let ws = ctx.tmp.join(format!("ws-{scope}"));
+        std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+        std::fs::write(ws.join("BUILD"), BUILD).map_err(|e| e.to_string())?;
+        std::fs::write(ws.join("widget.c"), "int answer(void) { return 42; }\n")
+            .map_err(|e| e.to_string())?;
+        ping(ctx, &home, &ws, Some(scope), false)?; // autostart + membership
+        sockets.push(ScopePaths::new(&home, scope)?.socket);
+    }
+    let result = (|| {
+        let builds: Vec<_> = sockets
+            .iter()
+            .map(|s| {
+                let s = s.clone();
+                std::thread::spawn(move || -> Result<(), String> {
+                    let resp = razel_daemon::rpc::call(&s, &razel_daemon::rpc::req_build("widget"))
+                        .map_err(|e| e.to_string())?;
+                    let r = razel_wire::BuildResult::from_cbor(
+                        &razel_daemon::rpc::payload(&resp)?,
+                    );
+                    if r.status != razel_wire::BuildStatus::Built {
+                        return Err(format!("widget not Built: {:?} {:?}", r.status, r.message));
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        for (i, b) in builds.into_iter().enumerate() {
+            b.join().map_err(|_| "build thread panicked".to_string())?
+                .map_err(|e| format!("scope {}: {e}", ["ca", "cb"][i]))?;
+        }
+        Ok(())
+    })();
+    for scope in ["ca", "cb"] {
+        stop_scope(ctx, &home, &ctx.tmp.join(format!("ws-{scope}")), scope);
+    }
+    result
 }
 
 /// With OPT-IN `--idle-timeout`, an idle daemon times out and cleans up after
@@ -416,13 +630,14 @@ impl Drop for Reap {
 }
 
 /// Two scopes ⇒ two daemons on two sockets, both answering the hello — the §1e
-/// isolation unit, live. Graceful shutdown is a later GR1 rung; SIGKILL here.
+/// isolation unit, live. DISTINCT workspaces per scope: one scope per workspace
+/// is the rule the output-base lock enforces (GR2). SIGKILL cleanup is fine here.
 fn two_scopes_hello(ctx: &StageCtx) -> Result<(), String> {
-    let ws = ctx.tmp.join("ws");
     let home = ctx.tmp.join("home");
-    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
     let mut reap = Reap(vec![]);
     for scope in ["a", "b"] {
+        let ws = ctx.tmp.join(format!("ws-{scope}"));
+        std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
         let child = Command::new(&ctx.grazel_bin)
             .current_dir(&ws)
             .env("GRAZEL_HOME", &home)
@@ -435,6 +650,7 @@ fn two_scopes_hello(ctx: &StageCtx) -> Result<(), String> {
         reap.0.push(child);
     }
     for (i, scope) in ["a", "b"].into_iter().enumerate() {
+        let ws = ctx.tmp.join(format!("ws-{scope}"));
         let paths = ScopePaths::new(&home, scope)?;
         eventually("daemon socket", || paths.socket.exists())?;
         let v = crate::dial::hello_once(&paths.socket, &ws)
