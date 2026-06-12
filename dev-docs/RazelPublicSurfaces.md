@@ -130,6 +130,19 @@ rather than by porting:
 - Strict-mode goldens (T3) run against BOTH binaries' build verbs — cheap, same lib, and
   it keeps the "grazel is still boring bazel underneath" claim tested rather than assumed.
 
+**Development topology (Gianni, 2026-06-12): two working TREES, one crate arrow.**
+razel is cloned to a sibling `razel-grazel/` tree where a separate agent builds out the
+grazel components (the `grazel-*` crates: bin, node/iroh, scope daemon, HTTP/glade
+edge); the `razel/` tree continues everything truly razel/bazel-specific. The crate
+dependency arrow becomes a LABOR arrow: **the grazel tree never modifies `razel-*`
+crates** — a needed seam change is a request to the razel side, landed there and pulled.
+With that rule the two trees' file sets are disjoint by construction, so cross-pulls
+are routine and the conflict surface is confined to the declared seams (the razel-cli
+lib API and the razel-wire IR — IR changes land razel-side, since both trees consume
+the generated types). Sequencing consequence: **S0 lands in the razel tree FIRST; the
+grazel clone starts from the post-S0 state** — the grazel agent begins at a cut seam,
+not cutting one.
+
 ## §1e Finding the daemon: SERVICE SCOPES (discovery + configuration — nailed)
 
 **A workspace does not pick a daemon; it names a SCOPE (Gianni, 2026-06-12).** A scope

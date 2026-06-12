@@ -270,6 +270,12 @@ ALREADY a lib, and razel-cli is a 750-line main over the bazel_flags lib):
 Exit: both bins build; a fixture test asserts `grazel build`/`query` output is
 byte-identical to `razel`'s (tested, not assumed from the shared lib); the deny gate is
 RED-TESTED (a deliberate violation fails); suite + TF floor green.
+S0 is also the FORK POINT for the two-tree split (PublicSurfaces §1d): `razel-grazel/`
+is cloned from the post-S0 state and a separate agent builds the grazel components
+there (`grazel-*` crates only — that tree never modifies `razel-*`; seam changes are
+requests back to this tree). This tree keeps S1/S2/S4–S6 and the razel side of S3
+(daemon mode + services); grazel's node/HTTP/scope work proceeds in razel-grazel
+against the S0 seam.
 
 **S1 (G1) — E-mode core.**
 Scope: boundary walk-up (`MODULE.razel` joins `MODULE.bazel`/`REPO.bazel`/`WORKSPACE[.bazel]`);
