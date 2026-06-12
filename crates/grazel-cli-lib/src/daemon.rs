@@ -42,6 +42,9 @@ pub struct ServeOpts {
     pub idle_timeout: Option<Duration>,
     /// Close DYNAMIC members idle this long. Memberships idle; the daemon doesn't.
     pub member_idle_timeout: Duration,
+    /// `--http-bind` override; must be loopback (GR4: localhost-only). None =
+    /// `127.0.0.1:0`, the chosen port recorded in daemon.json.
+    pub http_bind: Option<String>,
 }
 
 // --- framing (the razel-daemon envelope; its helpers are private) ------------
@@ -88,7 +91,7 @@ struct Member {
     last_used: Instant,
 }
 
-struct State {
+pub(crate) struct State {
     paths: ScopePaths,
     advertised: i64,
     active: AtomicUsize,
@@ -163,10 +166,12 @@ impl State {
         std::process::exit(0)
     }
 
-    fn handle(&self, conn: &mut dyn transport::Conn) -> std::io::Result<()> {
-        let req = decode(&read_frame(conn)?);
+    /// One-shot dispatch, TRANSPORT-AGNOSTIC — UDS frames and HTTP bodies carry
+    /// the same request map and get the same response envelope, byte-for-byte
+    /// (GR4's transport-equivalence contract). `.1` = shut down after replying.
+    pub(crate) fn respond(&self, req: &Cbor) -> (Cbor, bool) {
         let Cbor::Text(method) = req.get(1) else {
-            return write_frame(conn, &encode(&err("malformed request: missing method")));
+            return (err("malformed request: missing method"), false);
         };
         match method.as_str() {
             "hello" => {
@@ -176,22 +181,16 @@ impl State {
                 if hello.protocol == self.advertised
                     && let Err(e) = self.open_member(Path::new(&hello.workspace_root), false)
                 {
-                    return write_frame(conn, &encode(&err(&e)));
+                    return (err(&e), false);
                 }
                 let v = VersionInfo {
                     version: BUILD_VERSION.to_string(),
                     protocol: self.advertised,
                 };
-                write_frame(conn, &encode(&ok(v.to_cbor())))
+                (ok(v.to_cbor()), false)
             }
-            "shutdown" => {
-                write_frame(conn, &encode(&ok(Cbor::Null)))?;
-                self.cleanup_and_exit()
-            }
-            "build.subscribe" => write_frame(
-                conn,
-                &encode(&err("build.subscribe via grazeld arrives with GR3")),
-            ),
+            "shutdown" => (ok(Cbor::Null), true),
+            "build.subscribe" => (err("build.subscribe via grazeld arrives with GR3"), false),
             _ => {
                 // Interim routing (debt D9): the wire's requests don't carry a
                 // workspace until GR3's invocation envelope — route to the sole
@@ -202,17 +201,40 @@ impl State {
                     1 => {
                         let m = members.values_mut().next().expect("len checked");
                         m.last_used = Instant::now();
-                        m.server.dispatch(&req)
+                        m.server.dispatch(req)
                     }
                     n => err(&format!(
                         "scope {:?} serves {n} workspaces; per-invocation routing arrives with GR3",
                         self.paths.scope
                     )),
                 };
-                drop(members);
-                write_frame(conn, &encode(&resp))
+                (resp, false)
             }
         }
+    }
+
+    /// Track a serviced request for the idle watchdog — both transports count.
+    pub(crate) fn enter(&self) {
+        self.active.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn leave(&self) {
+        *self.last_done.lock().unwrap() = Instant::now();
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn exit_now(&self) -> ! {
+        self.cleanup_and_exit()
+    }
+
+    fn handle(&self, conn: &mut dyn transport::Conn) -> std::io::Result<()> {
+        let req = decode(&read_frame(conn)?);
+        let (resp, shutdown) = self.respond(&req);
+        write_frame(conn, &encode(&resp))?;
+        if shutdown {
+            self.cleanup_and_exit()
+        }
+        Ok(())
     }
 }
 
@@ -231,10 +253,13 @@ pub fn run(opts: ServeOpts) -> Result<(), String> {
             .map_err(|e| format!("{}: {e}", uds_dir.display()))?;
     }
     let advertised = advertised_protocol();
+    // The HTTP edge binds BEFORE daemon.json so the chosen port is in the record
+    // from the first byte (GR4: per-scope localhost listener, port published).
+    let (http_listener, http_port) = crate::http::bind(opts.http_bind.as_deref())?;
     // daemon.json is a filesystem artifact, not protocol (taut governs the wire,
     // §0); tiny enough to write by hand — the workspace has no JSON dep by policy.
     let json = format!(
-        "{{\"pid\":{},\"version\":\"{}\",\"protocol\":{}}}\n",
+        "{{\"pid\":{},\"version\":\"{}\",\"protocol\":{},\"http_port\":{http_port}}}\n",
         std::process::id(),
         BUILD_VERSION,
         advertised
@@ -266,6 +291,10 @@ pub fn run(opts: ServeOpts) -> Result<(), String> {
     let listener =
         transport::bind(&paths.socket).map_err(|e| format!("bind {}: {e}", paths.socket.display()))?;
 
+    {
+        let state = state.clone();
+        std::thread::spawn(move || crate::http::serve(http_listener, state));
+    }
     {
         let state = state.clone();
         let member_idle = opts.member_idle_timeout;

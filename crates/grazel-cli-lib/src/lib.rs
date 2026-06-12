@@ -8,6 +8,7 @@
 
 pub mod daemon;
 pub mod dial;
+pub mod http;
 pub mod outlock;
 pub mod paths;
 pub mod scope;
@@ -39,6 +40,7 @@ struct GrazelFlags {
     stage: Option<String>,
     idle_timeout: Option<u64>,
     member_idle_timeout: Option<u64>,
+    http_bind: Option<String>,
     no_autostart: bool,
 }
 
@@ -56,6 +58,8 @@ fn split_args(args: &[String]) -> (GrazelFlags, Vec<String>) {
             flags.idle_timeout = v.parse().ok();
         } else if let Some(v) = a.strip_prefix("--member-idle-timeout=") {
             flags.member_idle_timeout = v.parse().ok();
+        } else if let Some(v) = a.strip_prefix("--http-bind=") {
+            flags.http_bind = Some(v.to_string());
         } else if a == "--no_autostart" || a == "--no-autostart" {
             flags.no_autostart = true;
         } else {
@@ -120,6 +124,7 @@ fn grazel_verb(args: &[String]) -> ExitCode {
                     member_idle_timeout: Duration::from_secs(
                         flags.member_idle_timeout.unwrap_or(30 * 60),
                     ),
+                    http_bind: flags.http_bind.clone(),
                 })
             })
             .map(|()| ExitCode::SUCCESS),

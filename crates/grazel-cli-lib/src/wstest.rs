@@ -44,6 +44,8 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "dynamic-membership-idle-out", run: dynamic_membership_idle_out },
         Stage { name: "double-claim-fails-loud", run: double_claim_fails_loud },
         Stage { name: "two-scopes-concurrent", run: two_scopes_concurrent },
+        Stage { name: "http-equivalence", run: http_equivalence },
+        Stage { name: "http-localhost-only", run: http_localhost_only },
     ]
 }
 
@@ -594,6 +596,104 @@ cc_obj(name="widget", src="widget.c")
         stop_scope(ctx, &home, &ctx.tmp.join(format!("ws-{scope}")), scope);
     }
     result
+}
+
+// --- GR4a: the HTTP edge (GrazelHttpEdge.md) -----------------------------------
+
+/// `"http_port":N` out of daemon.json.
+fn http_port_of(home: &Path, scope: &str) -> Result<u16, String> {
+    let dj = ScopePaths::new(home, scope)?.daemon_json;
+    let text = std::fs::read_to_string(&dj).map_err(|e| format!("{}: {e}", dj.display()))?;
+    let digits = text
+        .split("\"http_port\":")
+        .nth(1)
+        .ok_or(format!("no http_port in {}", text.trim()))?;
+    digits[..digits.find(|c: char| !c.is_ascii_digit()).unwrap_or(digits.len())]
+        .parse()
+        .map_err(|e| format!("bad http_port: {e}"))
+}
+
+/// Minimal HTTP/1.1 POST from the stage side (the client mirror of the server's
+/// minimalism — no deps either side).
+fn http_post(port: u16, path: &str, body: &[u8]) -> Result<(u16, Vec<u8>), String> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/cbor\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    s.write_all(body).map_err(|e| e.to_string())?;
+    let mut resp = Vec::new();
+    s.read_to_end(&mut resp).map_err(|e| e.to_string())?;
+    let split = resp
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or("no header/body split in HTTP response")?;
+    let head = String::from_utf8_lossy(&resp[..split]).to_string();
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or(format!("bad status line: {head}"))?;
+    Ok((status, resp[split + 4..].to_vec()))
+}
+
+/// One protocol, two transports: the SAME hello over UDS and HTTP must produce
+/// byte-identical response envelopes (GR4's whole claim).
+fn http_equivalence(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    let result = (|| {
+        ping(ctx, &home, &ws, Some("http"), false)?;
+        let ws_c = ws.canonicalize().map_err(|e| e.to_string())?;
+        let req = crate::daemon::req_hello(&ws_c);
+        let socket = ScopePaths::new(&home, "http")?.socket;
+        let uds_resp =
+            razel_daemon::rpc::call(&socket, &req).map_err(|e| format!("uds hello: {e}"))?;
+        let uds_bytes = razel_wire::encode(&uds_resp);
+        let port = http_port_of(&home, "http")?;
+        let (status, http_bytes) = http_post(port, "/rpc", &razel_wire::encode(&req))?;
+        if status != 200 {
+            return Err(format!("HTTP rpc returned {status}"));
+        }
+        if http_bytes != uds_bytes {
+            return Err(format!(
+                "transport divergence: UDS {} bytes ≠ HTTP {} bytes",
+                uds_bytes.len(),
+                http_bytes.len()
+            ));
+        }
+        let (nf_status, _) = http_post(port, "/definitely-not-rpc", b"")?;
+        if nf_status != 404 {
+            return Err(format!("unknown path got {nf_status}, want 404"));
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "http");
+    result
+}
+
+/// Any non-loopback bind is refused at startup — localhost-only by construction
+/// until the iroh-era auth story exists.
+fn http_localhost_only(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    let out = Command::new(&ctx.grazel_bin)
+        .current_dir(&ws)
+        .env("GRAZEL_HOME", &home)
+        .args(["daemon", "run", "--scope=open", "--http-bind=0.0.0.0:0"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        stop_scope(ctx, &home, &ws, "open");
+        return Err("non-local --http-bind was accepted".into());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !stderr.contains("localhost") && !stderr.contains("127.0.0.1") {
+        return Err(format!("refusal doesn't explain localhost-only: {stderr}"));
+    }
+    Ok(())
 }
 
 /// With OPT-IN `--idle-timeout`, an idle daemon times out and cleans up after

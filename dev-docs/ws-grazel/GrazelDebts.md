@@ -11,4 +11,5 @@
 | D7 | launch lock is create_new + timeout surfacing a crashed launcher's stale lock in the error message; no auto-reap of dead-holder locks (the OUTPUT lock reaps; the launch lock doesn't yet) | GR1 | GR3 |
 | D9 | Interim wire routing: non-hello requests go to the scope's SOLE member; >1 members → refused. GR3's invocation envelope carries workspace identity properly | GR2 | GR3 |
 | D10 | The workspace.lock contract is grazeld↔grazeld only until razeld mirrors it (proposed to razel lane, inbox 0005) — razel-local builds don't take the lock yet | GR2 | razel-side S3+ |
+| D11 | GR4b (WS streams over the HTTP edge) deferred: stream semantics belong to GR3's invocation streams — freezing them now would pre-empt S3. `ws-stream-equivalence` stage lands with GR4b | GR4a | GR4b (post-GR3) |
 | D8 | grazeld runs INDEFINITELY by default (decision: Gianni 2026-06-12 — it's the long-lived scope service; razeld keeps idle-out, razel's lane). Real home is OS service management (launchd/systemd); `--idle-timeout` remains opt-in | GR1 | service-ification arc (post-iroh) |
