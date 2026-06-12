@@ -259,11 +259,15 @@ Exit: tiny-lockfile fixture materializes; integrity mismatch fails loud; offline
 100% cache hits; ACCEPTANCE: a real gryth package.json/lock materializes and
 `node -e "require(...)"` smoke-passes.
 
-**S3 (G3) — js/ts rules + `razel run`.**
+**S3 (G3) — js/ts rules + `razel run` + rc-lite.**
 Scope: razel-native rulepack: `js_binary` (node entry + node_modules dep), `ts_project`-lite
 (one tsc action; inputs srcs+tsconfig+typings, outputs js); the `razel run` CLI verb
 (walk-up root → build → exec, exit code passthrough). Host node/tsc resolved like the cc
-host toolchain (non-hermetic, digest-logged — same posture).
+host toolchain (non-hermetic, digest-logged — same posture). **rc-lite**: the WORKSPACE
+layer only of `.bazelrc` then `.razelrc` (command-scoped lines, no import/--config/system/
+home yet) — enough that gryth's dev loop configures itself from files, not env vars; the
+FULL ladder (all layers, `--config`, `import`, strict interplay) stays S6, which subsumes
+rc-lite rather than reworking it (parse once, layer list grows).
 Exit: hello `js_binary` runs with stdout golden; 2-file `ts_project` compiles with output
 golden; ACCEPTANCE (the spike's heart): a gryth hello server in a razel-native module
 builds and runs via `razel run`.
@@ -283,8 +287,9 @@ Exit: green/red js tests behave; `razel test //...` over a gryth fixture; measur
 wall-clock win on N independent actions; `-j1` outputs byte-equal to serial.
 
 **S6 (B2) — bazelrc + full `--strict_bazel` + discovery hardening.**
-Scope: rc parsing (system → workspace → home → flag; command scoping; `--config`;
-`import`; `.razelrc` layered after); full strict semantics (rc/MODULE.razel skipped,
+Scope: rc parsing grows from S3's rc-lite to the full ladder (system → workspace → home →
+flag; command scoping; `--config`; `import`; `.razelrc` layered after each `.bazelrc`
+layer); full strict semantics (rc/MODULE.razel skipped,
 razel-only flags rejected); walk-up discovery shared by all verbs; `.bazelignore`.
 Exit: flags-parsing-tutorial outcomes match bazel-7.7.0 (golden); TF's `.bazelrc`
 consumed (`--deleted_packages` trims the census denominator — re-baseline the floor,
