@@ -430,3 +430,22 @@ Probe caught it BEFORE commit (round-40 lesson holding).
 **Floor:** suite 65/65, gates OK, sentinels green, TF 455/835 (floor exactly held).
 **Two-agent era begins:** RG (grazel lane) live in razel-grazel — GR0+GR1-slice landed
 same-day; S0 all-clear received (inbox 0002 done), Hello-message seam requested (0003).
+
+## Round delta — razelV3 round 48 (2026-06-12, ws-razel lane — S0 + Hello + S2)
+
+**S0** (`razelV3/s0-seam`): razel-cli → LIBRARY (`pub fn run(&[String]) -> ExitCode`),
+thin bin; grazel-arrow gate in `xtask gates` (no razel-*→grazel-*/iroh dep, ANY dep
+section), red-tested. Coordinated with RG via inbox 0002 before touching razel-cli.
+**Hello** (RG's 0003): taut IR grows `Hello{build_version,protocol,workspace_root}` +
+`Razel.hello → VersionInfo` (ctl); razel-wire regenerated, check green. Server impl = S3.
+**S2** (`razelV3/s2-npm`): `xtask fetch-npm` — package-lock v3 parsed verbatim (literal
+node_modules paths incl. nesting), sha512 CAS twin of fetch_archive
+(`content_addressable/sha512/<hex>/file`), tar strip-components materializer, `link:`
+entries → symlinks, sha1-legacy integrity fails loud. pnpm-vs-npm decision point CLOSED
+by evidence: gryth-ui carries npm lock v3 (261 pkgs, 2 links → sibling grip-*).
+Acceptance: real lock materializes (256 fetched), react/vite require-resolve, grip-core
+imports through the link (54 exports), offline rerun 0 fetched/256 hits.
+Named holes held: no postinstall, no gyp, no auth, no .bin shims.
+**Suite 73/73, gates OK (arrow gate live); engine untouched since s1-emode (TF 455 cited).**
+Two-agent cadence: RG consumed S0 all-clear same-day; inboxes 0001/0002/0003 both
+directions all flipped done. Next: S3 (js/ts shims + server skeleton + run verb + rc-lite).
