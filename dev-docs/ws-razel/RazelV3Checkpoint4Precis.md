@@ -472,3 +472,33 @@ delegate to razel_cli::run; Hello consumed). Gianni via GR1: grazeld default = N
 idle-out (scope service); PublicSurfaces §1 amended accordingly.
 **S3 remaining:** S3c server skeleton (Command/run + invocation stream + hello server
 impl + T0/T1 — RG 0004's batched shapes), S3d rc-lite + guard→ERROR.
+
+## Round delta — razelV3 rounds 50–51 (2026-06-12, ws-razel lane — S3 COMPLETE)
+
+**S3c server live** (b1b2ff8): hello handler (protocol mismatch names both versions;
+root canonicalized/discriminated); `run` → id IMMEDIATELY, build on own thread emitting
+onto the invocation log (`invocation.events`, shape=log: replay+follow); T0 WIRE GOLDENS
+pinned (Hello, InvocationEvent — exact CBOR hex); FIRST T1 TRANSCRIPTS over real UDS
+(handshake 3 ways; id-first/gap-free-seq/progress-before-terminal). Named gaps to RG:
+phase-grained progress (sched_hook counts ride View work), query-snapshot deferred to
+the real snapshot-swap, unbounded log v1.
+**Cross-lane absorbed:** §1b lock made CONCRETE (RG's GR2 contract accepted verbatim;
+ONE impl `razel-daemon::outlock` — create_new, {pid,daemon,scope} JSON line, live holder
+fails loud, dead reaped, RAII release; wired into razeld serve + razel-local builds;
+RG swapped, their D10 closed). `Server::serve_conn` exported (RG 0006 — host-daemon
+per-connection entry, unary+stream; socketpair transcript) → GR3b unblocked; RG's GR3a
+already shows grazel-vs-razel BYTE-IDENTICAL build parity over the same grazeld.
+**S3d** (90d4571): boundary guard WARNING→ERROR (dual ws, unignored E-package; 16
+e_mode tests incl. loads-when-ignored); rc-lite (workspace `.bazelrc`→`.razelrc`,
+command-scoped + `common`, run⊃build⊃common inheritance, CLI wins; S6 grows layers
+around the same parse). Surfaces rule applied en route: @razel_js KILLED same-day for
+@aspect_rules_js/@aspect_rules_ts (no-competing-surfaces, recorded spike §3c).
+**Floor honesty:** 455 measured at bank; FLUTTER BAND 454–455 characterized (A/B:
+stash→455, restore→455 after two 454s; spine stable at 844; guard provably TF-inert —
+order-dependent "previously failed" classes flutter by scheduling). Debt: pin the
+flutter (the order-dependent class fix) or band the floor explicitly.
+**Suite 77/77; gates (arrow incl.) green; sentinels green.**
+**THE GRYTH-BOOTSTRAP BAR (S0–S3) IS CLOSED razel-side** — acceptance ran: gryth hello
+http server, razel-native module, grip-core via S2 node_modules, `razel run`, "up on
+:<port> (grip-core: 54 exports)". Remaining bar work is RG's GR3b. Next razel-side:
+S4 (cc linking + examples goldens harness — track B leads now).
