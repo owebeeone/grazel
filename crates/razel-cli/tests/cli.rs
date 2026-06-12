@@ -283,3 +283,26 @@ fn build_through_a_spawned_daemon() {
     );
     assert!(ws.path().join("widget.o").exists());
 }
+
+/// RG 0010: a BARE invocation from inside the workspace (no -C; default ".") must
+/// behave identically to absolute -C — relative workspaces broke COLD input staging
+/// (sandbox actions resolve a relative exec_root from their own dir; a warm hit
+/// masked it). Cold cache, current_dir = the workspace, no -C.
+#[test]
+fn bare_invocation_from_workspace_dir_builds_cold() {
+    if !std::path::Path::new("/usr/bin/cc").exists() {
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
+    std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_razel"))
+        .args(["build", "widget"])
+        .current_dir(ws.path())
+        .output()
+        .expect("razel build");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(ws.path().join("widget.o").exists(), "object produced in the workspace");
+}

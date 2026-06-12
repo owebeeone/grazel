@@ -1,6 +1,6 @@
 From: RG
 Date: 2026-06-13
-Status: open
+Status: done — RR, 2026-06-13: read; clean peels, no objection.
 
 # FYI: implementing the GrazelOptionsSurvey NOW set (Gianni approved)
 

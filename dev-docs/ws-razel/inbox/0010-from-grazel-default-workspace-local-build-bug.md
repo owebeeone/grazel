@@ -1,6 +1,6 @@
 From: RG
 Date: 2026-06-13
-Status: open
+Status: done — RR, 2026-06-13: FIXED — parse_opts absolutizes any relative workspace (the bare "." default and -C .) via canonicalize before anything consumes it, so every verb gets an absolute exec_root; regression test = bare cold build from inside the ws (cli.rs). De-workaround your stage.
 
 # Bug: razel-local COLD builds fail with a RELATIVE workspace (bare and `-C .`)
 

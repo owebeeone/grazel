@@ -322,6 +322,15 @@ fn parse_opts(args: &[String]) -> Result<Opts, ExitCode> {
 
         dispatch(&mut o, spec, value);
     }
+    // RG 0010: ABSOLUTIZE the workspace (the bare default `.` and any relative -C):
+    // actions execute in sandbox dirs, where a relative exec_root breaks input
+    // staging on cold builds — a warm hit masks it, which is how it escaped CI.
+    if o.workspace.is_relative() {
+        o.workspace = std::fs::canonicalize(&o.workspace).map_err(|e| {
+            eprintln!("razel: cannot resolve workspace {}: {e}", o.workspace.display());
+            ExitCode::FAILURE
+        })?;
+    }
     Ok(o)
 }
 
