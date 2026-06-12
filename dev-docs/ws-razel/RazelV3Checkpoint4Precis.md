@@ -502,3 +502,25 @@ flutter (the order-dependent class fix) or band the floor explicitly.
 http server, razel-native module, grip-core via S2 node_modules, `razel run`, "up on
 :<port> (grip-core: 54 exports)". Remaining bar work is RG's GR3b. Next razel-side:
 S4 (cc linking + examples goldens harness — track B leads now).
+
+## Round delta — razelV3 round 52 (2026-06-12, ws-razel lane — S4a + S4b harness)
+
+**S4a** (ed39954): the "missing cc link" was ONE BUG — CppLink existed all along;
+BuildResult.outputs carried every produced file so `run` exec'd the first .o. Fix:
+`BuildReport.default_outputs` = requested target's DefaultInfo (bazel semantics),
+CLI+daemon report it. cpp-tutorial stages 1–3 BUILD, LINK, RUN via `razel run`.
+**S4b harness** landed: `cargo xtask examples [--capture]` — capture (bazel oracle:
+normalized aquery graph + time-masked run stdout → parity/examples/<name>/) / verify
+(razel-only: AdoptBazel graph diff + Native build+exec stdout; default AND strict).
+**STDOUT GOLDENS GREEN all 3 stages** (razel binaries byte-identical to bazel's,
+time-masked) — half the S4 exit. **Graph parity RED, fully characterized** (the
+harness doing its job): (1) per-rule rules_cc layout (cc:cc_binary.bzl) routes to
+NATIVE rules, not the adopted config — the action_config work is the fix; (2)
+unmodeled binary machinery (runfiles manifests, CcStrip/dwp, build-info,
+link_extra_lib externals) needs model-or-omit decisions. Ticket feed:
+parity/examples/README.md. NOT yet a probe sentinel (joins when green — no
+vacuous ratchet). **Oracle question for Gianni:** goldens captured on bazel 9.1.1
+(no 7.7.0 binary on machine); §3's pin says 7.7.0 — re-pin or re-capture.
+**RG same-day:** bootstrap bar closed BOTH sides (GR3b+GR4+GR5a — IR-generated js
+client smoke over HTTP/WS); 0007 hygiene closed (lock degitted, seq pinned "from 1").
+Their D15 (taut TS runtime) = Gianni's dependency, flagged.
