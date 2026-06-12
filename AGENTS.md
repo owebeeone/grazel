@@ -3,10 +3,15 @@
 Two agents work this codebase in two checkouts of the SAME repo, sharing branch
 `razelv3` through the local bare `../razel.git`:
 
-- **Tree `razel/` → you are the RAZEL agent.** Lane: `dev-docs/ws-razel/`
-  (`RazelReleaseSpike.md` — bazel-compat + working subset). You own `razel-*` crates.
+- **Tree `razel/` → you are the RAZEL agent, designated "RR".** Lane:
+  `dev-docs/ws-razel/` (`RazelReleaseSpike.md` — bazel-compat + working subset).
+  You own `razel-*` crates.
 - **Tree `razel-grazel/` → you are the GRAZEL agent.** Lane: `dev-docs/ws-grazel/`
   (`GrazelWorkstream.md` — gryth backend, GR0–GR5). You own `grazel-*` crates.
+
+Agent designations (Gianni assigns them): sign your inbox notes' `From:` line with
+your designation; the filename sender token stays the lane name (`from-razel` /
+`from-grazel`) so paths stay stable if designations evolve.
 
 Shared DESIGN lives at the `dev-docs/` root — `RazelPublicSurfaces.md` is the contract
 both lanes answer to. **Ownership is absolute:** never edit the other lane's crates.
