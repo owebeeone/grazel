@@ -44,16 +44,23 @@ pub fn acquire(workspace: &Path, daemon: &str, scope: &str) -> Result<OutLock, S
                 let holder_pid = field_u32(&held, "pid");
                 if let Some(pid) = holder_pid {
                     if pid_alive(pid) {
+                        let holder = field_str(&held, "daemon").unwrap_or_else(|| "?".into());
+                        let scope = field_str(&held, "scope").filter(|s| !s.is_empty());
+                        // grazeld holders get the remedy named (RG's shutdown verb).
+                        let hint = if holder == "grazeld" {
+                            format!(
+                                "; or: grazel shutdown --scope={}",
+                                scope.as_deref().unwrap_or("default")
+                            )
+                        } else {
+                            String::new()
+                        };
                         return Err(format!(
-                            "workspace {} is held by {} (pid {}{}) — one writer per \
-                             workspace across daemons (§1b); stop it or use that daemon",
+                            "workspace {} is held by {holder} (pid {pid}{}) — one writer \
+                             per workspace across daemons (§1b); stop it or use that \
+                             daemon{hint}",
                             workspace.display(),
-                            field_str(&held, "daemon").unwrap_or_else(|| "?".into()),
-                            pid,
-                            field_str(&held, "scope")
-                                .filter(|s| !s.is_empty())
-                                .map(|s| format!(", scope {s}"))
-                                .unwrap_or_default(),
+                            scope.map(|s| format!(", scope {s}")).unwrap_or_default(),
                         ));
                     }
                 }
@@ -135,6 +142,8 @@ mod tests {
         let e = acquire(&w, "razeld", "").expect_err("second writer must fail");
         assert!(e.contains("grazeld") && e.contains("customerA"), "{e}");
         assert!(e.contains(&std::process::id().to_string()), "{e}");
+        // The remedy is named in the error (RG's shutdown verb, inbox 0007).
+        assert!(e.contains("grazel shutdown --scope=customerA"), "{e}");
     }
 
     #[test]
