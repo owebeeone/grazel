@@ -2,7 +2,8 @@
 
 *2026-06-12. Decision (Gianni): gryth requires a local server working the workspace —
 razel adopts the same model (as Bazel does internally) and, UNLIKE Bazel, makes the server
-API a FORMAL, VERSIONED, THIRD-PARTY surface. Companion to `RazelReleaseSpike.md` (V3sh1),
+API a FORMAL, VERSIONED, THIRD-PARTY surface. SHARED design — both workstreams answer to
+it: `ws-razel/RazelReleaseSpike.md` (V3sh1) and `ws-grazel/GrazelWorkstream.md` (GR0–GR5),
 which builds the first slice; subordinate to `RazelV3Plan.md`'s invariants.*
 
 ## §1 The model — ONE daemon, MANY isolated workspaces
@@ -146,7 +147,10 @@ are routine and the conflict surface is confined to the declared seams (the raze
 lib API and the razel-wire IR — IR changes land razel-side, since both trees consume
 the generated types). Sequencing consequence: **S0 lands in the razel tree FIRST; the
 grazel clone starts from the post-S0 state** — the grazel agent begins at a cut seam,
-not cutting one.
+not cutting one. The doc split mirrors the tree split: work items live in
+`dev-docs/ws-razel/` (this lane: V3 + spike) and `dev-docs/ws-grazel/`
+(`GrazelWorkstream.md`, GR0–GR5); DESIGN docs — this one included — stay at the
+dev-docs root, shared by both.
 
 ## §1e Finding the daemon: SERVICE SCOPES (discovery + configuration — nailed)
 
@@ -323,6 +327,11 @@ at its own tier.
   **The CLI corollary of client #1 discipline: every CLI integration test IS a server-API
   test** — the CLI has no privileged path, so its test suite exercises S-B for free, and
   a CLI-visible behavior with no transcript equivalent is a missing T1 test.
+  **Grazel's posture differs by decision (Gianni, 2026-06-12): grazel INFRASTRUCTURE is
+  tested END-TO-END via the `grazel ws test` command** (staged self-test through real
+  CLI → scope → socket → daemon → engine; see `ws-grazel/GrazelWorkstream.md` §1), NOT
+  per-endpoint — per-endpoint coverage of the shared services stays razel-side T1;
+  grazel consumes those services and never re-tests them endpoint-by-endpoint.
 - **T2 — the engine battery.** What exists today: `cargo test --workspace` + gates +
   probe sentinels. Unchanged, still the bulk of the pyramid; the daemon work must keep
   razel-loading runtime-free so T2 never grows an async dependency.

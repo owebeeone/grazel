@@ -1,4 +1,4 @@
-//! `razel-parity` — golden compat-testing support (`dev-docs/RazelParityHarness.md`).
+//! `razel-parity` — golden compat-testing support (`dev-docs/ws-razel/RazelParityHarness.md`).
 //!
 //! V1 surface: [`normalize`] canonicalizes a raw `bazel aquery --output=text` dump into a
 //! **reviewable, host/platform-independent golden** (the §5/§9 normalization spec). It is the

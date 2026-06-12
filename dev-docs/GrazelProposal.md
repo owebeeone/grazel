@@ -1,5 +1,10 @@
 # Grazel Proposal - Model G for Razel
 
+> **NAMING NOTE (2026-06-12):** "Grazel" in this document is the OLD Model-G
+> clean-slate-surface idea and is UNRELATED to the grazel DISTRIBUTION
+> (razel + gryth p2p node) decided in `RazelPublicSurfaces.md` §1b and planned in
+> `ws-grazel/GrazelWorkstream.md`. Do not cite this document as that design.
+
 Status: proposal / clean-slate product surface
 
 This document follows `ThoughtExp-CleanSlateBuildSurface.md`. It assumes the

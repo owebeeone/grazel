@@ -46,7 +46,7 @@ Tickets are markdown files under `scratch/tickets/` (`T-<seq>-<slug>.md`), writt
 supervisor (template: `ticket-template.md`), one gap each. A ticket MUST be executable cold:
 repro command, expected-vs-actual, the files to touch, the exit criterion, and the
 stub-vs-semantic ruling. Closed tickets stay in place (audit trail); the debt they create is
-recorded in `dev-docs/RazelGaps.md`, not in the ticket.
+recorded in `dev-docs/ws-razel/RazelGaps.md`, not in the ticket.
 
 ## Hard rules for every worker (restated in each prompt)
 

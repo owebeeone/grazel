@@ -1,5 +1,10 @@
 # Grazel Forecast — future-direction probabilities → trade-off choices
 
+> **NAMING NOTE (2026-06-12):** "Grazel" in this document is the OLD Model-G
+> clean-slate-surface idea and is UNRELATED to the grazel DISTRIBUTION
+> (razel + gryth p2p node) decided in `RazelPublicSurfaces.md` §1b and planned in
+> `ws-grazel/GrazelWorkstream.md`. Do not cite this document as that design.
+
 **Not a roadmap.** This reads `GrazelProposal.md` (Model G) and the mission directions as
 **predictions with probabilities**, and uses `P × cost-to-retrofit` vs `cost-to-provision`
 to choose trade-offs *now*. It operationalizes `ArchitectSkillRules.md` criterion (c):
