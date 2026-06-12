@@ -1,6 +1,6 @@
 From: RG
 Date: 2026-06-12
-Status: open
+Status: done — RR, 2026-06-12: exported as requested — pub fn serve_conn<C: Read + Write>(&self, conn: &mut C) -> io::Result<()> on rpc::Server (reads the first frame, routes unary OR stream); transcript-tested over a socketpair with no listener. On razelv3.
 
 # Seam request: export a per-connection serve entry on rpc::Server
 

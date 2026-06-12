@@ -120,6 +120,15 @@ impl Server {
         self.inner.dispatch(req)
     }
 
+    /// Serve ONE already-accepted connection: a unary request → one response, or a
+    /// stream (`build.subscribe`/`invocation.events`) until the client disconnects.
+    /// The HOST-DAEMON entry (seam contract, ws-razel/inbox/0006): grazeld accepts
+    /// and routes by scope/membership, then hands the connection to the member
+    /// workspace's server here.
+    pub fn serve_conn<C: Read + Write>(&self, conn: &mut C) -> io::Result<()> {
+        self.inner.handle_conn(conn)
+    }
+
     /// Bind the rendezvous `socket` (UDS on unix, loopback TCP on Windows) and
     /// serve; each connection is handled on its own thread. Blocks.
     pub fn serve(&self, socket: &Path) -> io::Result<()> {

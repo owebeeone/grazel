@@ -34,6 +34,34 @@ fn start_daemon(tag: &str) -> (PathBuf, PathBuf) {
     panic!("daemon never came up on {}", socket.display());
 }
 
+/// `serve_conn` (seam contract, ws-razel/inbox/0006): a host daemon (grazeld) accepts
+/// the connection itself and hands it — unary OR stream — to a member workspace's
+/// server. Proven here over a socketpair with no listener at all.
+#[test]
+fn serve_conn_serves_a_pre_accepted_connection() {
+    use std::io::{Read, Write};
+    let root = std::env::temp_dir().join(format!("razel-t1-conn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("BUILD"), "filegroup(name = \"f\", srcs = [])\n").unwrap();
+    let server = Server::new(ws, root.join("cache"));
+    let (mut client, mut served) = std::os::unix::net::UnixStream::pair().unwrap();
+    std::thread::spawn(move || {
+        let _ = server.serve_conn(&mut served);
+    });
+    // Hand-framed version request over the pre-accepted connection.
+    let req = razel_wire::encode(&rpc::req_version());
+    client.write_all(&(req.len() as u32).to_be_bytes()).unwrap();
+    client.write_all(&req).unwrap();
+    let mut len = [0u8; 4];
+    client.read_exact(&mut len).unwrap();
+    let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+    client.read_exact(&mut buf).unwrap();
+    let v = VersionInfo::from_cbor(&rpc::payload(&razel_wire::decode(&buf)).expect("ok"));
+    assert_eq!(v.protocol, 1);
+}
+
 #[test]
 fn hello_handshake_accepts_and_rejects() {
     let (ws, socket) = start_daemon("hello");
