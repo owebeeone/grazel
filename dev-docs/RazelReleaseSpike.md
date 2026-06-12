@@ -180,6 +180,26 @@ targets carry a standard `razel-only` tag so Bazel users can exclude them with s
 cases always have C (you own the BUILD); third-party trees have D (repo patches). The
 escape-hatch role B was reserved for is covered by D.
 
+## §3d `--strict_bazel` mode (the parity oracle switch)
+
+**Definition (Gianni, 2026-06-12): under `--strict_bazel` razel behaves as if it WERE
+Bazel** — the razel delta layer is switched off wholesale so golden comparisons against
+real Bazel are apples-to-apples:
+
+- `.razelrc` and `MODULE.razel`: not read.
+- Razel-native packages (BUILD.razel, mode E): invisible — exactly Bazel's view (not
+  packages at all; the boundary-guard `.bazelignore` congruence makes this safe).
+- Compat-shim rules (mode C): evaluate their BAZEL-side degraded semantics, not their
+  razel semantics — strict mode's contract is "produce what Bazel would produce,"
+  graph- and byte-comparable.
+- Razel-only flags: rejected (as Bazel would reject them).
+
+**Uses:** the goldens harness ALWAYS diffs in strict mode (a delta is a razel BUG by
+definition); CI parity gates; and a user-facing "would Bazel agree?" check. Spelling:
+`--strict_bazel` (Bazel flag convention), `--strict-bazel` accepted as alias. Plumbing:
+a GlobalFlags mode consulted at the delta-layer seams (rc loading, module resolution,
+package discovery, shim dispatch) — lands with §1.2's bazelrc work.
+
 ## §4 Acceptance
 
 - Examples tiers 1–2 GREEN as goldens (graph + output parity vs bazel-7.7.0) and wired
