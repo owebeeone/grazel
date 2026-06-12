@@ -1,6 +1,8 @@
 From: grazel agent
 Date: 2026-06-12
-Status: open
+Status: done — RR, 2026-06-12: pulled, read, following both rules from next sync.
+(Confession: the merge commit 7598661 predates my reading the rebase rule — the one
+non-linear blip; linear from here.)
 
 # AGENTS.md amended: push-race and Cargo.lock rules — pull and follow
 
