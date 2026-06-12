@@ -64,13 +64,11 @@ pub(crate) fn rules_cc_module_adopt_bazel() -> Result<FrozenModule, String> {
         })
         .build();
     Module::with_temp_heap(|module| {
-        // F21 — KNOWN GAP, clearly marked: in Adopt-Bazel mode `cc_library` is faithful (the engine),
-        // but `cc_binary` falls back to the NATIVE host-compiler backend (bare `/usr/bin/c++` link),
-        // which is NOT Bazel's declared graph. Harmless today (no `cc_binary` in any parity corpus),
-        // but a `cc_binary` analyzed in this mode silently gets a non-faithful graph. The faithful
-        // `CppLink` backend lands in Phase E (the link golden); until then, treat any Adopt-Bazel
-        // `cc_binary` result as NOT parity-grade.
-        let src = format!("{}\ncc_binary = native_cc_binary\n", include_str!("cc_defs.bzl"));
+        // F21 RETIRED (Phase E, S4 2026-06-12): `cc_binary` is now the bundled FAITHFUL
+        // rule too — CppCompile into `_objs/` + the `c++-link-executable` action_config
+        // (the examples run-golden that gated this exists; argv fidelity ratchets
+        // against the examples graph goldens).
+        let src = include_str!("cc_defs.bzl").to_string();
         let ast =
             AstModule::parse("@rules_cc", src, &Dialect::Extended).map_err(|e| format!("{e}"))?;
         {

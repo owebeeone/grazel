@@ -153,7 +153,18 @@ pub(crate) fn probe(workspace_root: PathBuf) -> ExitCode {
         eprintln!("\nxtask probe: FAIL — {sentinel_failures} green-rung sentinel(s) regressed.");
         return ExitCode::from(1);
     }
-    eprintln!("\nxtask probe: OK — sentinels green; frontier failures above are the ticket feed.");
+    // S4: the examples goldens harness IS a sentinel (spike §2 — the low bar).
+    let ex = crate::examples::verify(&workspace_root);
+    if !ex.is_empty() {
+        for f in &ex {
+            eprintln!("EXAMPLES FAIL: {f}");
+        }
+        eprintln!("\nxtask probe: FAIL — {} examples-golden regression(s).", ex.len());
+        return ExitCode::from(1);
+    }
+    eprintln!(
+        "\nxtask probe: OK — sentinels green (examples goldens incl.); frontier failures above are the ticket feed."
+    );
     ExitCode::SUCCESS
 }
 

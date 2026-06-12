@@ -2227,6 +2227,8 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "razel-build",
+ "razel-exec",
  "razel-loading",
  "razel-parity",
  "serde_json",

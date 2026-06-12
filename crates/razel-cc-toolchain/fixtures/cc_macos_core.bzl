@@ -12,6 +12,7 @@
 # API — A5a). This file is now just the host flag VALUES written against that API.
 CC = ["c++-compile"]
 ARCHIVE = ["c++-link-static-library"]
+LINK = ["c++-link-executable"]  # Phase E (S4): the binary link — the run-golden exists now
 
 CONFIG = cc_common.create_cc_toolchain_config_info(
     features = [
@@ -76,9 +77,29 @@ CONFIG = cc_common.create_cc_toolchain_config_info(
                 flag_group(flags = ["%{libraries_to_link}"], iterate_over = "libraries_to_link"),
             ]),
         ]),
+        # Phase E: the executable link (host c++ driver), faithful to the captured
+        # golden: -o <bin> <objs+libs> -Wl,-S -mmacosx-version-min=<sdk>
+        # -no-canonical-prefixes -fobjc-link-runtime -headerpad_max_install_names
+        # -lc++ -lm (the macOS default-link tail).
+        feature(name = "link_executable_flags", enabled = True, flag_sets = [
+            flag_set(actions = LINK, flag_groups = [
+                flag_group(flags = ["-o", "%{output_execpath}"], expand_if_available = "output_execpath"),
+                flag_group(flags = ["%{libraries_to_link}"], iterate_over = "libraries_to_link"),
+                flag_group(flags = ["-Wl,-S"]),
+                flag_group(flags = ["-mmacosx-version-min=%{minimum_os_version}"], expand_if_available = "minimum_os_version"),
+                flag_group(flags = [
+                    "-no-canonical-prefixes",
+                    "-fobjc-link-runtime",
+                    "-headerpad_max_install_names",
+                    "-lc++",
+                    "-lm",
+                ]),
+            ]),
+        ]),
     ],
     action_configs = [
         action_config(action_name = "c++-compile", tools = [tool(path = "external/<repo>/cc_wrapper.sh")]),
         action_config(action_name = "c++-link-static-library", tools = [tool(path = "/usr/bin/libtool")]),
+        action_config(action_name = "c++-link-executable", tools = [tool(path = "external/<repo>/cc_wrapper.sh")]),
     ],
 )

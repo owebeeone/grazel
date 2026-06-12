@@ -90,6 +90,9 @@ pub(crate) fn builtin_registry() -> ProviderRegistry {
     // cc — exported headers + compile flags (Sets); `CcInfo.hdrs` is read as `dep.headers`.
     r.register("CcInfo", "hdrs", FieldSpec { kind: FieldKind::Set, dep_fold: folded("headers", FoldPolicy::Plain) });
     r.register("CcInfo", "cflags", FieldSpec { kind: FieldKind::Set, dep_fold: folded("cflags", FoldPolicy::Plain) });
+    // Phase E (S4): the dep's static libraries — cc_binary's link consumes them
+    // (`dep.libs`; mirrors the native path's resolve_dep().libs channel).
+    r.register("CcInfo", "libs", FieldSpec { kind: FieldKind::Set, dep_fold: folded("libs", FoldPolicy::Plain) });
     // java — ordered compile/runtime classpaths + the neverlink prune flag (own-only).
     r.register("JavaInfo", "compile_jars", FieldSpec { kind: FieldKind::OrderedDepset, dep_fold: folded("compile_jars", FoldPolicy::Plain) });
     r.register("JavaInfo", "runtime_jars", FieldSpec { kind: FieldKind::OrderedDepset, dep_fold: folded("runtime_jars", FoldPolicy::PrunedBy(FieldId::new("neverlink"))) });
@@ -110,10 +113,11 @@ mod tests {
         for ty in ["DefaultInfo", "CcInfo", "JavaInfo"] {
             assert!(r.schema(&ProviderTypeId::new(ty)).is_some(), "schema for {ty}");
         }
-        // Dep-folded fields: cc has hdrs+cflags; java has compile_jars+runtime_jars (neverlink own-only,
-        // DefaultInfo.files own-exposed → neither is transitively dep-folded).
+        // Dep-folded fields: cc has hdrs+cflags+libs (libs = Phase E, cc_binary's link
+        // consumes the deps' archives); java has compile_jars+runtime_jars (neverlink
+        // own-only, DefaultInfo.files own-exposed → neither is transitively dep-folded).
         assert_eq!(r.dep_folds(&ProviderTypeId::new("DefaultInfo")).count(), 0, "files is own-exposed");
-        assert_eq!(r.dep_folds(&ProviderTypeId::new("CcInfo")).count(), 2);
+        assert_eq!(r.dep_folds(&ProviderTypeId::new("CcInfo")).count(), 3);
         let java = ProviderTypeId::new("JavaInfo");
         assert_eq!(r.dep_folds(&java).count(), 2, "neverlink is own-only, not dep-folded");
         // The neverlink subtree-prune is registered on runtime_jars; CcInfo.hdrs projects to "headers".

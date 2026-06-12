@@ -56,7 +56,64 @@ def _cc_library_impl(ctx):
         mnemonic = "CppArchive",
     )
 
-    razel_build.info("CcInfo", {"hdrs": own_headers})  # C3: the generic provider constructor
+    # C3: the generic provider constructor; `libs` feeds cc_binary's link (Phase E).
+    razel_build.info("CcInfo", {"hdrs": own_headers, "libs": [lib]})
     return [DefaultInfo(files = [lib])]
 
 cc_library = rule(implementation = _cc_library_impl, attrs = {})
+
+# Phase E (S4): the FAITHFUL cc_binary — compiles into `_objs/<name>/` (CppCompile,
+# dotd included) and links via the adopted `c++-link-executable` action_config
+# (CppLink). Retires the F21 native fallback; argv fidelity grows against the
+# examples graph goldens.
+def _cc_binary_impl(ctx):
+    pkg = ctx.label.package
+    name = ctx.label.name
+    bin = "bazel-out/%s/bin" % _CFG
+    prefix = "%s/%s" % (bin, pkg) if pkg else bin
+    objs = "%s/_objs/%s" % (prefix, name)
+    src_prefix = pkg + "/" if pkg else ""
+
+    headers = []
+    dep_libs = []
+    for d in getattr(ctx.attr, "deps", []):
+        headers = headers + d.headers
+        dep_libs = dep_libs + d.libs  # CcInfo.libs (folded — see registry)
+    headers = dedup(headers)
+
+    objects = []
+    for src in getattr(ctx.attr, "srcs", []):
+        stem = src.rsplit(".", 1)[0]
+        obj = "%s/%s.o" % (objs, stem)
+        cl = razel_build.command_line("cc", "c++-compile", {
+            "source_file": src_prefix + src,
+            "output_file": obj,
+            "dependency_file": "%s/%s.d" % (objs, stem),
+            "minimum_os_version": _SDK,
+            "quote_include_paths": [".", bin],
+        })
+        razel_build.action(
+            executable = cl[0],
+            arguments = cl[1:],
+            inputs = [src_prefix + src] + headers,
+            outputs = ["%s/%s.d" % (objs, stem), obj],
+            mnemonic = "CppCompile",
+        )
+        objects.append(obj)
+
+    out = "%s/%s" % (prefix, name)
+    ll = razel_build.command_line("cc", "c++-link-executable", {
+        "output_execpath": out,
+        "libraries_to_link": objects + dep_libs,
+        "minimum_os_version": _SDK,
+    })
+    razel_build.action(
+        executable = ll[0],
+        arguments = ll[1:],
+        inputs = objects + dep_libs,
+        outputs = [out],
+        mnemonic = "CppLink",
+    )
+    return [DefaultInfo(files = [out])]
+
+cc_binary = rule(implementation = _cc_binary_impl, attrs = {})

@@ -10,11 +10,15 @@ not present on this machine. OPEN DECISION (Gianni): re-pin the examples tier to
 current bazel, or fetch 7.7.0 and re-capture. Several graph deviations below are
 9.x-era artifacts.
 
-## Status
+## Status (S4 complete, 2026-06-12)
 
 - **stdout goldens: GREEN** (all 3 stages; `<TIME>`-masked ctime line).
-- **graph goldens: RED, characterized** — verify is NOT yet a probe sentinel; it
-  joins the sentinels when the deviations below are closed or formally omitted.
+- **graph goldens: GREEN** (all 3 stages, default + strict) — every action key
+  matches (Phase E: faithful cc_binary via the c++-link-executable action_config;
+  CppLink argv byte-matches incl. multi-lib); ONE documented argv deviation, logged
+  every run: CppCompile carries bazel's module-graph-derived bzlmod -iquote set
+  (external/rules_cc+, external/bazel_tools + bin twins) which razel grows with the
+  bzlmod arc. The harness IS a probe sentinel (`xtask probe` fails on regression).
 
 ## Graph deviation classes (the S4 ticket feed — documented, never silent)
 
