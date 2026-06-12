@@ -55,6 +55,13 @@ pub(crate) fn expand_genrule_cmd(
                     None if inner == "GENDIR" || inner == "BINDIR" => {
                         out.push_str("bazel-out/bin")
                     }
+                    // The build's -c mode (bazel ctx.var COMPILATION_MODE); razel's
+                    // default mirrors bazel's: fastbuild. (Wired to GlobalFlags.mode()
+                    // via the cmd expansion seam when flags reach genrule — survey
+                    // unblocks at the default today.)
+                    None if inner == "COMPILATION_MODE" => out.push_str("fastbuild"),
+                    // Host cpu segment (matches the adopted config's _CFG host value).
+                    None if inner == "TARGET_CPU" => out.push_str("darwin_arm64"),
                     None if inner == "@" => match outs {
                         [one] => out.push_str(one),
                         _ => return Err(anyhow::anyhow!("$(@) needs exactly one output")),

@@ -190,6 +190,104 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         }))?;
         Ok(NoneType)
     }
+
+    /// `rust_shared_library(name, srcs, deps=[], edition=…)` → one rustc cdylib
+    /// action producing `lib<name>.dylib` (host posture: macOS suffix).
+    fn native_rust_shared_library<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] edition: Option<String>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        let sess = session(eval);
+        let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
+        let crate_root = srcs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("rust_shared_library `{name}` needs at least one src"))?
+            .clone();
+        let edition = edition.unwrap_or_else(|| "2021".into());
+        let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+        let sess = session(eval);
+        let dylib = qualify(sess, &format!("lib{name}.dylib"));
+        let mut argv = vec![
+            rustc(),
+            "--edition".into(),
+            edition,
+            "--crate-type".into(),
+            "cdylib".into(),
+            "--crate-name".into(),
+            name.clone(),
+            crate_root,
+            "-o".into(),
+            dylib.clone(),
+        ];
+        argv.extend(extern_flags);
+        let mut inputs = srcs;
+        inputs.extend(dep_rlibs);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            deps: dep_names,
+            actions: vec![AnalyzedAction {
+                mnemonic: "Rustc".into(),
+                argv,
+                inputs,
+                outputs: vec![dylib.clone()],
+            }],
+            default_info: vec![dylib],
+            providers: Default::default(),
+        });
+        Ok(())
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// `rust_library_group(name, deps)` — faithful GROUPING rule: no actions,
+    /// DefaultInfo = the deps' rlibs (rules_rust's lib-collection shape).
+    fn native_rust_library_group<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        let deps = unpack_strs(deps);
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        let (_, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            deps: dep_names,
+            actions: Vec::new(),
+            default_info: dep_rlibs,
+            providers: Default::default(),
+        });
+        Ok(())
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// `rust_doc(name, crate, …)` — ANALYSIS-ONLY today (named hole: the rustdoc
+    /// action lands when a consumer demands the docs, not just the load).
+    fn native_rust_doc<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let sess = session(eval);
+        record_target(sess, AnalyzedTarget {
+            name: canon_label(sess, &name),
+            deps: Vec::new(),
+            actions: Vec::new(),
+            default_info: Vec::new(),
+            providers: Default::default(),
+        });
+        Ok(NoneType)
+    }
 }
 
 /// The synthetic `@rules_rust` module: re-exports the native rules under the names
@@ -199,7 +297,11 @@ pub(crate) fn module() -> Result<FrozenModule, String> {
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse(
             "@rules_rust",
-            "rust_binary = native_rust_binary\nrust_library = native_rust_library\n".to_owned(),
+            "rust_binary = native_rust_binary\nrust_library = native_rust_library\n\
+             rust_shared_library = native_rust_shared_library\n\
+             rust_library_group = native_rust_library_group\nrust_doc = native_rust_doc\n\
+             rust_doc_test = native_rust_doc\n"
+                .to_owned(),
             &Dialect::Extended,
         )
         .map_err(|e| format!("{e}"))?;
