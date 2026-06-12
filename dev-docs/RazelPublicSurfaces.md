@@ -32,14 +32,46 @@ builds, live views across its workspaces), and any third party.
 privileged in-process path.** Every verb goes through the same server API a third party
 would use, from the first implementation (V3sh1 S3) onward.
 
-## §1b Hosting: gryth inside the daemon's surface, outside its process
+## §1b Distributions: razel (boring) and GRAZEL (the node) — naming decision, Gianni 2026-06-12
 
-The gryth service registers INTO the daemon's protocol namespace (one endpoint, one
-fabric) and is SUPERVISED by the daemon's Lifecycle service, but runs as its own OS
-process (ts/npm stays ts/npm; crashes isolate; declared as a workspace target —
-`razel_service(...)` in an E-mode package: server-as-declaration, the glade thesis in
-the daemon). Clients see one server whose capabilities include gryth; gryth sees the
-Command/Query/View/Events services over the same connection every client gets.
+ONE engine, TWO installables:
+
+- **razel** — the boring Bazel-compatible build tool: CLI + razeld, the five S-B
+  services over a local UDS, nothing else. No iroh, no gryth, no p2p anywhere in its
+  dependency graph. This is the thing the strict-mode goldens and the TF floor certify,
+  and the only thing the Bazel-compat claim attaches to.
+- **grazel** — the all-singing variant: the SAME engine crates PLUS an in-process gryth
+  p2p node (iroh endpoint) in one binary. grazel nodes talk iroh to OTHER grazel nodes;
+  some nodes serve a gryth client or two (gryth-ui reaches the mesh through whichever
+  node it attaches to). grazeld is razeld-plus: every S-B service verbatim, plus the
+  node/p2p services.
+
+**The compatibility arrow extends one level up** (the §3b not-locked-out doctrine,
+recursively: each layer needs the one below, never the reverse): **bazel ⊂ razel ⊂
+grazel.** A razel workspace builds identically under grazel; `--strict_bazel` works in
+grazel; razel NEVER grows an iroh dependency — enforced the same way razel-loading
+stays runtime-free: the node code lives in grazel-only crates that link the razel
+crates, never the other way.
+
+Local plumbing when both are installed on one machine:
+
+- **Separate UDS namespaces.** grazel↔grazeld comms get their OWN socket (grazel's
+  daemon root, sibling to razel's — `_grazel_<user>` beside `_razel_<user>`), so razeld
+  and grazeld coexist without ambiguity; each CLI dials its own daemon. Same wire
+  protocol and IR — the grazel services are additional taut services in the same
+  namespace, so a razel client pointed at grazeld just sees the S-B subset.
+- **Shared caches, arbitrated outputs.** The content-addressed download cache is shared
+  by construction. Output bases are NOT keyed by distribution — switching a workspace
+  between razel and grazel must not rebuild the world — so the single-writer rule
+  extends ACROSS daemons: one output-base lock per workspace (Bazel-mirrored mechanics);
+  whichever daemon holds it is that workspace's writer, the other fails loud with a
+  "held by <daemon>" message.
+
+The `razel_service(...)` hosting mechanism (supervised out-of-process services declared
+as E-mode targets) survives for ts/npm pieces gryth may add, but the p2p node does NOT
+ride it — the node is in-process by construction (iroh is Rust; the node IS the daemon's
+fabric, not a supervised child). How much gryth server logic lives in the rust node vs
+hosted TS services is gryth-dev's call; this surface stays agnostic.
 
 ## §1c Thread/async isolation (decided: EVENT QUEUE into the core)
 
@@ -118,8 +150,9 @@ xtask discipline).
 
 Transport: framed deterministic-CBOR taut messages over a LOCAL unix domain socket first;
 the service definitions are transport-agnostic and future transports ride unchanged — the
-iroh path (remote/distributed workspace access, gryth's native fabric) is explicitly
-anticipated and explicitly NOT v1. Ecosystem adapters are exactly that — adapters over
+iroh path (remote/distributed workspace access, the inter-node fabric) is GRAZEL's
+transport (§1b), never razel's: razel stays UDS-local forever, grazel carries the same
+framed streams over iroh between nodes. Ecosystem adapters are exactly that — adapters over
 S-B, never the native surface: a literal-protobuf BEP emitter for bazel-ecosystem tools,
 a BSP shim for IDEs, both optional and later; the native Events service is BEP-*shaped*
 in taut.
@@ -207,5 +240,5 @@ XOR errors; strict mode hides E-packages) is a T2 citizen.
 
 No remote execution protocol (REAPI) claims; no Bazel-server wire-compat (Bazel's command
 protocol is private and version-entangled — mimicking it would chain razel to internals
-Bazel itself won't stabilize); no multi-workspace federation in v1 (the iroh arc owns
-that).
+Bazel itself won't stabilize); no multi-workspace federation in v1 (grazel's iroh arc owns
+that — and it ships as grazel, never as a razel feature).
