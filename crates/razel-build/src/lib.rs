@@ -144,6 +144,9 @@ fn collect_order(
 pub struct BuildReport {
     pub produced: Vec<String>,
     pub executed: usize,
+    /// The REQUESTED target's DefaultInfo (bazel semantics: the build's outputs —
+    /// what `run` execs, what clients see; `produced` keeps every intermediate).
+    pub default_outputs: Vec<String>,
 }
 
 /// Build a target and its transitive deps: analyze, order deps-first, and execute every
@@ -220,7 +223,14 @@ pub fn execute(
             produced.extend(act.outputs.clone());
         }
     }
-    Ok(BuildReport { produced, executed })
+    // Bazel semantics: a build's OUTPUTS are the requested target's DefaultInfo,
+    // not every intermediate (post-order ⇒ the requested target is last).
+    let default_outputs = order
+        .last()
+        .and_then(|t| by_name.get(t))
+        .map(|t| t.default_info.clone())
+        .unwrap_or_default();
+    Ok(BuildReport { produced, executed, default_outputs })
 }
 
 #[cfg(test)]
@@ -241,6 +251,42 @@ def _impl(ctx):
 cc_obj = rule(implementation = _impl, attrs = {"src": 1})
 cc_obj(name = "widget", src = "widget.c")
 "#;
+
+    /// S4: a build's OUTPUTS are the requested target's DefaultInfo — never the
+    /// intermediates (`run` execs outputs[0]; a cc_binary's first PRODUCED file is
+    /// a .o, its DefaultInfo is the linked binary).
+    #[test]
+    fn report_default_outputs_are_the_targets_default_info() {
+        use razel_loading::{AnalyzedAction, AnalyzedTarget};
+        let exec = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cache_dir.path()).unwrap();
+        let touch = |out: &str| AnalyzedAction {
+            mnemonic: "Touch".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), format!("touch {out}")],
+            inputs: vec![],
+            outputs: vec![out.into()],
+        };
+        let targets = vec![
+            AnalyzedTarget {
+                name: "//p:dep".into(),
+                deps: vec![],
+                actions: vec![touch("dep.txt")],
+                default_info: vec!["dep.txt".into()],
+                providers: Default::default(),
+            },
+            AnalyzedTarget {
+                name: "//p:bin".into(),
+                deps: vec!["//p:dep".into()],
+                actions: vec![touch("a.o"), touch("bin")],
+                default_info: vec!["bin".into()],
+                providers: Default::default(),
+            },
+        ];
+        let report = execute(&targets, "//p:bin", exec.path(), &cache).unwrap();
+        assert_eq!(report.default_outputs, vec!["bin".to_string()]);
+        assert_eq!(report.produced, vec!["dep.txt", "a.o", "bin"], "intermediates stay in produced");
+    }
 
     #[test]
     fn compiles_a_real_object_through_the_rule_engine() {

@@ -364,14 +364,18 @@ impl Inner {
                     BuildStatus::Built
                 },
                 recomputes: report.executed as i64,
-                outputs: report
-                    .produced
-                    .iter()
-                    .map(|p| OutputArtifact {
-                        path: p.clone(),
-                        digest: digest_of(&self.workspace.join(p)),
-                    })
-                    .collect(),
+                // DefaultInfo, not intermediates (mirrors razel-cli local_build).
+                outputs: if report.default_outputs.is_empty() {
+                    &report.produced
+                } else {
+                    &report.default_outputs
+                }
+                .iter()
+                .map(|p| OutputArtifact {
+                    path: p.clone(),
+                    digest: digest_of(&self.workspace.join(p)),
+                })
+                .collect(),
                 message: None,
             },
             Err(e) => BuildResult {

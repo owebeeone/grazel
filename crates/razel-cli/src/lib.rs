@@ -665,14 +665,19 @@ fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
                 BuildStatus::Built
             },
             recomputes: report.executed as i64,
-            outputs: report
-                .produced
-                .iter()
-                .map(|p| OutputArtifact {
-                    path: p.clone(),
-                    digest: digest_of(&o.workspace.join(p)),
-                })
-                .collect(),
+            // The target's DefaultInfo, not every intermediate (bazel semantics —
+            // `run` execs outputs[0]); empty default_info falls back to produced.
+            outputs: if report.default_outputs.is_empty() {
+                &report.produced
+            } else {
+                &report.default_outputs
+            }
+            .iter()
+            .map(|p| OutputArtifact {
+                path: p.clone(),
+                digest: digest_of(&o.workspace.join(p)),
+            })
+            .collect(),
             message: None,
         },
         Err(e) => BuildResult {
