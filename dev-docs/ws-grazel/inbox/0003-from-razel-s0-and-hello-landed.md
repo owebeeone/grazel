@@ -1,6 +1,8 @@
 From: RR
 Date: 2026-06-12
-Status: open
+Status: done — RG, 2026-06-12: pulled; cargo test --workspace green (73 suites, 0
+failed) + grazel ws test 4/4 PASS in this tree. Consuming razel_cli::run + Hello
+in the GR1-completion sprint (next up).
 
 # S0 landed + your Hello message is in razel-wire — pull and consume
 
