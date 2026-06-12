@@ -51,6 +51,7 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "run-verb", run: run_verb },
         Stage { name: "ws-stream-equivalence", run: ws_stream_equivalence },
         Stage { name: "js-client-roundtrip", run: js_client_roundtrip },
+        Stage { name: "shutdown-verb", run: shutdown_verb },
     ]
 }
 
@@ -935,6 +936,52 @@ fn js_client_roundtrip(ctx: &StageCtx) -> Result<(), String> {
     })();
     stop_scope(ctx, &home, &ws, "js");
     result
+}
+
+/// `grazel shutdown` — the user-facing stop (inbox 0007): targeted stop kills
+/// one scope and leaves the other; `--all` sweeps the rest; idempotent.
+fn shutdown_verb(ctx: &StageCtx) -> Result<(), String> {
+    let home = ctx.tmp.join("home");
+    let grazel = |ws: &Path, args: &[&str]| -> Result<(bool, String), String> {
+        let out = Command::new(&ctx.grazel_bin)
+            .current_dir(ws)
+            .env("GRAZEL_HOME", &home)
+            .env_remove("GRAZEL_SCOPE")
+            .args(args)
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()))
+    };
+    for scope in ["sa", "sb"] {
+        let ws = ctx.tmp.join(format!("ws-{scope}"));
+        std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+        ping(ctx, &home, &ws, Some(scope), false)?;
+    }
+    let (pa, pb) = (ScopePaths::new(&home, "sa")?, ScopePaths::new(&home, "sb")?);
+    let wsa = ctx.tmp.join("ws-sa");
+    let (ok, out) = grazel(&wsa, &["shutdown", "--scope=sa"])?;
+    if !ok || !out.contains("scope=sa stopped") {
+        return Err(format!("targeted shutdown failed: {out}"));
+    }
+    eventually("sa socket cleanup", || !pa.socket.exists() && !pa.daemon_json.exists())?;
+    if !pb.socket.exists() {
+        return Err("targeted shutdown took the OTHER scope down too".into());
+    }
+    let (ok, out) = grazel(&wsa, &["shutdown", "--all"])?;
+    if !ok || !out.contains("scope=sb stopped") {
+        return Err(format!("shutdown --all missed sb: {out}"));
+    }
+    eventually("sb socket cleanup", || !pb.socket.exists())?;
+    // Idempotent: a second sweep over stopped scopes is calm.
+    let (ok, _) = grazel(&wsa, &["shutdown", "--all"])?;
+    if !ok {
+        return Err("second shutdown --all errored".into());
+    }
+    let (ok, _) = grazel(&wsa, &["shutdown", "--all", "--scope=sa"])?;
+    if ok {
+        return Err("--all with --scope was accepted".into());
+    }
+    Ok(())
 }
 
 // --- GR4a: the HTTP edge (GrazelHttpEdge.md) -----------------------------------

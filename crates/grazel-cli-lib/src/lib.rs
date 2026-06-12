@@ -42,6 +42,8 @@ struct GrazelFlags {
     member_idle_timeout: Option<u64>,
     http_bind: Option<String>,
     no_autostart: bool,
+    all: bool,
+    list: bool,
 }
 
 fn split_args(args: &[String]) -> (GrazelFlags, Vec<String>) {
@@ -62,6 +64,10 @@ fn split_args(args: &[String]) -> (GrazelFlags, Vec<String>) {
             flags.http_bind = Some(v.to_string());
         } else if a == "--no_autostart" || a == "--no-autostart" {
             flags.no_autostart = true;
+        } else if a == "--all" {
+            flags.all = true;
+        } else if a == "--list" {
+            flags.list = true;
         } else {
             rest.push(a.clone());
         }
@@ -78,7 +84,7 @@ pub fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         // The grazel namespace. `daemon` and `version` deliberately shadow
         // razel's: daemon = grazeld (one-binary rule), version = this distribution.
-        Some("scope" | "ws" | "version" | "daemon") => grazel_verb(args),
+        Some("scope" | "ws" | "version" | "daemon" | "shutdown") => grazel_verb(args),
         // GR3: build/affected go THROUGH the scope daemon (GrazelVerbs.md) —
         // §1e posture; flag semantics stay razel's verbatim.
         Some("build" | "affected") => routed_razel_verb(args),
@@ -257,6 +263,48 @@ fn grazel_verb(args: &[String]) -> ExitCode {
             );
             Ok(ExitCode::SUCCESS)
         }),
+        // The user-facing stop (Gianni, inbox 0007): no-idle-out makes lingering
+        // daemons normal; this is the product answer to "kill it by pid".
+        ["shutdown"] if flags.all => {
+            if flags.scope.is_some() {
+                Err("--all and --scope are mutually exclusive".into())
+            } else {
+                paths::grazel_home(env_opt("GRAZEL_HOME").as_deref(), env_opt("HOME").as_deref())
+                    .map(|home| {
+                        let uds = home.join(".uds");
+                        let mut any = false;
+                        for entry in std::fs::read_dir(&uds).into_iter().flatten().flatten() {
+                            let scope = entry.file_name().to_string_lossy().to_string();
+                            let Ok(p) = paths::ScopePaths::new(&home, &scope) else { continue };
+                            any = true;
+                            match dial::stop(&p) {
+                                Ok(true) => println!("scope={scope} stopped"),
+                                Ok(false) => println!("scope={scope} no daemon running"),
+                                Err(e) => eprintln!("scope={scope} error: {e}"),
+                            }
+                        }
+                        if !any {
+                            println!("no scope daemons found under {}", uds.display());
+                        }
+                        ExitCode::SUCCESS
+                    })
+            }
+        }
+        ["shutdown"] => resolve_paths(flags.scope.as_deref(), &workspace).and_then(|p| {
+            let stopped = dial::stop(&p)?;
+            println!(
+                "scope={} {}",
+                p.scope,
+                if stopped { "stopped" } else { "no daemon running" }
+            );
+            Ok(ExitCode::SUCCESS)
+        }),
+        ["ws", "test"] if flags.list => {
+            for s in wstest::stages() {
+                println!("{}", s.name);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         ["ws", "test"] => std::env::current_exe()
             .map_err(|e| format!("current_exe: {e}"))
             .map(|bin| {
@@ -267,7 +315,7 @@ fn grazel_verb(args: &[String]) -> ExitCode {
             }),
         _ => {
             eprintln!(
-                "usage: grazel <scope | daemon run|ping|stop | ws test [--stage=N]> [--scope=S] [--workspace=DIR]\n       or any razel verb (build/affected/subscribe/…) — razel's surface verbatim"
+                "usage: grazel <scope | shutdown [--all] | daemon run|ping|stop | ws test [--stage=N|--list]> [--scope=S] [--workspace=DIR]\n       or any razel verb (build/affected/subscribe/…) — razel's surface verbatim"
             );
             Ok(ExitCode::from(64)) // EX_USAGE, razel's convention
         }

@@ -1,6 +1,6 @@
 From: RR (relaying Gianni)
 Date: 2026-06-13
-Status: open
+Status: done — RG, 2026-06-13: landed. Exact form: `grazel shutdown [--scope=<s>]` (default scope via the §1e chain) and `grazel shutdown --all` (sweeps ~/.grazel/.uds/*); idempotent, --all+--scope errors; `daemon stop` retained as alias. shutdown-verb stage green (ladder 24). Amend the outlock hint when ready — suggested text: "or: grazel shutdown --scope=<scope>".
 
 # Feature request (Gianni): a user-facing `grazel shutdown` verb
 
