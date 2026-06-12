@@ -84,6 +84,85 @@ until a razel-only dependency delta exists — the first real consumer is likely
 pinning its crate/grip deps; define-on-first-use, but the file name, placement, and
 precedence are decided HERE.
 
+## §3b The bzlmod world — the not-locked-out doctrine
+
+**The compatibility relation is deliberately ASYMMETRIC and one-way:** razel consumes
+Bazel's world fully; Bazel never needs to know razel exists; and razel-native features
+must never make a project unbuildable by Bazel (this is interop, not embrace-extend —
+decision: Gianni 2026-06-12). "Not locked out" is the third leg: as the ecosystem moves
+to MODULE-only (WORKSPACE off by default in 8, REMOVED in 9), razel must keep a
+consumption path for every layer of the new world. The surface, itemized:
+
+1. **The module graph.** Every dep ships its own MODULE.bazel; Bazel fetches descriptors
+   transitively from a REGISTRY, runs MVS (one version per module), and gives each module
+   its own repo mapping. razel's path: bzlmod resolution is a NEW FRONT-END to the
+   EXISTING pipeline — descriptors are fetched files, MVS is a pure function, and the
+   output is the same repo-spec lockfile the WORKSPACE extractor emits, feeding the same
+   R2/R3 fetcher/materializer. The architecture already insures this: resolution and
+   materialization are decoupled at the lockfile seam.
+2. **The registry (BCR).** Plain HTTPS: JSON metadata + source-archive pointers + patch
+   files — no Bazel binary anywhere in the protocol. No lockout vector; razel consumes it
+   directly. MODULE.razel may declare registry OVERRIDES (mirrors, a future
+   iroh-distributed registry/cache — a razel-native feature that costs Bazel nothing).
+3. **Repo mapping / canonical names.** bzlmod's apparent-vs-canonical split
+   (`@foo` → `@@foo+1.2.3`, per-module mappings) is a semantic razel must ADOPT, not
+   approximate — label identity, error messages, and `dep[P]` provider identity all key
+   on it. This is engine work (the labels layer), flagged now so it lands with the bzlmod
+   front-end rather than as a retrofit.
+4. **Module extensions** (pip, crate_universe, go_deps…) are the hard 20%: arbitrary
+   Starlark over repository_ctx. Strategy: FAITHFUL PER-ECOSYSTEM PIPELINES verified
+   against bazel ground truth (@pypi done; Cargo.lock next — §1.4), because they cover
+   the corpus that matters; the GENERIC repository_ctx executor remains the L7 endgame
+   and the ultimate lockout insurance for the long tail.
+5. **MODULE.bazel.lock.** Bazel's bzlmod lockfile; razel reads it when present (it pins
+   the resolution razel would otherwise compute) and razel's own lockfile stays the
+   sibling artifact (`razel-lock.json`, already in the workspace root per the round-36
+   placement decision).
+6. **Boundary discovery.** The walk-up rule (nearest MODULE.bazel / REPO.bazel /
+   WORKSPACE[.bazel]) + `.bazelignore` + nested-boundary skipping in package discovery —
+   all spike-tier items (§1.2 adjacency); razel currently takes roots explicitly.
+
+The MODULE.razel position in this world: applied AFTER bzlmod resolution as the delta —
+version/registry overrides, razel-only modules (glade, gryth rulepacks), host-stub
+postures. A MODULE.razel-bearing project still resolves identically under Bazel, which
+never reads it.
+
+## §3c BUILD.razel — the competing designs (decision pending)
+
+The package level is where the delta-file pattern gets DANGEROUS, because BUILD files are
+not just content — they are PACKAGE BOUNDARY MARKERS, and the two engines must agree on
+package structure or label resolution itself diverges (subpackage shadowing, glob
+boundaries). Four candidate designs, with their failure modes:
+
+- **(A) Full overlay** — BUILD.razel can add targets AND override attrs of
+  Bazel-declared targets. Maximum power; silently forks the graph the moment an override
+  lands (the two engines build different things from the same tree while both "work").
+  Rejected as default posture: it is the embrace-extend shape from the inside.
+- **(B) Additive-only sibling** — razel evaluates BUILD[.bazel] with Bazel semantics,
+  then BUILD.razel into the SAME package namespace; name collisions ERROR; a BUILD.razel
+  alone NEVER creates a package (keeps the package structures congruent by construction).
+  Razel-only targets (glade declarations, derivations, capability registrations) live
+  beside the shared ones, invisible to Bazel, additively.
+- **(C) No BUILD.razel: in-band loaded rules** — razel-native features are ordinary
+  Starlark rules `load()`ed in the SHARED BUILD file from a razel-provided module whose
+  BAZEL-side implementation degrades gracefully (no-op or genuinely portable impls) — a
+  `razel_compat` module, publishable to the BCR. One source of truth per package; the
+  whole BUILD-tooling ecosystem (gazelle, buildozer, buildifier, IDEs) sees everything;
+  the Bazel build keeps working because the loaded shim makes razel-isms legal Bazel.
+- **(D) No package-level mechanism at all** — razel deltas stop at module level;
+  third-party BUILD adjustments use the EXISTING repo-patch machinery (MODULE.razel
+  overrides + patch files — the same mechanism Bazel itself uses for its own deps).
+
+**Recommendation (to ratify):** C + D now, B defined-on-paper as the escape hatch, A
+never. Rationale: C keeps razel-native features inside the ecosystem's shared contract
+(and the compat-shim module is itself a not-locked-out asset: razel features expressed as
+things Bazel can load are features that can never be locked out); D already exists and
+covers the third-party case; B's additive-only semantics are written here so that if a
+real consumer (likely gryth) hits a case where loading a shim is impossible, the file can
+exist without a design scramble — but every BUILD.razel is a small secession from the
+shared contract, so it should need a reason. The tripwire for revisiting: the first time
+a glade/gryth declaration feels forced inside design C.
+
 ## §4 Acceptance
 
 - Examples tiers 1–2 GREEN as goldens (graph + output parity vs bazel-7.7.0) and wired
