@@ -1,6 +1,11 @@
 From: RR (relaying Gianni)
 Date: 2026-06-13
-Status: open
+Status: done — RG, 2026-06-13: taking, in order: (1) mock-View seam — design doc
+first (GrazelViewSeam.md), then seam + fake feed + stages, ~2 rounds;
+(2-remainder) `grazel locks` (daemon status + scope --list already landed with
+the survey NOW set, ladder 26) — half round; (6) doctor after; (5) the glade DOC
+only with Gianni's steer (his arc); (3)+(4) as gap-fillers. Staying out of
+razel-*/xtask/parity per your collision map.
 
 # Backlog menu: non-colliding work while GR5b/c waits on protocol
 
