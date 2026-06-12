@@ -228,6 +228,93 @@ fn razel_exec_cache(dir: &Path) -> Result<razel_exec::Cache, String> {
     razel_exec::Cache::new(dir).map_err(|e| e.to_string())
 }
 
+/// `examples --survey` (S5/Gianni 2026-06-13: "all the blaze examples" as a tracked
+/// burn-down): walk EVERY workspace under third-party/examples, load+analyze all its
+/// packages, and write the per-workspace status table to parity/examples/SURVEY.md.
+/// The build/run/test/affected columns are the CURATED goldens corpus's job (the
+/// EXAMPLES table above — verbs run per curated target); the survey is the FRONTIER
+/// view: which workspaces load at all, and the first error per red one (the ticket).
+pub(crate) fn survey(repo_root: &Path) -> Result<String, String> {
+    let root = examples_root(repo_root);
+    // Workspace roots: any dir carrying a boundary file (nested ones are their own rows).
+    let mut roots = Vec::new();
+    find_workspace_roots(&root, &mut roots);
+    roots.sort();
+    let mut md = String::from(
+        "# Examples survey — the burn-down (generated: `cargo xtask examples --survey`)\n\n\
+         Frontier view: load+analyze per workspace (the curated goldens corpus in\n\
+         examples.rs owns the per-verb columns for its members). Re-run to refresh.\n\n\
+         | workspace | pkgs | green | first error |\n|---|---|---|---|\n",
+    );
+    for ws in &roots {
+        let rel = ws.strip_prefix(&root).unwrap_or(ws).to_string_lossy().to_string();
+        let mut pkgs = Vec::new();
+        find_packages(ws, ws, &mut pkgs);
+        pkgs.sort();
+        if pkgs.is_empty() {
+            md.push_str(&format!("| {rel} | 0 | – | (no BUILD packages) |\n"));
+            continue;
+        }
+        let report = razel_loading::load_tree_report(ws, Default::default(), &pkgs);
+        let green = report.iter().filter(|(_, r)| r.is_ok()).count();
+        let first_err = report
+            .iter()
+            .find_map(|(p, r)| r.as_ref().err().map(|e| {
+                let line = e.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                format!("`{p}`: {}", line.chars().take(90).collect::<String>())
+            }))
+            .unwrap_or_else(|| "—".into());
+        md.push_str(&format!("| {rel} | {} | {green} | {first_err} |\n", pkgs.len()));
+        eprintln!("survey {rel}: {green}/{} packages green", pkgs.len());
+    }
+    Ok(md)
+}
+
+fn find_workspace_roots(dir: &Path, out: &mut Vec<PathBuf>) {
+    let boundary = ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"]
+        .iter()
+        .any(|f| dir.join(f).is_file());
+    if boundary {
+        out.push(dir.to_path_buf());
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            // Skip bazel's output/convenience symlink trees (bazel-bin, bazel-<ws>…)
+            // and dotdirs — they are not corpus.
+            let keep = p.is_dir()
+                && p.file_name().is_some_and(|n| {
+                    let n = n.to_string_lossy();
+                    !n.starts_with("bazel-") && !n.starts_with('.')
+                });
+            if keep {
+                find_workspace_roots(&p, out);
+            }
+        }
+    }
+}
+
+/// Packages of ONE workspace: dirs with BUILD[.bazel], not crossing into nested
+/// workspace roots.
+fn find_packages(dir: &Path, ws_root: &Path, out: &mut Vec<String>) {
+    if dir != ws_root
+        && ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"].iter().any(|f| dir.join(f).is_file())
+    {
+        return; // nested workspace — its own survey row
+    }
+    if ["BUILD", "BUILD.bazel"].iter().any(|f| dir.join(f).is_file()) {
+        out.push(dir.strip_prefix(ws_root).unwrap_or(dir).to_string_lossy().replace('\\', "/"));
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() && p.file_name().is_some_and(|n| !n.to_string_lossy().starts_with("bazel-")) {
+                find_packages(&p, ws_root, out);
+            }
+        }
+    }
+}
+
 pub(crate) fn run_command(repo_root: &Path, capture_mode: bool) -> std::process::ExitCode {
     if capture_mode {
         return match capture(repo_root) {

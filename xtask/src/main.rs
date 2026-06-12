@@ -110,6 +110,27 @@ fn main() -> ExitCode {
             }
         }
         Some("capture-goldens") => capture_goldens(),
+        Some("examples") if rest.first().map(String::as_str) == Some("--survey") => {
+            match examples::survey(&workspace_root()) {
+                Ok(md) => {
+                    let p = workspace_root().join("parity/examples/SURVEY.md");
+                    match std::fs::write(&p, md) {
+                        Ok(()) => {
+                            eprintln!("examples --survey: wrote {}", p.display());
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("examples --survey: write {}: {e}", p.display());
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("examples --survey: FAIL — {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("examples") => examples::run_command(
             &workspace_root(),
             rest.first().map(String::as_str) == Some("--capture"),
