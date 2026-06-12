@@ -409,3 +409,24 @@ burn). Flag mapping of record: the pool is Bazel's `--loading_phase_threads`, NO
 `--jobs` (execution-phase actions); both are PARSED today (the recognized-flags table,
 `-j` abbrev included) but unwired — `--loading_phase_threads` wires when razel-cli grows
 a tree command; `--jobs` belongs to razel-build's action executor.
+
+## Round delta — razelV3 round 47 (2026-06-12, ws-razel lane — S1 E-mode core)
+
+**S1 (V3sh1) landed** (`razelV3/s1-emode`, 35a5453): `workspace.rs` — `find_workspace_root`
+(MODULE.razel joins the boundary walk; strict ignores it), `resolve_build_file`
+(BUILD.razel XOR BUILD[.bazel]; strict makes .razel invisible, never an error),
+`e_mode_guard` (§3c rule 2 — dual workspace + unignored E-package warns; ERROR at S3).
+`GlobalFlags.strict_bazel` honored engine-wide; resolution runs UNCONDITIONALLY in
+`load_package` (the pre-pass AST cache can no longer mask XOR/guard); pre-pass shares
+the resolver. 14 e_mode tests.
+
+**Bazel-faithfulness fix en route:** ground truth (2026-06-12 experiment): BUILD.bazel
+WINS over BUILD when both exist — razel's probe order was backwards. Fixed + pinned.
+Fallout: 5 vendored dirs (snappy, rules_ml_toolchain/gpu/{nccl,cuda,sycl,nvshmem})
+relied on the wrong order to mask upstream; upstream files renamed `BUILD.bazel.upstream`
+(curation explicit, content preserved in-tree — embedded repos, local-only).
+Probe caught it BEFORE commit (round-40 lesson holding).
+
+**Floor:** suite 65/65, gates OK, sentinels green, TF 455/835 (floor exactly held).
+**Two-agent era begins:** RG (grazel lane) live in razel-grazel — GR0+GR1-slice landed
+same-day; S0 all-clear received (inbox 0002 done), Hello-message seam requested (0003).
