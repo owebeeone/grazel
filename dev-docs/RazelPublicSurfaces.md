@@ -44,8 +44,12 @@ ONE engine, TWO installables:
 - **grazel** — the all-singing variant: the SAME engine crates PLUS an in-process gryth
   p2p node (iroh endpoint) in one binary. grazel nodes talk iroh to OTHER grazel nodes;
   some nodes serve a gryth client or two (gryth-ui reaches the mesh through whichever
-  node it attaches to). grazeld is razeld-plus: every S-B service verbatim, plus the
-  node/p2p services.
+  node it attaches to). **Web clients don't make good p2p nodes (the browser/UDP
+  story), so a grazel node ALSO serves HTTP/WS to gryth clients — through a
+  still-to-be-defined GLADE layer** (the share kernel as the gryth-facing surface;
+  its definition is the glade arc's, not this doc's — here it is a named hole).
+  grazeld is razeld-plus: every S-B service verbatim, plus the node/p2p services,
+  plus the HTTP edge.
 
 **The compatibility arrow extends one level up** (the §3b not-locked-out doctrine,
 recursively: each layer needs the one below, never the reverse): **bazel ⊂ razel ⊂
@@ -240,9 +244,10 @@ in taut.
 
 **Connections are long-lived and multiplexed.** Many clients hold open connections
 concurrently; the framing carries subscription/stream ids over the same framed-CBOR
-transport (UDS first; the iroh fabric later carries it unchanged). Browser clients are
-GRYTH'S edge concern — the gryth service bridges daemon streams to WebSocket for
-gryth-ui; the daemon itself stays transport-minimal.
+transport (UDS first; the iroh fabric later carries it unchanged). Browser clients
+attach over HTTP/WS served by the GRAZEL node itself (§1b — web clients can't be p2p
+nodes), through the to-be-defined glade layer; RAZEL stays transport-minimal (UDS only —
+no HTTP anywhere in the boring distribution).
 
 **Nothing long blocks.** A 5-minute graph load answers in milliseconds with an invocation
 id and streams progress; the CLI is just a renderer of the same stream gryth consumes
@@ -263,7 +268,9 @@ re-request the snapshot), never unbounded daemon memory.
 
 (Open, marked not-yet-defined: the view query language's expressiveness v1 — start with
 the razel-analysis primitives (targets/deps/rdeps by pattern) and grow by gryth's pull;
-resync/backpressure tuning; auth for non-local transports — iroh-era.)
+resync/backpressure tuning; the GLADE LAYER — how grazel's HTTP edge presents
+daemon streams to gryth web clients (§1b's named hole, owned by the glade arc); auth
+for non-UDS transports — needed at grazel's HTTP/iroh edges, never for razel.)
 
 ## §5 Gryth's MVP slice (what the driving consumer needs first)
 
