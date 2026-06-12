@@ -130,6 +130,20 @@ fn js_rules(b: &mut GlobalsBuilder) {
         analyze_js_binary(session(eval), name, entry_point, unpack_strs(srcs))
     }
 
+    fn native_js_test<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] entry_point: Option<String>,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] data: Option<UnpackList<Value<'v>>>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        // S5: same launcher as js_binary (the test IS its runnable; the test
+        // protocol — exit code, test.log, summary — is the `test` verb's job).
+        let _ = data;
+        analyze_js_binary(session(eval), name, entry_point, unpack_strs(srcs))
+    }
+
     fn native_ts_project<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
@@ -149,7 +163,8 @@ pub(crate) fn module() -> Result<FrozenModule, String> {
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse(
             "@aspect_rules_js",
-            "js_binary = native_js_binary\nts_project = native_ts_project\n".to_owned(),
+            "js_binary = native_js_binary\njs_test = native_js_test\nts_project = native_ts_project\n"
+                .to_owned(),
             &Dialect::Extended,
         )
         .map_err(|e| format!("{e}"))?;

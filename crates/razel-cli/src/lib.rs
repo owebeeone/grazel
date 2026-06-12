@@ -46,6 +46,7 @@ pub fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("build") => cmd_build(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
+        Some("test") => cmd_test(&args[1..]),
         Some("affected") => cmd_affected(&args[1..]),
         Some("subscribe") => cmd_subscribe(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
@@ -466,6 +467,65 @@ fn cmd_run(args: &[String]) -> ExitCode {
             eprintln!("razel run: cannot exec {}: {e}", exe_path.display());
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `razel test <target>` (S5): build → exec the test → bazel's test protocol.
+/// Exit 0 = passed; exit 3 = build OK, test FAILED (bazel's code); exit 1 = the
+/// build itself failed. stdout+stderr land in
+/// `.razel-cache/testlogs/<pkg>/<name>/test.log`; one bazel-shaped summary line
+/// (`//pkg:name PASSED in 0.3s`) per target.
+fn cmd_test(args: &[String]) -> ExitCode {
+    let o = match parse_opts_with_rc(&["common", "build", "test"], args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    let Some(target_arg) = o.positionals.first().cloned() else {
+        eprintln!("razel test: expected <target>");
+        return ExitCode::from(EX_USAGE);
+    };
+    let result = match local_build(&o, &target_arg) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    if matches!(result.status, BuildStatus::Failed) {
+        print_build_result(&result);
+        return ExitCode::FAILURE; // build failure = 1, never 3
+    }
+    let Some(exe) = result.outputs.first() else {
+        eprintln!("razel test: `{target_arg}` produced no runnable test output");
+        return ExitCode::FAILURE;
+    };
+    let t0 = std::time::Instant::now();
+    let out = match std::process::Command::new(o.workspace.join(&exe.path))
+        .current_dir(&o.workspace)
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("razel test: cannot exec {}: {e}", exe.path);
+            return ExitCode::FAILURE;
+        }
+    };
+    let secs = t0.elapsed().as_secs_f64();
+    // bazel's testlogs shape under the razel cache dir.
+    let rest = target_arg.trim_start_matches('/');
+    let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
+    let log_dir = o.workspace.join(".razel-cache/testlogs").join(pkg).join(name);
+    let _ = std::fs::create_dir_all(&log_dir);
+    let mut log = out.stdout.clone();
+    log.extend_from_slice(&out.stderr);
+    let _ = std::fs::write(log_dir.join("test.log"), &log);
+    let passed = out.status.success();
+    println!(
+        "{target_arg} {} in {secs:.1}s",
+        if passed { "PASSED" } else { "FAILED" }
+    );
+    if passed {
+        ExitCode::SUCCESS
+    } else {
+        println!("  log: {}", log_dir.join("test.log").display());
+        ExitCode::from(3)
     }
 }
 
