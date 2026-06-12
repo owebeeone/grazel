@@ -257,6 +257,33 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 const DDS_ALLOWED_DEPS: &[&str] = &["razel-core", "razel-wire"];
 
 /// Scan a `[dependencies]` block for `razel-*` crates outside the allowlist (a boundary break).
+/// S0 (V3sh1, PublicSurfaces §1d): the grazel ARROW gate — no `razel-*` crate may
+/// depend on a `grazel-*` crate or on iroh, in ANY dependency section (the dependency
+/// direction enforced mechanically, same class as the DDS boundary below). grazel-*
+/// crates are exempt: consuming razel-* and iroh is their whole point.
+fn grazel_arrow_violations(crate_name: &str, cargo_toml: &str) -> Vec<String> {
+    if !crate_name.starts_with("razel-") {
+        return Vec::new();
+    }
+    let mut in_deps = false;
+    let mut out = Vec::new();
+    for line in cargo_toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_deps = t.contains("dependencies]"); // [dependencies], [dev-…], [build-…]
+            continue;
+        }
+        if !in_deps || t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let name = t.split([' ', '=']).next().unwrap_or("");
+        if name.starts_with("grazel-") || name == "iroh" || name.starts_with("iroh-") {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 fn dds_boundary_violations(cargo_toml: &str) -> Vec<String> {
     let mut in_deps = false;
     let mut out = Vec::new();
@@ -341,10 +368,22 @@ fn gates() -> ExitCode {
     let boundary: Vec<String> = std::fs::read_to_string(root.join("crates/razel-dds/Cargo.toml"))
         .map(|c| dds_boundary_violations(&c))
         .unwrap_or_default();
+    // S0: the grazel arrow — no razel-* crate depends on grazel-*/iroh (§1d).
+    let mut arrow = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root.join("crates")) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Ok(c) = std::fs::read_to_string(e.path().join("Cargo.toml")) {
+                arrow.extend(
+                    grazel_arrow_violations(&name, &c).into_iter().map(|d| (name.clone(), d)),
+                );
+            }
+        }
+    }
 
-    if violations.is_empty() && boundary.is_empty() && lang.is_empty() {
+    if violations.is_empty() && boundary.is_empty() && lang.is_empty() && arrow.is_empty() {
         eprintln!(
-            "xtask gates: OK — no ambient state anywhere in crates/ (AD2); razel-dds boundary intact (core+wire only); no language name in the engine core (C3c)"
+            "xtask gates: OK — no ambient state anywhere in crates/ (AD2); razel-dds boundary intact (core+wire only); no language name in the engine core (C3c); grazel arrow intact (no razel-*→grazel-*/iroh dep — S0)"
         );
         return ExitCode::SUCCESS;
     }
@@ -357,11 +396,17 @@ fn gates() -> ExitCode {
     for b in &boundary {
         eprintln!("  BOUNDARY razel-dds must not depend on `{b}` — the DDS spine is core+wire only");
     }
+    for (krate, dep) in &arrow {
+        eprintln!(
+            "  ARROW {krate} must not depend on `{dep}` — razel never grows a grazel/iroh dep (S0, §1d)"
+        );
+    }
     eprintln!(
-        "\nxtask gates: FAIL — {} ambient-state + {} language-in-core + {} boundary violation(s).",
+        "\nxtask gates: FAIL — {} ambient-state + {} language-in-core + {} boundary + {} arrow violation(s).",
         violations.len(),
         lang.len(),
-        boundary.len()
+        boundary.len(),
+        arrow.len()
     );
     ExitCode::from(1)
 }
@@ -382,6 +427,24 @@ mod gate_tests {
         // …a comment naming a provider is not a use, and test fixtures (after #[cfg(test)]) are skipped.
         assert!(language_leak_violations(core, "    // CcInfo captures headers").is_empty());
         assert!(language_leak_violations(core, "#[cfg(test)]\nmod t { let x = \"CcInfo\"; }").is_empty());
+    }
+
+    #[test]
+    fn grazel_arrow_gate_red_test() {
+        // S0 (V3sh1): the deny rule MUST catch a razel-* crate growing a grazel-*/iroh
+        // dep (the §1d arrow, red-tested per the S0 exit condition)…
+        let bad = "[dependencies]\ngrazel-cli-lib = { path = \"../grazel-cli-lib\" }\n";
+        assert_eq!(grazel_arrow_violations("razel-cli", bad), vec!["grazel-cli-lib"]);
+        let bad_iroh = "[dependencies]\niroh = \"0.35\"\n";
+        assert_eq!(grazel_arrow_violations("razel-loading", bad_iroh), vec!["iroh"]);
+        // …while the legal direction (grazel-* consuming razel-*) and razel-*'s own
+        // deps pass untouched.
+        let legal = "[dependencies]\nrazel-daemon = { path = \"../razel-daemon\" }\niroh = \"0.35\"\n";
+        assert!(grazel_arrow_violations("grazel-node", legal).is_empty());
+        assert!(grazel_arrow_violations("razel-cli", "[dependencies]\nrazel-wire = {}\n").is_empty());
+        // dev-dependencies count too (the arrow has no test exemption).
+        let dev = "[dev-dependencies]\ngrazel-cli-lib = {}\n";
+        assert_eq!(grazel_arrow_violations("razel-build", dev), vec!["grazel-cli-lib"]);
     }
 
     #[test]
