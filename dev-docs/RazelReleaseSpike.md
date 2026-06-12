@@ -138,11 +138,13 @@ boundaries). Four candidate designs, with their failure modes:
   Bazel-declared targets. Maximum power; silently forks the graph the moment an override
   lands (the two engines build different things from the same tree while both "work").
   Rejected as default posture: it is the embrace-extend shape from the inside.
-- **(B) Additive-only sibling** — razel evaluates BUILD[.bazel] with Bazel semantics,
-  then BUILD.razel into the SAME package namespace; name collisions ERROR; a BUILD.razel
-  alone NEVER creates a package (keeps the package structures congruent by construction).
-  Razel-only targets (glade declarations, derivations, capability registrations) live
-  beside the shared ones, invisible to Bazel, additively.
+- **(B) Additive-only sibling — REJECTED (Gianni's scope argument, 2026-06-12).** The
+  kill: references must flow one way (a `.bazel` file may NEVER see a `.razel`-declared
+  target, or the project stops being Bazel-buildable), which forces razel-only targets
+  into a SECOND SCOPE — and then `//x/y:all`, `/...`, `test_suite` expansion and `query`
+  either mean different graphs per engine (the same label expression, engine-dependent)
+  or need new label syntax to address the second scope (forking the deepest shared
+  contract there is). Either way it is design A with extra steps.
 - **(C) No BUILD.razel: in-band loaded rules** — razel-native features are ordinary
   Starlark rules `load()`ed in the SHARED BUILD file from a razel-provided module whose
   BAZEL-side implementation degrades gracefully (no-op or genuinely portable impls) — a
@@ -153,15 +155,15 @@ boundaries). Four candidate designs, with their failure modes:
   third-party BUILD adjustments use the EXISTING repo-patch machinery (MODULE.razel
   overrides + patch files — the same mechanism Bazel itself uses for its own deps).
 
-**Recommendation (to ratify):** C + D now, B defined-on-paper as the escape hatch, A
-never. Rationale: C keeps razel-native features inside the ecosystem's shared contract
-(and the compat-shim module is itself a not-locked-out asset: razel features expressed as
-things Bazel can load are features that can never be locked out); D already exists and
-covers the third-party case; B's additive-only semantics are written here so that if a
-real consumer (likely gryth) hits a case where loading a shim is impossible, the file can
-exist without a design scramble — but every BUILD.razel is a small secession from the
-shared contract, so it should need a reason. The tripwire for revisiting: the first time
-a glade/gryth declaration feels forced inside design C.
+**DECISION: C + D; A and B rejected — there is no BUILD.razel.** C's clinching property
+is namespace CONGRUENCE: shim-loaded razel-native targets EXIST under Bazel (as degraded
+no-ops), so `:all`/`/...`/query/test_suite enumerate the SAME target set in both engines.
+Two obligations on the compat shim follow: (1) Bazel-side implementations must be CHEAPLY
+BUILDABLE no-ops — `:all` stays green under Bazel, not merely parseable; (2) razel-native
+targets carry a standard `razel-only` tag so Bazel users can exclude them with stock
+`--build_tag_filters` — filtering inside the contract, never a second scope. First-party
+cases always have C (you own the BUILD); third-party trees have D (repo patches). The
+escape-hatch role B was reserved for is covered by D.
 
 ## §4 Acceptance
 
