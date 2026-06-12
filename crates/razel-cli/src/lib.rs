@@ -45,6 +45,7 @@ const EX_USAGE: u8 = 64;
 pub fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("build") => cmd_build(&args[1..]),
+        Some("run") => cmd_run(&args[1..]),
         Some("affected") => cmd_affected(&args[1..]),
         Some("subscribe") => cmd_subscribe(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
@@ -387,6 +388,47 @@ fn cmd_build(args: &[String]) -> ExitCode {
     match result.status {
         BuildStatus::Failed => ExitCode::FAILURE,
         _ => ExitCode::SUCCESS,
+    }
+}
+
+/// `razel run <target> [-- args…]` (S3b): build, then exec the target's runnable
+/// output with the program args, propagating its exit status. Local path today; the
+/// daemon path becomes the Command service's `run` method at S3c (client #1 holds —
+/// this function IS the future service client's rendering half).
+fn cmd_run(args: &[String]) -> ExitCode {
+    let o = match parse_opts(args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    let Some(target_arg) = o.positionals.first().cloned() else {
+        eprintln!("razel run: expected <target> [-- args…]");
+        return ExitCode::from(EX_USAGE);
+    };
+    let prog_args = &o.positionals[1..];
+
+    let result = match local_build(&o, &target_arg) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    if matches!(result.status, BuildStatus::Failed) {
+        print_build_result(&result);
+        return ExitCode::FAILURE;
+    }
+    let Some(exe) = result.outputs.first() else {
+        eprintln!("razel run: `{target_arg}` produced no runnable output");
+        return ExitCode::FAILURE;
+    };
+    let exe_path = o.workspace.join(&exe.path);
+    match std::process::Command::new(&exe_path)
+        .args(prog_args)
+        .current_dir(&o.workspace)
+        .status()
+    {
+        Ok(st) => ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8),
+        Err(e) => {
+            eprintln!("razel run: cannot exec {}: {e}", exe_path.display());
+            ExitCode::FAILURE
+        }
     }
 }
 

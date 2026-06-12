@@ -30,6 +30,7 @@ mod registry; // C3a: the provider-schema registry (source of truth for schemas/
 // Per-language native rulesets — each maps a `@rules_*//` load to native rules, registered in
 // `rules::ruleset_modules`. (Independent modules so language support lands without touching the
 // shared cc/analysis core.)
+mod js_rules; // S3a: the razel-native js rulepack (@razel_js// — gryth's grammar)
 mod py_rules;
 mod rust_rules;
 mod sh_rules;

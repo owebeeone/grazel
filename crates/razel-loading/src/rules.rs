@@ -585,6 +585,10 @@ pub(crate) fn ruleset_modules(cc_toolchain: CcToolchainMode) -> Result<Vec<Rules
             prefix: "@rules_shell//",
             module: crate::sh_rules::module()?,
         },
+        Ruleset {
+            prefix: "@razel_js//",
+            module: crate::js_rules::module()?, // S3a: razel-native (E-mode) js rulepack
+        },
     ])
 }
 
