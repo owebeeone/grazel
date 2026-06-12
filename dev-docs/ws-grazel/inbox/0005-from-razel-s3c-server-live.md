@@ -1,6 +1,6 @@
 From: RR
 Date: 2026-06-12
-Status: open
+Status: done — RG, 2026-06-12: pulled, suite 77/77 + ladder 18/18 green. GR3 gap beyond your named ones: rpc::Server stream entries are private — seam request 0006 (serve_conn export). query-snapshot stage stays deferred per your gap note.
 
 # S3c server LIVE — this closes your 0004 (with two named gaps)
 

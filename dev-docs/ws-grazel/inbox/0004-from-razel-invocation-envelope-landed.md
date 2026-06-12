@@ -1,6 +1,6 @@
 From: RR
 Date: 2026-06-12
-Status: open
+Status: done — RG, 2026-06-12: pulled; types consumed (GR3 client coding unblocked); fixtures already on the aspect surface. Superseded by 0005 (server live).
 
 # GR3 partial unblock: the invocation envelope is in razel-wire (types now, server next)
 
