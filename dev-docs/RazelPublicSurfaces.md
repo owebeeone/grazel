@@ -10,7 +10,8 @@ which builds the first slice; subordinate to `RazelV3Plan.md`'s invariants.*
 **The deliberate break from Bazel (Gianni, 2026-06-12): Bazel runs one server per
 (workspace, output base); razel runs ONE resident daemon serving MULTIPLE isolated
 workspaces concurrently** — gryth clients work across workspaces, and the daemon is the
-one fabric they all reach. Mechanics:
+one fabric they all reach. (Grazel partitions this into named SERVICE SCOPES — one such
+daemon per scope, §1e; everything in this section describes each daemon.) Mechanics:
 
 - **Workspace handles.** Lifecycle.open(path) → a workspace handle; every other call is
   handle-scoped. Opening the same root twice yields the same context (refcounted); the
@@ -55,11 +56,12 @@ crates, never the other way.
 
 Local plumbing when both are installed on one machine:
 
-- **Separate UDS namespaces.** grazel↔grazeld comms get their OWN socket (grazel's
-  daemon root, sibling to razel's — `_grazel_<user>` beside `_razel_<user>`), so razeld
-  and grazeld coexist without ambiguity; each CLI dials its own daemon. Same wire
-  protocol and IR — the grazel services are additional taut services in the same
-  namespace, so a razel client pointed at grazeld just sees the S-B subset.
+- **Separate UDS namespaces.** grazel↔grazeld comms get their OWN sockets — one per
+  service scope under `~/.grazel/.uds/<scope>` (§1e) — while razeld keeps
+  `_razel_<user>/daemon/`, so razeld and grazelds coexist without ambiguity; each CLI
+  dials its own daemon. Same wire protocol and IR — the grazel services are additional
+  taut services in the same namespace, so a razel client pointed at grazeld just sees
+  the S-B subset.
 - **Shared caches, arbitrated outputs.** The content-addressed download cache is shared
   by construction. Output bases are NOT keyed by distribution — switching a workspace
   between razel and grazel must not rebuild the world — so the single-writer rule
@@ -124,39 +126,56 @@ rather than by porting:
 - Strict-mode goldens (T3) run against BOTH binaries' build verbs — cheap, same lib, and
   it keeps the "grazel is still boring bazel underneath" claim tested rather than assumed.
 
-## §1e Finding the daemon (discovery + configuration — nailed)
+## §1e Finding the daemon: SERVICE SCOPES (discovery + configuration — nailed)
 
-**A workspace does not pick a daemon; a USER's daemon serves all their workspaces (§1).**
-Discovery is therefore per-user and per-distribution:
+**A workspace does not pick a daemon; it names a SCOPE (Gianni, 2026-06-12).** A scope
+is a named workspace COLLECTION served by its own grazeld instance — the isolation unit
+ABOVE workspaces: own process, own UDS, own iroh identity, own watch set. The motivating
+case is trust separation: `customerA` and `customerB` workspace collections never share
+a process, a key, or a fabric — customerA's mesh cannot even learn that customerB
+exists. Scopes are a GRAZEL concept; razel has no mesh, nothing to separate, and keeps
+one boring per-user daemon at `_razel_<user>/daemon/` (socket + daemon.json + launch
+lock there).
 
-- **Well-known daemon roots,** sibling to the cache roots in the round-36 layout:
-  `_razel_<user>/daemon/` and `_grazel_<user>/daemon/`, each containing `daemon.sock`,
-  `daemon.json` (pid, build version, wire version, start time; grazel adds its public
-  iroh node id), and `daemon.lock` (launch-race arbitration).
-- **Dial procedure** (shared razel-cli lib code, both CLIs): resolve daemon root →
-  connect socket → taut hello handshake (client build + wire version) → on wire-version
-  mismatch, graceful-shutdown the old daemon and relaunch the matching binary (Bazel's
-  restart semantics); on stale socket (refused + dead pid in daemon.json), clean and
-  autostart. `--no_autostart` for CI/scripting.
-- **Configuration precedence** (highest wins):
-  1. `--daemon_root=<path>` on the command line;
-  2. `RAZEL_DAEMON_ROOT` / `GRAZEL_DAEMON_ROOT` env;
-  3. rc files — the delta chain extends RECURSIVELY: `.bazelrc` → `.razelrc` →
-     `.grazelrc`, each layer a pure delta the layer below never reads. razel ignores
-     `.grazelrc` entirely; a grazel-only flag in `.razelrc` is an ERROR (razel must
-     never become grazel-aware — the §1b crate arrow, expressed in config);
-  4. user config `~/.config/grazel/config.toml` (grazel only: node identity/key
-     location, mesh defaults — machine/user concerns that do NOT belong in workspace
-     files);
-  5. built-in per-user default root.
-- **Node identity:** the iroh secret key is per-user, stored under the grazel config
-  dir — NOT under the daemon root (daemon roots live in tmp and are disposable;
-  identity is not). `daemon.json` publishes only the public node id. v1 is one identity
-  per user; `--profile` is reserved, unimplemented.
+- **Sockets:** one per scope at `~/.grazel/.uds/<scope>` — a flat dir of short,
+  user-only-perm socket paths (flat and short deliberately: macOS caps UDS paths at
+  104 chars). Per-scope daemon state lives in `~/.grazel/scopes/<scope>/`: daemon.json
+  (pid, build + wire versions, public node id), the iroh secret key, the launch lock,
+  scope config.
+- **Binding:** the workspace's `.grazelrc` carries `service_scope=customerA`. A grazel
+  command run anywhere in that workspace dials the customerA socket and sends the
+  WORKSPACE ROOT in its hello — the daemon discriminates which workspace handle the
+  command applies to (the §1 handle model unchanged; the scope only chooses WHICH
+  daemon). No `service_scope` → the `default` scope: zero config stays zero config.
+- **Membership is BOTH static and dynamic** ("use both"): the scope's config MAY pin
+  workspaces (pre-opened and watched from daemon start — the long-lived-service
+  posture), and any invocation whose rc names the scope dynamically ADDS its workspace
+  (Lifecycle.open, refcounted, idles out per §1). Pinned = present from start;
+  dynamic = present while used.
+- **One scope per workspace at a time:** the rc binding makes every invocation in a
+  workspace dial the same daemon, and the §1b cross-daemon output-base lock backs it
+  mechanically — it already arbitrates N daemons (razeld + any number of scope
+  grazelds), so a mis-bound or doubly-claimed workspace fails loud, naming the holder.
+- **Identity is per-SCOPE, not per-user:** each scope dir holds its own iroh secret
+  key; meshes are joined per scope; daemon.json publishes only the public node id.
+  There is no separate `--profile` mechanism — scopes ARE the profiles.
+- **Override chain** (highest wins): `--scope=<name>` flag → `GRAZEL_SCOPE` env →
+  `.grazelrc` `service_scope` → `default`. The rc delta chain stays recursive:
+  `.bazelrc` → `.razelrc` → `.grazelrc`, each a pure delta the layer below never reads;
+  razel ignores `.grazelrc` entirely, and a grazel-only key in `.razelrc` is an ERROR
+  (razel must never become grazel-aware — the §1b crate arrow, expressed in config).
+- **Dial procedure** (shared razel-cli lib code, both CLIs): resolve scope → connect
+  its socket → taut hello (client build + wire version + workspace root) → on
+  wire-version mismatch, graceful-shutdown and relaunch THAT scope's daemon only
+  (Bazel's restart semantics, scope-local); on stale socket (refused + dead pid),
+  clean and autostart `grazeld --scope=<name>`. `--no_autostart` for CI/scripting.
+- **Thread budget consequence:** the §1c cap (= cores) is PER DAEMON; concurrent scopes
+  contend at the OS level. Accepted for v1 — scopes are coarse and typically one is hot
+  at a time; a machine-level broker is versioned-store-era work.
 - **When grazel is installed:** recommended setup is grazel CLI everywhere (grazeld is a
-  strict superset); razel CLI remains for `--strict_bazel` parity work. Running both
-  daemons is SAFE (the §1b cross-daemon output-base lock arbitrates writers) but means
-  two engines warming the same workspace — a cost, not a hazard.
+  strict superset); razel CLI remains for `--strict_bazel` parity work. Running razeld
+  beside scope daemons is SAFE (the output-base lock arbitrates writers) but means two
+  engines warming the same workspace — a cost, not a hazard.
 
 ## §2 The surfaces (enumerated — nothing else is public)
 
@@ -273,7 +292,9 @@ at its own tier.
   sequences with deterministic fixtures (fixture workspaces, fake watcher events).
   Covers the unhappy paths the engine battery can't see: connect/reconnect, subscription
   resync after drop, slow-consumer buffer bounds, invocation cancel, daemon idle-out,
-  two workspaces open concurrently (the §1 isolation claim as a test, not a sentence).
+  two workspaces open concurrently (the §1 isolation claim as a test, not a sentence),
+  and scope routing (a `.grazelrc` `service_scope` binding dials the right socket and
+  the hello's workspace root lands on the right handle — §1e as a test).
   **The CLI corollary of client #1 discipline: every CLI integration test IS a server-API
   test** — the CLI has no privileged path, so its test suite exercises S-B for free, and
   a CLI-visible behavior with no transcript equivalent is a missing T1 test.
