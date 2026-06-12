@@ -29,9 +29,9 @@ impossible.
   - **Command** — build/run/test/fetch invocations with structured results.
   - **Query** — the graph oracle: targets, deps/rdeps, providers, actions, packages;
     razel-analysis's existing machinery formalized.
-  - **Events** — a structured build-event stream, **BEP-aligned** (Bazel's Build Event
-    Protocol is its one public server-ish surface; emitting BEP-compatible events buys the
-    existing ecosystem's tooling and is itself a bazel-compat claim, golden-testable).
+  - **Events** — a structured build-event stream, BEP-*shaped* (modeled in taut; a
+    literal-protobuf BEP adapter is a later optional bridge to bazel-ecosystem tooling —
+    see §4).
   - **Lifecycle** — workspace open/status/invalidate, file-watch subscription, shutdown.
 - **S-C: Workspace file contracts.** BUILD[.bazel]/MODULE.bazel/.bazelrc consumed with
   Bazel semantics; `BUILD.razel`/`MODULE.razel`/`.razelrc` per the V3sh1 §3 definitions.
@@ -46,17 +46,26 @@ CHANGELOG'd per release). Bazel-compat surfaces have no independent version: the
 contract is "what bazel-7.7.0 does," enforced by strict-mode goldens; the pinned bazel
 version is itself part of the public claim and bumps deliberately.
 
-## §4 Protocol direction (decided enough to build; finalized at S3)
+## §4 Protocol: TAUT, not gRPC (decision: Gianni 2026-06-12)
 
-Service definitions are TRANSPORT-AGNOSTIC; the first transport is LOCAL (unix domain
-socket). The wire-format decision is taken at S3 with one thumb on the scale: **gryth is
-ts/npm**, so the protocol must be first-class from node (JSON-RPC or connect/gRPC-web
-shaped both qualify; a hand-rolled JSON-RPC over UDS is an acceptable first cut that can
-gain a schema'd transport later — the service SHAPE is the contract, the framing may
-harden). Future transports ride the same services: the iroh path (remote/distributed
-workspace access, the gryth architecture's native fabric) is explicitly anticipated and
-explicitly NOT v1. BSP (Build Server Protocol) is noted as a possible later ADAPTER over
-S-B for IDE ecosystems — never the native surface.
+The wire contract is authored as **taut IR** and generated — this is not new
+infrastructure, it is the EXISTING razel-wire architecture promoted to the public
+surface: `wire/razel.taut.py` is the single source of truth; `tautc` generates the native
+Rust types + deterministic-CBOR codec into `razel-wire` (server + razel-cli share them),
+and taut's **TypeScript backend** generates the gryth/node client from the SAME IR —
+cross-language type identity by construction, no protobuf/gRPC toolchain anywhere.
+Properties this buys over gRPC: deterministic encoding (golden-testable wire bytes),
+one governed IR for every language razel touches (rust/ts today; taut also carries
+go/java/kotlin/swift/cpp backends), and codegen outside the cargo graph (the established
+xtask discipline).
+
+Transport: framed deterministic-CBOR taut messages over a LOCAL unix domain socket first;
+the service definitions are transport-agnostic and future transports ride unchanged — the
+iroh path (remote/distributed workspace access, gryth's native fabric) is explicitly
+anticipated and explicitly NOT v1. Ecosystem adapters are exactly that — adapters over
+S-B, never the native surface: a literal-protobuf BEP emitter for bazel-ecosystem tools,
+a BSP shim for IDEs, both optional and later; the native Events service is BEP-*shaped*
+in taut.
 
 ## §5 Gryth's MVP slice (what the driving consumer needs first)
 
