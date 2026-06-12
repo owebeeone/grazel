@@ -51,6 +51,14 @@ never deleted — the folder is the log.
 ownership rule keeps merges trivial — a conflict outside the declared seams means
 someone broke the ownership rule, stop and say so.
 
+Two mechanical cases that are NOT ownership breaches:
+- **Push rejected (non-fast-forward):** the other lane pushed first. `git pull --rebase`
+  then push again — disjoint file ownership keeps the rebase clean (prefer rebase over
+  merge commits; both lanes, so history stays linear).
+- **`Cargo.lock` conflict:** the one shared file both lanes rewrite (any crate or dep
+  addition touches it). Resolve by taking EITHER side, then `cargo build` to regenerate,
+  and commit the regenerated lock. Never hand-merge lockfile hunks.
+
 ## Process (both lanes)
 
 TDD first — the failing test precedes the implementation (the grazel lane's acceptance
