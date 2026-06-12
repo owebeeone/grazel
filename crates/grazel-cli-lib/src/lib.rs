@@ -9,7 +9,6 @@
 pub mod daemon;
 pub mod dial;
 pub mod http;
-pub mod outlock;
 pub mod paths;
 pub mod scope;
 pub mod wstest;
@@ -79,7 +78,63 @@ pub fn run(args: &[String]) -> ExitCode {
         // The grazel namespace. `daemon` and `version` deliberately shadow
         // razel's: daemon = grazeld (one-binary rule), version = this distribution.
         Some("scope" | "ws" | "version" | "daemon") => grazel_verb(args),
+        // GR3: build/affected go THROUGH the scope daemon (GrazelVerbs.md) —
+        // §1e posture; flag semantics stay razel's verbatim.
+        Some("build" | "affected") => routed_razel_verb(args),
         _ => razel_cli::run(args),
+    }
+}
+
+/// Daemon-route a razel verb: peel ONLY `--scope` (grazel-namespaced), ensure
+/// the scope daemon (hello → membership → output lock), delegate with
+/// `--daemon --socket <scope socket>` injected. Explicit user routing
+/// (`--daemon`/`--socket` present) wins: delegate VERBATIM, inject nothing.
+fn routed_razel_verb(args: &[String]) -> ExitCode {
+    if args.iter().any(|a| a == "--daemon" || a == "--socket" || a.starts_with("--socket=")) {
+        return razel_cli::run(args);
+    }
+    let mut flag_scope = None;
+    let mut rest: Vec<String> = Vec::with_capacity(args.len());
+    for a in args {
+        match a.strip_prefix("--scope=") {
+            Some(v) => flag_scope = Some(v.to_string()),
+            None => rest.push(a.clone()),
+        }
+    }
+    // Workspace for SCOPE RESOLUTION only — razel's -C/--workspace is scanned
+    // non-destructively; the flag itself still reaches razel's parser.
+    let mut workspace = None;
+    let mut it = rest.iter().peekable();
+    while let Some(a) = it.next() {
+        if a == "-C" || a == "--workspace" {
+            workspace = it.peek().map(|v| PathBuf::from(*v));
+        } else if let Some(v) = a.strip_prefix("--workspace=") {
+            workspace = Some(PathBuf::from(v));
+        }
+    }
+    let workspace = workspace
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let workspace = workspace.canonicalize().unwrap_or(workspace);
+
+    let routed = std::env::current_exe()
+        .map_err(|e| format!("current_exe: {e}"))
+        .and_then(|bin| {
+            let p = resolve_paths(flag_scope.as_deref(), &workspace)?;
+            dial::ensure(&p, &workspace, true, &bin)?;
+            Ok(p.socket)
+        });
+    match routed {
+        Ok(socket) => {
+            rest.push("--daemon".into());
+            rest.push("--socket".into());
+            rest.push(socket.display().to_string());
+            razel_cli::run(&rest)
+        }
+        Err(e) => {
+            eprintln!("grazel: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

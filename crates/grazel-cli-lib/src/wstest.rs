@@ -46,6 +46,7 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "two-scopes-concurrent", run: two_scopes_concurrent },
         Stage { name: "http-equivalence", run: http_equivalence },
         Stage { name: "http-localhost-only", run: http_localhost_only },
+        Stage { name: "build-parity", run: build_parity },
     ]
 }
 
@@ -595,6 +596,74 @@ cc_obj(name="widget", src="widget.c")
     for scope in ["ca", "cb"] {
         stop_scope(ctx, &home, &ctx.tmp.join(format!("ws-{scope}")), scope);
     }
+    result
+}
+
+// --- GR3a: verbs through the scope daemon (GrazelVerbs.md) ---------------------
+
+/// The §1d claim re-proven over the daemon path (GR3 exit): WARM `grazel build`
+/// and WARM `razel build --daemon --socket <same grazeld>` must be byte-identical
+/// in stdout and exit code — same lib, same daemon, same bytes.
+fn build_parity(ctx: &StageCtx) -> Result<(), String> {
+    const BUILD: &str = r#"
+def _impl(ctx):
+    out = ctx.attr.name + ".o"
+    ctx.actions.run(executable="/usr/bin/cc", outputs=[out], inputs=[ctx.attr.src],
+                    arguments=["-c", ctx.attr.src, "-o", out])
+    return [DefaultInfo(files=[out])]
+cc_obj = rule(implementation=_impl, attrs={"src":1})
+cc_obj(name="widget", src="widget.c")
+"#;
+    let razel_bin = ctx.grazel_bin.parent().expect("bin dir").join("razel");
+    if !razel_bin.is_file() {
+        return Err(format!(
+            "razel binary missing at {} — build it (cargo build -p razel-cli); parity needs both CLIs",
+            razel_bin.display()
+        ));
+    }
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("BUILD"), BUILD).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("widget.c"), "int answer(void) { return 42; }\n")
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let run = |bin: &Path, args: &[&str]| -> Result<(i32, Vec<u8>), String> {
+            let out = Command::new(bin)
+                .current_dir(&ws)
+                .env("GRAZEL_HOME", &home)
+                .env_remove("GRAZEL_SCOPE")
+                .args(args)
+                .output()
+                .map_err(|e| e.to_string())?;
+            Ok((out.status.code().unwrap_or(-1), out.stdout))
+        };
+        // Cold grazel build autostarts the scope daemon and warms the cache…
+        let (c0, _) = run(&ctx.grazel_bin, &["build", "widget", "--scope=par"])?;
+        if c0 != 0 {
+            return Err(format!("cold grazel build failed ({c0})"));
+        }
+        // …then the WARM pair must agree byte-for-byte.
+        let (gc, gout) = run(&ctx.grazel_bin, &["build", "widget", "--scope=par"])?;
+        let socket = ScopePaths::new(&home, "par")?.socket;
+        let (rc, rout) = run(
+            &razel_bin,
+            &["build", "widget", "--daemon", "--socket", &socket.display().to_string()],
+        )?;
+        if gc != rc {
+            return Err(format!("exit codes diverge: grazel {gc} ≠ razel {rc}"));
+        }
+        if gout != rout {
+            return Err(format!(
+                "stdout diverges ({} vs {} bytes):\n--- grazel ---\n{}--- razel ---\n{}",
+                gout.len(),
+                rout.len(),
+                String::from_utf8_lossy(&gout),
+                String::from_utf8_lossy(&rout)
+            ));
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "par");
     result
 }
 

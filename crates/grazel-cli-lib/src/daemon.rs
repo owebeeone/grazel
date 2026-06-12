@@ -12,9 +12,8 @@
 //! `{1: ok, 2: payload, 3: error}` response — razel-daemon's, verbatim.
 //! `build.subscribe` through grazeld is debt D2 until GR3 wires streaming.
 
-use crate::outlock;
 use crate::paths::ScopePaths;
-use razel_daemon::{rpc, transport};
+use razel_daemon::{outlock, rpc, transport};
 use razel_wire::{Cbor, Hello, VersionInfo, decode, encode};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -89,6 +88,9 @@ struct Member {
     server: rpc::Server,
     pinned: bool,
     last_used: Instant,
+    /// The §1b writer claim — RAII from razel-daemon (the ONE impl of the
+    /// contract this lane proposed in inbox 0005); releases on drop, pid-checked.
+    _lock: outlock::OutLock,
 }
 
 pub(crate) struct State {
@@ -118,7 +120,7 @@ impl State {
             m.last_used = Instant::now();
             return Ok(());
         }
-        outlock::acquire(&root, &self.paths.scope)?;
+        let lock = outlock::acquire(&root, "grazeld", &self.paths.scope)?;
         let mfile = self.member_file(&root);
         std::fs::create_dir_all(mfile.parent().unwrap()).map_err(|e| e.to_string())?;
         let kind = if pinned { "pinned" } else { "dynamic" };
@@ -129,14 +131,14 @@ impl State {
                 server: rpc::Server::new(root.clone(), root.join(".razel-cache")),
                 pinned,
                 last_used: Instant::now(),
+                _lock: lock,
             },
         );
         Ok(())
     }
 
     fn close_member(&self, members: &mut HashMap<PathBuf, Member>, root: &Path) {
-        members.remove(root);
-        outlock::release(root);
+        members.remove(root); // Member drop releases the outlock
         let _ = std::fs::remove_file(self.member_file(root));
     }
 
