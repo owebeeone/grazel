@@ -87,9 +87,11 @@ There will be **no `rules_go.rs`, no `rules_js.rs` — ever** (§0.4 ratchet). A
    never in-track hacks — the supervisor dedups across tracks (go and js will both want
    runfiles: one ticket).
 
-Tracks fan out **after L2** (the Starlark core proven on a real ruleset). Candidate order: go
-(non-cc-shaped compile+link model — the best generality probe; needs `ctx.actions.write` for
-importcfg, a small generic engine move), then js/ts. Existing `.rs` language modules retire per
+Tracks fan out **after L2** (the Starlark core proven on a real ruleset). Candidate order
+(AMENDED 2026-06-12 by V3sh1 — `RazelReleaseSpike.md`, the gryth side hustle, subordinate
+to this plan): **js/ts first** (gryth's stack; lands as `rules_shims_js.bzl` per this
+section — the ratchet holds), then go (non-cc-shaped compile+link model — the best
+generality probe; needs `ctx.actions.write` for importcfg, a small generic engine move). Existing `.rs` language modules retire per
 the ladder's Deletes column; `native_cc.rs`'s compiler half becomes a *toolchain* (where naming
 cc is legitimate), not a language rule.
 
