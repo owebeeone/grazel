@@ -216,6 +216,20 @@ impl State {
         }
     }
 
+    /// The stream-routing target (debt D9: sole member until GR3's successor
+    /// gives requests workspace identity). Shared by UDS, WS, and HTTP paths.
+    pub(crate) fn sole_member_server(&self) -> Result<Arc<rpc::Server>, String> {
+        let members = self.members.lock().unwrap();
+        match members.len() {
+            0 => Err("no workspace member: hello first".into()),
+            1 => Ok(members.values().next().expect("len checked").server.clone()),
+            n => Err(format!(
+                "scope {:?} serves {n} workspaces; per-invocation routing arrives with GR3",
+                self.paths.scope
+            )),
+        }
+    }
+
     /// Track a serviced request for the idle watchdog — both transports count.
     pub(crate) fn enter(&self) {
         self.active.fetch_add(1, Ordering::SeqCst);
@@ -240,23 +254,13 @@ impl State {
             // (`serve_conn`, the inbox-0006 seam). It reads the first frame
             // itself, so replay the one we consumed — deterministic CBOR makes
             // the replayed bytes identical to what the client sent.
-            let members = self.members.lock().unwrap();
-            let resp = match members.len() {
-                0 => Some(err("no workspace member: hello first")),
-                1 => None,
-                n => Some(err(&format!(
-                    "scope {:?} serves {n} workspaces; per-invocation routing arrives with GR3",
-                    self.paths.scope
-                ))),
+            return match self.sole_member_server() {
+                Ok(server) => {
+                    let mut replay = ReplayConn::new(&raw, conn);
+                    server.serve_conn(&mut replay)
+                }
+                Err(e) => write_frame(conn, &encode(&err(&e))),
             };
-            if let Some(resp) = resp {
-                drop(members);
-                return write_frame(conn, &encode(&resp));
-            }
-            let server = members.values().next().expect("len checked").server.clone();
-            drop(members);
-            let mut replay = ReplayConn::new(&raw, conn);
-            return server.serve_conn(&mut replay);
         }
         let (resp, shutdown) = self.respond(&req);
         write_frame(conn, &encode(&resp))?;

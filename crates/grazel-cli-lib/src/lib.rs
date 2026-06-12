@@ -11,6 +11,7 @@ pub mod dial;
 pub mod http;
 pub mod paths;
 pub mod scope;
+pub mod ws;
 pub mod wstest;
 
 use paths::ScopePaths;

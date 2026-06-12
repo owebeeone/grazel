@@ -1,4 +1,10 @@
-# GrazelHttpEdge — GR4 design (GR4a landed early; GR4b gated on GR3)
+# GrazelHttpEdge — GR4 design (GR4a landed early; GR4b landed post-GR3)
+
+*Update: GR4b is IN (tag `grazel/GR4`) — `GET /events` upgrades to WS (hand-rolled
+RFC6455 server half, vectors pinned); the first WS message is the request envelope,
+each server message one response envelope, payload-byte-identical to a UDS
+subscriber (`ws-stream-equivalence` proves it on the invocation log). "One
+protocol, three transports" is now provable end-to-end.*
 
 *2026-06-12, RG. GR3 blocks on razel-side S3 (Command service on the wire); per
 GrazelWorkstream §3 ("sequence the trees so neither idles") the UNBLOCKED half of

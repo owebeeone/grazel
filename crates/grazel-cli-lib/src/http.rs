@@ -70,6 +70,19 @@ fn handle(state: &State, stream: &mut TcpStream) -> std::io::Result<()> {
     let request_line = lines.next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    // GR4b: `GET /events` upgrades to a WS stream (ws.rs); everything streamed
+    // rides there — /rpc stays strictly one-shot.
+    if method == "GET" && path == "/events" {
+        let ws_key = lines
+            .clone()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.eq_ignore_ascii_case("sec-websocket-key"))
+            .map(|(_, v)| v.trim().to_string());
+        return match ws_key {
+            Some(key) => crate::ws::serve_upgraded(state, stream, &key),
+            None => respond_http(stream, "400 Bad Request", b""),
+        };
+    }
     if path != "/rpc" {
         return respond_http(stream, "404 Not Found", b"");
     }

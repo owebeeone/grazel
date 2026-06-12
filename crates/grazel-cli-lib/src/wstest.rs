@@ -49,6 +49,7 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "build-parity", run: build_parity },
         Stage { name: "build-streamed", run: build_streamed },
         Stage { name: "run-verb", run: run_verb },
+        Stage { name: "ws-stream-equivalence", run: ws_stream_equivalence },
     ]
 }
 
@@ -758,6 +759,127 @@ fn run_verb(ctx: &StageCtx) -> Result<(), String> {
         Ok(())
     })();
     stop_scope(ctx, &home, &ws, "rv");
+    result
+}
+
+/// Stage-side WS client, masked frames per RFC (the server requires masking).
+struct WsClient(std::net::TcpStream);
+
+impl WsClient {
+    fn connect(port: u16) -> Result<Self, String> {
+        use std::io::{Read, Write};
+        let mut s =
+            std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+        // Fixed nonce: the handshake's accept hash is what we verify, not entropy.
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let req = format!(
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            s.read_exact(&mut byte).map_err(|e| format!("upgrade read: {e}"))?;
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head);
+        if !head.starts_with("HTTP/1.1 101") {
+            return Err(format!("upgrade refused: {}", head.lines().next().unwrap_or("")));
+        }
+        if !head.contains(&crate::ws::accept_key(key)) {
+            return Err("Sec-WebSocket-Accept mismatch".into());
+        }
+        Ok(Self(s))
+    }
+
+    fn send(&mut self, payload: &[u8]) -> Result<(), String> {
+        use std::io::Write;
+        let mask = [0x12u8, 0x34, 0x56, 0x78];
+        let mut frame = vec![0x82u8];
+        match payload.len() {
+            n if n < 126 => frame.push(0x80 | n as u8),
+            n if n < 65536 => {
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+            n => {
+                frame.push(0x80 | 127);
+                frame.extend_from_slice(&(n as u64).to_be_bytes());
+            }
+        }
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        self.0.write_all(&frame).map_err(|e| e.to_string())
+    }
+
+    fn recv(&mut self) -> Result<Vec<u8>, String> {
+        crate::ws::read_message(&mut self.0)
+            .map_err(|e| e.to_string())?
+            .ok_or("server closed the stream".into())
+    }
+}
+
+/// GR4's full claim: a WS subscriber sees the SAME event byte-sequence a UDS
+/// subscriber sees — payload-identical, only the framing differs by transport.
+fn ws_stream_equivalence(ctx: &StageCtx) -> Result<(), String> {
+    use razel_wire::{InvocationEvent, InvocationStarted};
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("BUILD"), RUN_BUILD).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("hello.c"), RUN_SRC).map_err(|e| e.to_string())?;
+    let result = (|| {
+        ping(ctx, &home, &ws, Some("wse"), false)?;
+        let socket = ScopePaths::new(&home, "wse")?.socket;
+        // One finished invocation in the log…
+        let resp = razel_daemon::rpc::call(&socket, &razel_daemon::rpc::req_run("hello", &[]))
+            .map_err(|e| e.to_string())?;
+        let id = InvocationStarted::from_cbor(&razel_daemon::rpc::payload(&resp)?).invocation_id;
+        // …then both transports replay it from 0; collect raw envelopes through
+        // our invocation's terminal event.
+        let until_terminal = |mut next: Box<dyn FnMut() -> Result<Vec<u8>, String>>| {
+            let mut seen = Vec::new();
+            loop {
+                let raw = next()?;
+                let env = razel_wire::decode(&raw);
+                let ev = InvocationEvent::from_cbor(
+                    &razel_daemon::rpc::payload(&env).map_err(|e| format!("event: {e}"))?,
+                );
+                let terminal = ev.invocation_id == id && ev.result.is_some();
+                seen.push(raw);
+                if terminal {
+                    return Ok::<_, String>(seen);
+                }
+            }
+        };
+        let mut uds = razel_daemon::transport::connect(&socket).map_err(|e| e.to_string())?;
+        {
+            use std::io::Write;
+            let req = razel_wire::encode(&razel_daemon::rpc::req_invocation_events());
+            let mut framed = (req.len() as u32).to_be_bytes().to_vec();
+            framed.extend_from_slice(&req);
+            uds.write_all(&framed).map_err(|e| e.to_string())?;
+        }
+        let uds_events = until_terminal(Box::new(move || {
+            use std::io::Read;
+            let mut len = [0u8; 4];
+            uds.read_exact(&mut len).map_err(|e| e.to_string())?;
+            let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+            uds.read_exact(&mut buf).map_err(|e| e.to_string())?;
+            Ok(buf)
+        }))?;
+        let mut wsc = WsClient::connect(http_port_of(&home, "wse")?)?;
+        wsc.send(&razel_wire::encode(&razel_daemon::rpc::req_invocation_events()))?;
+        let ws_events = until_terminal(Box::new(move || wsc.recv()))?;
+        if uds_events != ws_events {
+            return Err(format!(
+                "transport divergence: UDS {} events ≠ WS {} events (or bytes differ)",
+                uds_events.len(),
+                ws_events.len()
+            ));
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "wse");
     result
 }
 
