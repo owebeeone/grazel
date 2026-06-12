@@ -285,7 +285,11 @@ only; the C3c ratchet holds): `js_binary` (node entry + node_modules dep), `ts_p
 the `razel run` verb as its first client** — verbs are server-API clients from day one
 (`RazelPublicSurfaces.md` §1: no privileged in-process path; the wire is TAUT per its §4 —
 the existing razel-wire IR grows the service messages, taut's TS backend emits the gryth
-client). Host node/tsc resolved like the cc
+client). The skeleton lands WITH the PublicSurfaces §1d crate shape: razel-cli split into
+a library + thin `razel` bin, daemon = the same bin in daemon mode, and the
+no-razel-crate-depends-on-grazel/iroh deny rule wired into CI from this step — the
+`grazel` bin crate itself comes AFTER the bootstrap bar (gryth-dev side, track G
+continuation), but the seams it needs are cut here. Host node/tsc resolved like the cc
 host toolchain (non-hermetic, digest-logged — same posture). **rc-lite**: the WORKSPACE
 layer only of `.bazelrc` then `.razelrc` (command-scoped lines, no import/--config/system/
 home yet) — enough that gryth's dev loop configures itself from files, not env vars; the

@@ -98,6 +98,66 @@ queue.** Concretely:
   workspaces share the machine; v1 policy: cap = cores, actors acquire pool slots
   on-demand and shrink when idle).
 
+## §1d Where grazel lives (repo/crate layout)
+
+**Decision: grazel is sibling CRATES in the razel cargo workspace, not a separate repo
+(for now).** During the spike razel and grazel co-evolve too fast for cross-repo version
+skew; one workspace gives atomic changes and one CI. The dependency direction is
+enforced mechanically, not socially: a CI deny rule (cargo-deny / dep-graph check) that
+no `razel-*` crate depends on any `grazel-*` crate or on iroh — the same enforcement
+class as razel-loading's runtime-free rule. BECAUSE the arrow only points one way, the
+later split-out is cheap; the revisit trigger is release cadence divergence (when gryth
+productizes and grazel needs its own release train).
+
+The crate shape that makes "grazel CLI = razel CLI + extra params" true by construction
+rather than by porting:
+
+- **`razel-cli` becomes a LIBRARY** (verb dispatch, flag parsing, daemon dialing, stream
+  rendering) with a thin `razel` bin over it.
+- **`grazel` is a second bin crate** linking the SAME razel-cli lib plus `grazel-node`
+  (the iroh endpoint + node services). Its CLI surface is razel's verbatim — same
+  parser, so razel flag evolution reaches grazel automatically — plus grazel-namespaced
+  verbs/flags for the node side. A razel flag never behaves differently under grazel.
+- **One binary per distribution:** razeld is `razel` in daemon mode, grazeld is `grazel`
+  in daemon mode (Bazel's client-launches-server pattern, without a second artifact to
+  version or ship).
+- Strict-mode goldens (T3) run against BOTH binaries' build verbs — cheap, same lib, and
+  it keeps the "grazel is still boring bazel underneath" claim tested rather than assumed.
+
+## §1e Finding the daemon (discovery + configuration — nailed)
+
+**A workspace does not pick a daemon; a USER's daemon serves all their workspaces (§1).**
+Discovery is therefore per-user and per-distribution:
+
+- **Well-known daemon roots,** sibling to the cache roots in the round-36 layout:
+  `_razel_<user>/daemon/` and `_grazel_<user>/daemon/`, each containing `daemon.sock`,
+  `daemon.json` (pid, build version, wire version, start time; grazel adds its public
+  iroh node id), and `daemon.lock` (launch-race arbitration).
+- **Dial procedure** (shared razel-cli lib code, both CLIs): resolve daemon root →
+  connect socket → taut hello handshake (client build + wire version) → on wire-version
+  mismatch, graceful-shutdown the old daemon and relaunch the matching binary (Bazel's
+  restart semantics); on stale socket (refused + dead pid in daemon.json), clean and
+  autostart. `--no_autostart` for CI/scripting.
+- **Configuration precedence** (highest wins):
+  1. `--daemon_root=<path>` on the command line;
+  2. `RAZEL_DAEMON_ROOT` / `GRAZEL_DAEMON_ROOT` env;
+  3. rc files — the delta chain extends RECURSIVELY: `.bazelrc` → `.razelrc` →
+     `.grazelrc`, each layer a pure delta the layer below never reads. razel ignores
+     `.grazelrc` entirely; a grazel-only flag in `.razelrc` is an ERROR (razel must
+     never become grazel-aware — the §1b crate arrow, expressed in config);
+  4. user config `~/.config/grazel/config.toml` (grazel only: node identity/key
+     location, mesh defaults — machine/user concerns that do NOT belong in workspace
+     files);
+  5. built-in per-user default root.
+- **Node identity:** the iroh secret key is per-user, stored under the grazel config
+  dir — NOT under the daemon root (daemon roots live in tmp and are disposable;
+  identity is not). `daemon.json` publishes only the public node id. v1 is one identity
+  per user; `--profile` is reserved, unimplemented.
+- **When grazel is installed:** recommended setup is grazel CLI everywhere (grazeld is a
+  strict superset); razel CLI remains for `--strict_bazel` parity work. Running both
+  daemons is SAFE (the §1b cross-daemon output-base lock arbitrates writers) but means
+  two engines warming the same workspace — a cost, not a hazard.
+
 ## §2 The surfaces (enumerated — nothing else is public)
 
 - **S-A: The CLI.** Verbs (`build`/`run`/`test`/`query`/`fetch`), flags (the
