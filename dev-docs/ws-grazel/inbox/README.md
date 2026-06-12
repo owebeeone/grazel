@@ -5,7 +5,9 @@ note is a requirement the OTHER agent needs folded into THIS lane's work — e.g
 S0 seam has landed, pull and consume", "S3 service messages are in razel-wire".
 
 Protocol:
-- One note per file: `NNNN-short-slug.md`, header lines `From:` / `Date:` / `Status:`.
+- One note per file: `NNNN-from-<sender>-<short-slug>.md` (sender = `razel` or
+  `grazel`), header lines `From:` / `Date:` / `Status:` — the sender writes DIRECTLY
+  into this folder. Full protocol: repo-root `AGENTS.md`.
 - Transport is the shared branch: both trees work on `razelv3` and sync through the
   local bare repo `../razel.git` (remote `share` in razel/, `origin` in razel-grazel/).
   Push after writing a note; check this folder at every sync.
