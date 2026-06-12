@@ -155,7 +155,22 @@ boundaries). Four candidate designs, with their failure modes:
   third-party BUILD adjustments use the EXISTING repo-patch machinery (MODULE.razel
   overrides + patch files — the same mechanism Bazel itself uses for its own deps).
 
-**DECISION: C + D; A and B rejected — there is no BUILD.razel.** C's clinching property
+**(E) Razel-native segregation (Gianni, 2026-06-12 — the "fully independent" mode):**
+  BUILD.razel EXISTS, but only as a package's SOLE grammar — `BUILD.razel` XOR
+  `BUILD[.bazel]`, coexistence is an ERROR. Razel-native targets live in packages Bazel
+  provably cannot see (no shared labels to fork — the property B lacked). Three rules
+  make it sound: (1) mutual exclusion per package; (2) the BOUNDARY GUARD — razel-native
+  packages live either in razel-native MODULES (no Bazel grammar anywhere; MODULE.razel
+  joins razel's boundary walk-up) or under `.bazelignore`d subtrees of dual workspaces
+  (Bazel formally blind ⇒ no glob/boundary divergence; razel CHECKS this), and (3) the
+  dependency arrow — razel-native modules may depend on bazel-grammar ones, never the
+  reverse (structurally enforced by 1+2, not just by policy). This is gryth's mode: the
+  server is razel-native (glade/derivation targets first-class, no shim ceremony), atop
+  bazel-grammar deps.
+
+**DECISION: C + D + E; A and B rejected.** The package-mode matrix: pure-bazel (mimicry) ·
+dual-augmented (C: compat shim, congruent namespace, `razel-only` tags) · razel-native
+(E: BUILD.razel sole grammar, boundary-guarded) · third-party (D: repo patches). C's clinching property
 is namespace CONGRUENCE: shim-loaded razel-native targets EXIST under Bazel (as degraded
 no-ops), so `:all`/`/...`/query/test_suite enumerate the SAME target set in both engines.
 Two obligations on the compat shim follow: (1) Bazel-side implementations must be CHEAPLY
