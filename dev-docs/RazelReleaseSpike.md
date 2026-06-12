@@ -248,6 +248,11 @@ Process invariants for every step: roll-build (each lands green: `cargo test --w
 + gates + sentinels), TF sweep ≥455 at every bank, goldens always diffed in
 `--strict_bazel`, commit + tag `razelV3/<step>`, round delta to the checkpoint-4 précis,
 debts to RazelGaps. Track G leads; B interleaves where marked.
+The test regime governing all of this is `RazelPublicSurfaces.md §6` (the T0–T5 pyramid):
+T2 (engine battery) guards S1 onward; T0/T1 (wire goldens + service-contract transcripts)
+land WITH the S3 server skeleton — no skeleton without its harness; T3 (strict-mode
+examples goldens) lands with S4; T4 is the continuous TF floor; T5 (gryth acceptance
+end-to-end) closes the gryth-bootstrap bar.
 
 **S1 (G1) — E-mode core.**
 Scope: boundary walk-up (`MODULE.razel` joins `MODULE.bazel`/`REPO.bazel`/`WORKSPACE[.bazel]`);

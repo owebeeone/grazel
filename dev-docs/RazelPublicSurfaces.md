@@ -162,7 +162,48 @@ first client; Query formalizes what razel-analysis already computes; Events/View
 as the sched_hook stream structured + coarse snapshot-diff views, growing toward BEP and
 fine-grained deltas respectively.
 
-## §6 Anti-goals
+## §6 The test regime (T0–T5 — defined BEFORE S1 starts, per Gianni's gate)
+
+A pyramid: each tier is cheap relative to the one above it, runs in CI for every bank,
+and every tier below a change's layer must be green before it lands (the V3 roll-build
+invariant extended to the server surface). Nothing on the public surface ships untested
+at its own tier.
+
+- **T0 — wire goldens.** The taut layer's determinism made executable: golden byte
+  vectors per message type, checked into the repo. The generated Rust codec must
+  ENCODE to the golden bytes and the generated TS client must DECODE them (and
+  round-trip) — cross-language type identity is asserted by bytes, not by review.
+  Schema evolution = a deliberate golden update in the same commit as the IR change;
+  an accidental wire break cannot land silently.
+- **T1 — service-contract transcripts.** Each S-B service method gets transcript tests
+  against a REAL daemon over a REAL unix socket: scripted request/response/stream
+  sequences with deterministic fixtures (fixture workspaces, fake watcher events).
+  Covers the unhappy paths the engine battery can't see: connect/reconnect, subscription
+  resync after drop, slow-consumer buffer bounds, invocation cancel, daemon idle-out,
+  two workspaces open concurrently (the §1 isolation claim as a test, not a sentence).
+  **The CLI corollary of client #1 discipline: every CLI integration test IS a server-API
+  test** — the CLI has no privileged path, so its test suite exercises S-B for free, and
+  a CLI-visible behavior with no transcript equivalent is a missing T1 test.
+- **T2 — the engine battery.** What exists today: `cargo test --workspace` + gates +
+  probe sentinels. Unchanged, still the bulk of the pyramid; the daemon work must keep
+  razel-loading runtime-free so T2 never grows an async dependency.
+- **T3 — strict-mode examples goldens.** The `third-party/examples` corpus under
+  `--strict_bazel`, graph + output parity vs tools/bazel-7.7.0 byte-diffed (the V3sh1 §2
+  harness). This is the Bazel-compat contract of §3 enforced mechanically; tiers go
+  green in S4 and ratchet — a tier once green never regresses.
+- **T4 — the TF floor.** Full TF sweep ≥ 455/835 at every bank (the depth verifier;
+  re-baselined only at S6 with `--deleted_packages`, per the spike's decision points).
+- **T5 — gryth acceptance.** The §5 MVP slice as ONE executable end-to-end test: open
+  workspace → build the gryth-shaped TS server via razel → subscribe a view → touch a
+  file → assert the view delta arrives. This is the spike's definition of done running
+  in CI, and the first test written against the gryth-bootstrap bar (S1–S3 exit).
+
+Ownership mapping: T0/T1 land with S3 (the server skeleton brings its harness with it —
+no skeleton without transcripts); T2 guards every step from S1; T3 lands with S4; T4 is
+continuous; T5 closes the bootstrap bar. S1's own exit fixture (E-mode workspace loads;
+XOR errors; strict mode hides E-packages) is a T2 citizen.
+
+## §7 Anti-goals
 
 No remote execution protocol (REAPI) claims; no Bazel-server wire-compat (Bazel's command
 protocol is private and version-entangled — mimicking it would chain razel to internals
