@@ -204,8 +204,19 @@ impl Write for WsConn<'_> {
     }
 }
 
-/// Complete the upgrade (101) and serve: first WS message = request envelope,
-/// routed to the scope's sole member exactly like the UDS path.
+fn err_message(stream: &mut TcpStream, e: String) -> std::io::Result<()> {
+    // The error envelope a UDS client would get, as one WS message.
+    let env = razel_wire::Cbor::Map(vec![
+        (1, razel_wire::Cbor::Bool(false)),
+        (3, razel_wire::Cbor::Text(e)),
+    ]);
+    write_message(stream, &razel_wire::encode(&env))
+}
+
+/// Complete the upgrade (101) and serve: first WS message = request envelope.
+/// STREAM methods ride the keyed fan-out (one upstream per key shared by all WS
+/// subscribers — GrazelViewSeam.md); everything else routes to the sole member
+/// exactly like the UDS path.
 pub(crate) fn serve_upgraded(
     state: &State,
     stream: &mut TcpStream,
@@ -220,20 +231,39 @@ pub(crate) fn serve_upgraded(
     let Some(first) = read_message(stream)? else {
         return Ok(());
     };
+    let req = razel_wire::decode(&first);
+    if let razel_wire::Cbor::Text(method) = req.get(1)
+        && matches!(method.as_str(), "build.subscribe" | "invocation.events")
+    {
+        let sub = match state.fanout().subscribe(method) {
+            Ok(s) => s,
+            Err(e) => return err_message(stream, e),
+        };
+        // Close detection: the serve loop below is WRITE-driven and a quiet
+        // stream would never notice the client leaving — a reader thread eats
+        // pings, and on close/error ends the SUBSCRIPTION directly (the closer
+        // unblocks the parked recv) and shuts the socket for good measure.
+        let close_sub = sub.closer();
+        let mut reader = stream.try_clone()?;
+        std::thread::spawn(move || {
+            while let Ok(Some(_)) = read_message(&mut reader) {}
+            close_sub();
+            let _ = reader.shutdown(std::net::Shutdown::Both);
+        });
+        while let Some(frame) = sub.recv() {
+            if write_message(stream, &frame).is_err() {
+                break; // client gone → sub drops → unsubscribe → maybe last out
+            }
+        }
+        return Ok(());
+    }
     match state.sole_member_server() {
         Ok(server) => {
             let mut conn = WsConn { stream, inbuf: std::io::Cursor::new(vec![]), outbuf: vec![] };
             conn.queue_in(&first);
             server.serve_conn(&mut conn)
         }
-        Err(e) => {
-            // The error envelope a UDS client would get, as one WS message.
-            let env = razel_wire::Cbor::Map(vec![
-                (1, razel_wire::Cbor::Bool(false)),
-                (3, razel_wire::Cbor::Text(e)),
-            ]);
-            write_message(stream, &razel_wire::encode(&env))
-        }
+        Err(e) => err_message(stream, e),
     }
 }
 

@@ -11,6 +11,7 @@ pub mod dial;
 pub mod http;
 pub mod paths;
 pub mod scope;
+pub mod views;
 pub mod ws;
 pub mod wstest;
 
@@ -41,6 +42,7 @@ struct GrazelFlags {
     idle_timeout: Option<u64>,
     member_idle_timeout: Option<u64>,
     http_bind: Option<String>,
+    view_buffer: Option<usize>,
     no_autostart: bool,
     all: bool,
     list: bool,
@@ -62,6 +64,8 @@ fn split_args(args: &[String]) -> (GrazelFlags, Vec<String>) {
             flags.member_idle_timeout = v.parse().ok();
         } else if let Some(v) = a.strip_prefix("--http-bind=") {
             flags.http_bind = Some(v.to_string());
+        } else if let Some(v) = a.strip_prefix("--view-buffer=") {
+            flags.view_buffer = v.parse().ok();
         } else if a == "--no_autostart" || a == "--no-autostart" {
             flags.no_autostart = true;
         } else if a == "--all" {
@@ -292,6 +296,7 @@ fn grazel_verb(args: &[String]) -> ExitCode {
                         flags.member_idle_timeout.unwrap_or(30 * 60),
                     ),
                     http_bind: flags.http_bind.clone(),
+                    view_buffer: flags.view_buffer.unwrap_or(256),
                 })
             })
             .map(|()| ExitCode::SUCCESS),

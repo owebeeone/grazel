@@ -54,6 +54,9 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "shutdown-verb", run: shutdown_verb },
         Stage { name: "no-daemon-escape", run: no_daemon_escape },
         Stage { name: "daemon-status", run: daemon_status },
+        Stage { name: "view-fanout-dedup", run: view_fanout_dedup },
+        Stage { name: "view-resync-after-drop", run: view_resync_after_drop },
+        Stage { name: "view-idle-closes-upstream", run: view_idle_closes_upstream },
     ]
 }
 
@@ -821,6 +824,14 @@ impl WsClient {
             .map_err(|e| e.to_string())?
             .ok_or("server closed the stream".into())
     }
+
+    /// RFC close frame (masked, empty payload), then drop the TCP side.
+    fn close(&mut self) {
+        use std::io::Write;
+        let _ = self.0.write_all(&[0x88, 0x80, 0, 0, 0, 0]);
+        let _ = self.0.flush();
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// GR4's full claim: a WS subscriber sees the SAME event byte-sequence a UDS
@@ -1101,6 +1112,125 @@ fn daemon_status(ctx: &StageCtx) -> Result<(), String> {
         Ok(())
     })();
     stop_scope(ctx, &home, &ws, "live");
+    result
+}
+
+// --- View seam (GrazelViewSeam.md): fan-out machinery over real streams --------
+
+fn fanout_count(home: &Path, scope: &str, key: &str) -> Result<Option<u32>, String> {
+    Ok(crate::daemon::status_lines(&ScopePaths::new(home, scope)?)
+        .iter()
+        .find_map(|l| l.strip_prefix(&format!("fanout={key}:")).and_then(|n| n.parse().ok())))
+}
+
+/// Two WS subscribers, same key ⇒ ONE shared upstream, identical byte streams.
+fn view_fanout_dedup(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("BUILD"), RUN_BUILD).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("hello.c"), RUN_SRC).map_err(|e| e.to_string())?;
+    let result = (|| {
+        ping(ctx, &home, &ws, Some("vf"), false)?;
+        let port = http_port_of(&home, "vf")?;
+        let sub_req = razel_wire::encode(&razel_daemon::rpc::req_subscribe());
+        let mut a = WsClient::connect(port)?;
+        a.send(&sub_req)?;
+        let a0 = a.recv()?; // the atom's on-connect snapshot
+        let mut b = WsClient::connect(port)?;
+        b.send(&sub_req)?;
+        let b0 = b.recv()?;
+        eventually("two subscribers, one key", || {
+            fanout_count(&home, "vf", "build.subscribe").ok().flatten() == Some(2)
+        })?;
+        if a0 != b0 {
+            return Err("subscribers saw different snapshots".into());
+        }
+        // A revision bump reaches BOTH, byte-identical.
+        let socket = ScopePaths::new(&home, "vf")?.socket;
+        razel_daemon::rpc::call(&socket, &razel_daemon::rpc::req_build("hello"))
+            .map_err(|e| e.to_string())?;
+        let (a1, b1) = (a.recv()?, b.recv()?);
+        if a1 != b1 {
+            return Err("post-build frames diverge between subscribers".into());
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "vf");
+    result
+}
+
+/// The §4b drop-with-resync marker reaches a WS client through the whole stack.
+/// `--view-buffer=0` is the determinism knob: every frame is preceded by a
+/// marker, so one event proves the path without TCP-backpressure games (the
+/// real bound's overflow arithmetic is unit-tested in views.rs).
+fn view_resync_after_drop(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("BUILD"), RUN_BUILD).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("hello.c"), RUN_SRC).map_err(|e| e.to_string())?;
+    let child = spawn_daemon(
+        ctx,
+        &home,
+        &ws,
+        &["daemon", "run", "--scope=vr", "--view-buffer=0"],
+    )?;
+    let _reap = Reap(vec![child]);
+    let result = (|| {
+        let paths = ScopePaths::new(&home, "vr")?;
+        eventually("vr daemon up", || paths.socket.exists())?;
+        ping(ctx, &home, &ws, Some("vr"), false)?; // membership for the upstream
+        let mut c = WsClient::connect(http_port_of(&home, "vr")?)?;
+        c.send(&razel_wire::encode(&razel_daemon::rpc::req_invocation_events()))?;
+        razel_daemon::rpc::call(&paths.socket, &razel_daemon::rpc::req_run("hello", &[]))
+            .map_err(|e| e.to_string())?;
+        let mut marker = false;
+        let mut valid_after_marker = false;
+        for _ in 0..20 {
+            let frame = c.recv()?;
+            let env = razel_wire::decode(&frame);
+            let is_marker = matches!(env.get(1), razel_wire::Cbor::Bool(false))
+                && matches!(env.get(3), razel_wire::Cbor::Text(t) if t.starts_with("resync"));
+            if is_marker {
+                marker = true;
+            } else if marker {
+                // A coherent envelope after the marker: the stream survived.
+                razel_daemon::rpc::payload(&env).map_err(|e| format!("post-resync frame: {e}"))?;
+                valid_after_marker = true;
+                break;
+            }
+        }
+        if !marker {
+            return Err("no resync marker reached the client".into());
+        }
+        if !valid_after_marker {
+            return Err("no coherent frame after the resync marker".into());
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "vr");
+    result
+}
+
+/// Last subscriber out closes the shared upstream (refcount → zero → key gone).
+fn view_idle_closes_upstream(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    let result = (|| {
+        ping(ctx, &home, &ws, Some("vi"), false)?;
+        let port = http_port_of(&home, "vi")?;
+        let mut c = WsClient::connect(port)?;
+        c.send(&razel_wire::encode(&razel_daemon::rpc::req_subscribe()))?;
+        let _ = c.recv()?; // subscription is live
+        eventually("fanout count 1", || {
+            fanout_count(&home, "vi", "build.subscribe").ok().flatten() == Some(1)
+        })?;
+        c.close();
+        eventually("fanout entry gone", || {
+            fanout_count(&home, "vi", "build.subscribe").ok().flatten().is_none()
+        })?;
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "vi");
     result
 }
 

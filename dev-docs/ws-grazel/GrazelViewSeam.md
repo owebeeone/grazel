@@ -61,6 +61,18 @@ hardening, backlog #3) is already exercised against the same fan-out semantics.
 - `view-idle-closes-upstream` — both clients close; assert the upstream count
   drops to zero (status line gone).
 
+## Round-1 findings (the stages caught both — landed fixes)
+
+- **Late joiners are owed the shape's catch-up.** The upstream spends its
+  on-connect snapshot on the FIRST subscriber; a second subscriber saw nothing
+  until the next revision (the `view-fanout-dedup` stage hung, then diverged).
+  Fix: per-key HISTORY — an atom keeps its latest frame, a log keeps the replay
+  (unbounded v1, mirroring razel's events log) — delivered through the normal
+  bounded buffer, so an over-long replay resyncs by construction.
+- **A quiet stream never notices a departed client** if close detection relies
+  on the next write failing. Fix: `Subscription::closer()` — the transport's
+  reader thread ends the subscription directly, unblocking the parked recv.
+
 ## Sizing & debts
 
 Round 1: `views` module + fan-out + bounds + status line + the three stages.

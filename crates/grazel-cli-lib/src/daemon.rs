@@ -44,6 +44,10 @@ pub struct ServeOpts {
     /// `--http-bind` override; must be loopback (GR4: localhost-only). None =
     /// `127.0.0.1:0`, the chosen port recorded in daemon.json.
     pub http_bind: Option<String>,
+    /// Per-subscriber view buffer bound, frames (§4b; GrazelViewSeam.md).
+    /// 0 is legal (degenerate: every frame preceded by a resync marker — the
+    /// ws-test determinism knob).
+    pub view_buffer: usize,
 }
 
 // --- framing (the razel-daemon envelope; its helpers are private) ------------
@@ -100,6 +104,7 @@ pub(crate) struct State {
     active: AtomicUsize,
     last_done: Mutex<Instant>,
     members: Mutex<HashMap<PathBuf, Member>>,
+    fanout: crate::views::KeyedFanout,
 }
 
 impl State {
@@ -166,6 +171,7 @@ impl State {
         }
         let _ = std::fs::remove_file(&self.paths.socket);
         let _ = std::fs::remove_file(&self.paths.daemon_json);
+        let _ = std::fs::remove_file(self.paths.state_dir.join("fanout"));
         std::process::exit(0)
     }
 
@@ -228,6 +234,11 @@ impl State {
                 self.paths.scope
             )),
         }
+    }
+
+    /// The WS edge's shared-subscription machinery (GrazelViewSeam.md).
+    pub(crate) fn fanout(&self) -> &crate::views::KeyedFanout {
+        &self.fanout
     }
 
     /// Track a serviced request for the idle watchdog — both transports count.
@@ -332,12 +343,19 @@ pub fn run(opts: ServeOpts) -> Result<(), String> {
     std::fs::write(&paths.daemon_json, json)
         .map_err(|e| format!("{}: {e}", paths.daemon_json.display()))?;
 
+    let fanout_file = paths.state_dir.join("fanout");
+    let _ = std::fs::remove_file(&fanout_file); // stale from a SIGKILL'd predecessor
     let state = Arc::new(State {
         paths: paths.clone(),
         advertised,
         active: AtomicUsize::new(0),
         last_done: Mutex::new(Instant::now()),
         members: Mutex::new(HashMap::new()),
+        fanout: crate::views::KeyedFanout::new(
+            Box::new(crate::views::SelfSocketProducer { socket: paths.socket.clone() }),
+            opts.view_buffer,
+            fanout_file,
+        ),
     });
 
     // Pinned workspaces (scope.rc `pinned=` lines): claimed AT START, loud on
@@ -430,6 +448,14 @@ pub fn status_lines(paths: &ScopePaths) -> Vec<String> {
     for entry in std::fs::read_dir(&members).into_iter().flatten().flatten() {
         if let Ok(line) = std::fs::read_to_string(entry.path()) {
             out.push(format!("member={}", line.trim()));
+        }
+    }
+    // View fan-out counts ("key n" lines, GrazelViewSeam.md observability file).
+    if let Ok(text) = std::fs::read_to_string(paths.state_dir.join("fanout")) {
+        for line in text.lines() {
+            if let Some((key, n)) = line.rsplit_once(' ') {
+                out.push(format!("fanout={key}:{n}"));
+            }
         }
     }
     out
