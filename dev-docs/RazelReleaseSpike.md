@@ -254,6 +254,23 @@ land WITH the S3 server skeleton — no skeleton without its harness; T3 (strict
 examples goldens) lands with S4; T4 is the continuous TF floor; T5 (gryth acceptance
 end-to-end) closes the gryth-bootstrap bar.
 
+**S0 (G0) — PLAN 0: the grazel seam (mechanical crate restructure, zero semantics).**
+*Added 2026-06-12 (Gianni): "unleash the gryth work" starts here — the grazel binary
+exists from day one so gryth-dev pins its shape, and every later step lands in final
+form.* Scope (PublicSurfaces §1d made real; cheaper than §1d assumed — razel-daemon is
+ALREADY a lib, and razel-cli is a 750-line main over the bazel_flags lib):
+- `razel-cli` gains a `[lib]` target: verb dispatch, flag parsing, daemon dialing,
+  output rendering move into the library; `main.rs` becomes the thin `razel` bin.
+- New `grazel` bin crate linking the SAME razel-cli lib: razel's CLI surface verbatim
+  (shared parser — identical behavior by construction) plus the grazel-namespaced verb
+  stub (`grazel node status` → "not implemented" is enough; the binary and namespace
+  are the deliverable, not the node).
+- The DENY RULE lands in CI: no `razel-*` crate may depend on a `grazel-*` crate or on
+  iroh (dep-graph gate in xtask, same class as razel-loading's runtime-free rule).
+Exit: both bins build; a fixture test asserts `grazel build`/`query` output is
+byte-identical to `razel`'s (tested, not assumed from the shared lib); the deny gate is
+RED-TESTED (a deliberate violation fails); suite + TF floor green.
+
 **S1 (G1) — E-mode core.**
 Scope: boundary walk-up (`MODULE.razel` joins `MODULE.bazel`/`REPO.bazel`/`WORKSPACE[.bazel]`);
 `BUILD.razel` in package discovery; the XOR rule (coexistence with `BUILD[.bazel]` = loud
@@ -285,11 +302,10 @@ only; the C3c ratchet holds): `js_binary` (node entry + node_modules dep), `ts_p
 the `razel run` verb as its first client** — verbs are server-API clients from day one
 (`RazelPublicSurfaces.md` §1: no privileged in-process path; the wire is TAUT per its §4 —
 the existing razel-wire IR grows the service messages, taut's TS backend emits the gryth
-client). The skeleton lands WITH the PublicSurfaces §1d crate shape: razel-cli split into
-a library + thin `razel` bin, daemon = the same bin in daemon mode, and the
-no-razel-crate-depends-on-grazel/iroh deny rule wired into CI from this step — the
-`grazel` bin crate itself comes AFTER the bootstrap bar (gryth-dev side, track G
-continuation), but the seams it needs are cut here. Host node/tsc resolved like the cc
+client). The skeleton rides the S0 crate shape (lib split + grazel bin + deny rule already
+landed): this step adds daemon mode to the bins (razeld = `razel` in daemon mode) and
+the first wired service; the grazel NODE (iroh) stays after the bootstrap bar —
+gryth-dev side, track G continuation. Host node/tsc resolved like the cc
 host toolchain (non-hermetic, digest-logged — same posture). **rc-lite**: the WORKSPACE
 layer only of `.bazelrc` then `.razelrc` (command-scoped lines, no import/--config/system/
 home yet) — enough that gryth's dev loop configures itself from files, not env vars; the
@@ -344,10 +360,11 @@ Exit: java-tutorial builds+runs golden; go-tutorial golden; gazelle round-trips 
 fixture.
 
 **Two bars (review fix — the single bar was too large):**
-- **Gryth-bootstrap bar = S1–S3:** a gryth hello server in a razel-native module builds
-  and RUNS via razel, deps from the npm lock, dev loop file-configured. Gryth development
+- **Gryth-bootstrap bar = S0–S3:** a gryth hello server in a razel-native module builds
+  and RUNS via razel, deps from the npm lock, dev loop file-configured, with the grazel
+  binary shape pinned from S0. Gryth development
   STARTS here — everything after is improvement, not unlock.
-- **Spike-release bar = S1–S6:** the bootstrap PLUS test verb, cc/goldens harness, full
+- **Spike-release bar = S0–S6:** the bootstrap PLUS test verb, cc/goldens harness, full
   rc/strict/discovery — the honest Bazel story (cpp-tutorial + flags goldens strict-green,
   TF ≥455, every capability claim golden-backed). S7–S9 trail without blocking either bar.
 
