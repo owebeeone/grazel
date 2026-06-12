@@ -276,8 +276,10 @@ Exit: tiny-lockfile fixture materializes; integrity mismatch fails loud; offline
 **S3 (G3) — js/ts rules + `razel run` + rc-lite.**
 Scope: razel-native rulepack AS A V3 §4 .bzl TRACK (`rules_shims_js.bzl` — registrations
 only; the C3c ratchet holds): `js_binary` (node entry + node_modules dep), `ts_project`-lite
-(one tsc action; inputs srcs+tsconfig+typings, outputs js); the `razel run` CLI verb
-(walk-up root → build → exec, exit code passthrough). Host node/tsc resolved like the cc
+(one tsc action; inputs srcs+tsconfig+typings, outputs js); the **razel server skeleton +
+the `razel run` verb as its first client** — verbs are server-API clients from day one
+(`RazelPublicSurfaces.md` §1: no privileged in-process path; the wire-format decision is
+taken HERE per its §4, gryth-from-node on the scale). Host node/tsc resolved like the cc
 host toolchain (non-hermetic, digest-logged — same posture). **rc-lite**: the WORKSPACE
 layer only of `.bazelrc` then `.razelrc` (command-scoped lines, no import/--config/system/
 home yet) — enough that gryth's dev loop configures itself from files, not env vars; the
@@ -340,7 +342,8 @@ fixture.
   TF ≥455, every capability claim golden-backed). S7–S9 trail without blocking either bar.
 
 **Decision points en route (Gianni):** gryth-dev bootstrap moment (first MODULE.razel in
-that repo — after S3); pnpm vs npm lock reality-check at S2; the TF floor re-baseline at
+that repo — after S3); the server wire format at S3 (RazelPublicSurfaces §4); pnpm vs npm
+lock reality-check at S2; the TF floor re-baseline at
 S6 (deleted_packages changes the denominator); java-maven scope at S9.
 
 **Named risks:** single-lane bandwidth (tracks interleave by round unless a second session
