@@ -1,0 +1,11 @@
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+
+js_test(
+    name = "math",
+    entry_point = "math.test.js",
+)
+
+js_test(
+    name = "strings",
+    entry_point = "strings.test.js",
+)

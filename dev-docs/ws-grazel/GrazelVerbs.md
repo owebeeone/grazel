@@ -24,6 +24,19 @@ GR3 (end-to-end via the shared razel-cli lib over the scope socket).*
 - `version`/`subscribe` stay as-is this round: `subscribe` is a stream (GR3b);
   grazel `version` identifies the distribution (deliberate shadow, GrazelCrates).
 
+## `grazel test` (2026-06-13, inbox 0010 drop 1)
+
+**Verbatim delegation v1** — `test` reaches razel's verb untouched (build → exec →
+bazel's exit protocol: 0 pass / 3 tests-failed / 1 build-failed; testlogs under
+`.razel-cache/testlogs/`). The routing question RR flagged resolves to "no daemon
+involvement loses nothing": the workspace's `.razel-cache` is shared across daemons
+and local builds BY CONSTRUCTION (§1b — outputs aren't keyed by distribution), so a
+daemon-warmed cache benefits a local `test` build automatically. Daemon-routed test
+(id + streamed progress for the build half) arrives when razel's test verb itself
+rides the invocation plane — not a grazel-side fork. Stages: `test-verb-protocol`
+(exit 0/3, PASSED/FAILED lines, test.log content, zero daemon artifacts),
+`gryth-examples-corpus` (the real shapes end-to-end).
+
 ## Streams (GR3b, after inbox 0006's serve_conn export)
 
 `grazel run <target> [-- args]`: hello → `Razel.run` over the scope socket →
