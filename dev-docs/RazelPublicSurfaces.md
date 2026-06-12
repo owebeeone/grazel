@@ -120,10 +120,15 @@ rather than by porting:
 
 - **`razel-cli` becomes a LIBRARY** (verb dispatch, flag parsing, daemon dialing, stream
   rendering) with a thin `razel` bin over it.
-- **`grazel` is a second bin crate** linking the SAME razel-cli lib plus `grazel-node`
-  (the iroh endpoint + node services). Its CLI surface is razel's verbatim — same
-  parser, so razel flag evolution reaches grazel automatically — plus grazel-namespaced
+- **The grazel side is TWO crates** (Gianni, 2026-06-12): `grazel-cli` — the bin
+  (binary named `grazel`) kept SMALL, nothing but rust/OS mechanics (argv/env intake,
+  exit codes, signals, process entry) that just invokes — and `grazel-cli-lib`, where
+  ALL business logic lives, linking the SAME razel-cli lib plus `grazel-node` (the
+  iroh endpoint + node services). The CLI surface is razel's verbatim — same parser,
+  so razel flag evolution reaches grazel automatically — plus grazel-namespaced
   verbs/flags for the node side. A razel flag never behaves differently under grazel.
+  (The thin-bin rule is also what makes T1 cheap: the lib is testable in-process,
+  no binary spawning to exercise logic.)
 - **One binary per distribution:** razeld is `razel` in daemon mode, grazeld is `grazel`
   in daemon mode (Bazel's client-launches-server pattern, without a second artifact to
   version or ship).

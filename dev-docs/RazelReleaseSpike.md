@@ -261,10 +261,12 @@ form.* Scope (PublicSurfaces §1d made real; cheaper than §1d assumed — razel
 ALREADY a lib, and razel-cli is a 750-line main over the bazel_flags lib):
 - `razel-cli` gains a `[lib]` target: verb dispatch, flag parsing, daemon dialing,
   output rendering move into the library; `main.rs` becomes the thin `razel` bin.
-- New `grazel` bin crate linking the SAME razel-cli lib: razel's CLI surface verbatim
-  (shared parser — identical behavior by construction) plus the grazel-namespaced verb
-  stub (`grazel node status` → "not implemented" is enough; the binary and namespace
-  are the deliverable, not the node).
+- New grazel crates, TWO from the start (§1d shape): `grazel-cli` — thin bin (binary
+  named `grazel`), rust/OS mechanics ONLY (argv/env, exit codes, signals), just invokes
+  the lib — and `grazel-cli-lib` holding all business logic, linking the SAME razel-cli
+  lib: razel's CLI surface verbatim (shared parser — identical behavior by construction)
+  plus the grazel-namespaced verb stub (`grazel node status` → "not implemented" is
+  enough; the crates and namespace are the deliverable, not the node).
 - The DENY RULE lands in CI: no `razel-*` crate may depend on a `grazel-*` crate or on
   iroh (dep-graph gate in xtask, same class as razel-loading's runtime-free rule).
 Exit: both bins build; a fixture test asserts `grazel build`/`query` output is
