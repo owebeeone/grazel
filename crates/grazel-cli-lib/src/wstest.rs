@@ -382,7 +382,8 @@ fn graceful_shutdown(ctx: &StageCtx) -> Result<(), String> {
     Ok(())
 }
 
-/// An idle daemon times itself out and cleans up after itself.
+/// With OPT-IN `--idle-timeout`, an idle daemon times out and cleans up after
+/// itself. (Default grazeld runs indefinitely — the long-lived scope service.)
 fn idle_out(ctx: &StageCtx) -> Result<(), String> {
     let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
     std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;

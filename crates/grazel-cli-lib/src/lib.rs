@@ -105,8 +105,12 @@ fn grazel_verb(args: &[String]) -> ExitCode {
                 daemon::run(daemon::ServeOpts {
                     paths: p,
                     workspace: workspace.clone(),
-                    // Default 3h, Bazel's idle posture; stages dial it down.
-                    idle_timeout: Some(Duration::from_secs(flags.idle_timeout.unwrap_or(3 * 3600))),
+                    // grazeld runs INDEFINITELY by default (Gianni, 2026-06-12):
+                    // it's the long-lived scope service (razeld keeps Bazel's
+                    // idle-out posture; that's razel's lane). Proper service
+                    // management (launchd/systemd) is the eventual home — debt D8.
+                    // --idle-timeout stays as an opt-in (ws-test exercises it).
+                    idle_timeout: flags.idle_timeout.map(Duration::from_secs),
                 })
             })
             .map(|()| ExitCode::SUCCESS),
