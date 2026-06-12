@@ -1,17 +1,21 @@
 //! grazel-cli-lib — ALL grazel business logic (the thin-bin rule, §1d).
 //!
-//! The verb dispatch below is the S0 STUB (GrazelCrates.md): a minimal arg walk
-//! that dies the day razel-cli's `[lib]` split arrives on razelv3 — grazel's CLI
-//! surface then becomes razel's verbatim (same parser) plus grazel-namespaced
-//! verbs. It gains no features in the meantime.
+//! Verb surface = razel's VERBATIM (delegated to the razel-cli LIB, §1d: same
+//! parser, a razel flag can never behave differently under grazel) PLUS the
+//! grazel-namespaced verbs below. Two deliberate shadows: `daemon` means
+//! grazeld (this binary in daemon mode — the one-binary rule), and `version`
+//! identifies THIS distribution.
 
 pub mod daemon;
+pub mod dial;
 pub mod paths;
 pub mod scope;
 pub mod wstest;
 
 use paths::ScopePaths;
 use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
 
 fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -25,61 +29,126 @@ fn resolve_paths(flag_scope: Option<&str>, workspace: &std::path::Path) -> Resul
     ScopePaths::new(&home, &scope)
 }
 
-/// CLI entry: `args` excludes argv0. Returns the process exit code.
-pub fn run(args: &[String]) -> i32 {
-    let mut flag_scope: Option<String> = None;
-    let mut flag_workspace: Option<PathBuf> = None;
-    let mut flag_stage: Option<String> = None;
-    let mut verb: Vec<&str> = vec![];
+/// Grazel-only argv, peeled before dispatch. Everything else passes through to
+/// the razel parser untouched.
+#[derive(Default)]
+struct GrazelFlags {
+    scope: Option<String>,
+    workspace: Option<PathBuf>,
+    stage: Option<String>,
+    idle_timeout: Option<u64>,
+    no_autostart: bool,
+}
+
+fn split_args(args: &[String]) -> (GrazelFlags, Vec<String>) {
+    let mut flags = GrazelFlags::default();
+    let mut rest = Vec::new();
     for a in args {
         if let Some(v) = a.strip_prefix("--scope=") {
-            flag_scope = Some(v.to_string());
+            flags.scope = Some(v.to_string());
         } else if let Some(v) = a.strip_prefix("--workspace=") {
-            flag_workspace = Some(PathBuf::from(v));
+            flags.workspace = Some(PathBuf::from(v));
         } else if let Some(v) = a.strip_prefix("--stage=") {
-            flag_stage = Some(v.to_string());
+            flags.stage = Some(v.to_string());
+        } else if let Some(v) = a.strip_prefix("--idle-timeout=") {
+            flags.idle_timeout = v.parse().ok();
+        } else if a == "--no_autostart" || a == "--no-autostart" {
+            flags.no_autostart = true;
         } else {
-            verb.push(a.as_str());
+            rest.push(a.clone());
         }
     }
-    let workspace = flag_workspace
+    (flags, rest)
+}
+
+/// CLI entry: `args` excludes argv0. Routing decides FIRST, peeling second:
+/// grazel-only flags (`--scope`, `--workspace=`, …) are peeled only off grazel
+/// verbs — razel verbs pass through VERBATIM, because razel has its own
+/// `--workspace`/`-C` and §1d forbids a razel flag meaning anything different
+/// under grazel. (Scope routing for razel verbs arrives with GR3.)
+pub fn run(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        // The grazel namespace. `daemon` and `version` deliberately shadow
+        // razel's: daemon = grazeld (one-binary rule), version = this distribution.
+        Some("scope" | "ws" | "version" | "daemon") => grazel_verb(args),
+        _ => razel_cli::run(args),
+    }
+}
+
+fn grazel_verb(args: &[String]) -> ExitCode {
+    let (flags, rest) = split_args(args);
+    let workspace = flags
+        .workspace
+        .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let result: Result<i32, String> = match verb.as_slice() {
+    let verbs: Vec<&str> = rest.iter().map(String::as_str).collect();
+    let result: Result<ExitCode, String> = match verbs.as_slice() {
         ["version"] => {
             println!(
                 "grazel {} (wire protocol {})",
                 daemon::BUILD_VERSION,
                 razel_daemon::rpc::PROTOCOL
             );
-            Ok(0)
+            Ok(ExitCode::SUCCESS)
         }
         // Debug/plumbing view of §1e resolution; key=value, consumed by ws-test.
-        ["scope"] => resolve_paths(flag_scope.as_deref(), &workspace).map(|p| {
+        ["scope"] => resolve_paths(flags.scope.as_deref(), &workspace).map(|p| {
             println!("scope={}", p.scope);
             println!("socket={}", p.socket.display());
             println!("state={}", p.state_dir.display());
-            0
+            ExitCode::SUCCESS
         }),
-        ["daemon", "run"] => resolve_paths(flag_scope.as_deref(), &workspace)
-            .and_then(|p| daemon::run(&p, &workspace))
-            .map(|()| 0),
+        ["daemon", "run"] => resolve_paths(flags.scope.as_deref(), &workspace)
+            .and_then(|p| {
+                daemon::run(daemon::ServeOpts {
+                    paths: p,
+                    workspace: workspace.clone(),
+                    // Default 3h, Bazel's idle posture; stages dial it down.
+                    idle_timeout: Some(Duration::from_secs(flags.idle_timeout.unwrap_or(3 * 3600))),
+                })
+            })
+            .map(|()| ExitCode::SUCCESS),
+        ["daemon", "ping"] => std::env::current_exe()
+            .map_err(|e| format!("current_exe: {e}"))
+            .and_then(|bin| {
+                let p = resolve_paths(flags.scope.as_deref(), &workspace)?;
+                let out = dial::ensure(&p, &workspace, !flags.no_autostart, &bin)?;
+                println!("scope={}", p.scope);
+                println!("socket={}", p.socket.display());
+                println!("pid={}", out.pid);
+                println!("version={}", out.version.version);
+                println!("protocol={}", out.version.protocol);
+                println!("restarted={}", out.restarted);
+                Ok(ExitCode::SUCCESS)
+            }),
+        ["daemon", "stop"] => resolve_paths(flags.scope.as_deref(), &workspace).and_then(|p| {
+            let stopped = dial::stop(&p)?;
+            println!(
+                "scope={} {}",
+                p.scope,
+                if stopped { "stopped" } else { "no daemon running" }
+            );
+            Ok(ExitCode::SUCCESS)
+        }),
         ["ws", "test"] => std::env::current_exe()
             .map_err(|e| format!("current_exe: {e}"))
             .map(|bin| {
-                let tmp = std::env::temp_dir().join(format!("grazel-ws-test-{}", std::process::id()));
+                let tmp = std::env::temp_dir().join(format!("gwt-{}", std::process::id()));
                 let ctx = wstest::StageCtx { grazel_bin: bin, tmp };
-                let ok = wstest::run_stages(&ctx, flag_stage.as_deref(), &mut std::io::stdout());
-                if ok { 0 } else { 1 }
+                let ok = wstest::run_stages(&ctx, flags.stage.as_deref(), &mut std::io::stdout());
+                if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
             }),
         _ => {
-            eprintln!("usage: grazel [--scope=S] [--workspace=DIR] <version | scope | daemon run | ws test [--stage=NAME]>");
-            Ok(2)
+            eprintln!(
+                "usage: grazel <scope | daemon run|ping|stop | ws test [--stage=N]> [--scope=S] [--workspace=DIR]\n       or any razel verb (build/affected/subscribe/…) — razel's surface verbatim"
+            );
+            Ok(ExitCode::from(64)) // EX_USAGE, razel's convention
         }
     };
     result.unwrap_or_else(|e| {
         eprintln!("grazel: {e}");
-        1
+        ExitCode::FAILURE
     })
 }

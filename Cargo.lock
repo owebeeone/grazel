@@ -627,6 +627,7 @@ name = "grazel-cli-lib"
 version = "0.1.0"
 dependencies = [
  "grazel-node",
+ "razel-cli",
  "razel-daemon",
  "razel-wire",
  "tempfile",
