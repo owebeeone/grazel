@@ -23,8 +23,9 @@ use razel_build::{AnalyzedTarget, affected, analyze_build, execute};
 use razel_core::Digest;
 use razel_exec::Cache;
 use razel_wire::{
-    BuildResult, BuildState, BuildStatus, Cbor, ImpactSet, OutputArtifact, TargetRef, TargetStatus,
-    VersionInfo, decode, encode,
+    BuildResult, BuildState, BuildStatus, Cbor, Hello, ImpactSet, InvocationEvent,
+    InvocationStarted, OutputArtifact, Progress, TargetRef, TargetStatus, VersionInfo, decode,
+    encode,
 };
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -72,6 +73,13 @@ struct Inner {
     /// on every build, and `bump` wakes subscribers.
     state: Mutex<BuildState>,
     bump: Condvar,
+    /// S3c: the invocation-event LOG (`invocation.events`, shape=log — ordered,
+    /// append-only; subscribers replay from 0 then follow). Unbounded v1 — the
+    /// bounded-buffer + drop-with-resync discipline arrives with the View work.
+    events: Mutex<Vec<InvocationEvent>>,
+    events_bump: Condvar,
+    /// Invocation-id source (per-daemon monotonic).
+    invocations: AtomicUsize,
 }
 
 /// A daemon bound to one workspace + cache. Warm (analysis reused across builds),
@@ -93,6 +101,9 @@ impl Server {
                     targets: vec![],
                 }),
                 bump: Condvar::new(),
+                events: Mutex::new(Vec::new()),
+                events_bump: Condvar::new(),
+                invocations: AtomicUsize::new(0),
             }),
         }
     }
@@ -147,20 +158,121 @@ impl Inner {
         Ok(targets)
     }
 
-    /// One connection: a `build.subscribe` request streams build-graph state until
+    /// One connection: a `build.subscribe`/`invocation.events` request streams until
     /// the client disconnects; everything else is one request → one response.
     /// Generic over the byte stream — the transport decides the concrete type.
-    fn handle_conn<C: Read + Write>(&self, conn: &mut C) -> io::Result<()> {
+    fn handle_conn<C: Read + Write>(self: &Arc<Self>, conn: &mut C) -> io::Result<()> {
         let req = decode(&read_frame(conn)?);
         let Cbor::Text(method) = req.get(1) else {
             return write_frame(conn, &encode(&err("malformed request: missing method")));
         };
-        if method == "build.subscribe" {
-            self.stream_build_state(conn)
-        } else {
-            let resp = self.dispatch(&req);
-            write_frame(conn, &encode(&resp))
+        match method.as_str() {
+            "build.subscribe" => self.stream_build_state(conn),
+            "invocation.events" => self.stream_invocation_events(conn),
+            _ => {
+                let resp = self.dispatch(&req);
+                write_frame(conn, &encode(&resp))
+            }
         }
+    }
+
+    /// `invocation.events` (log): replay the log from 0, then follow appends until
+    /// the client disconnects. Order on the log IS the §4b ordering contract.
+    fn stream_invocation_events<C: Write>(&self, conn: &mut C) -> io::Result<()> {
+        let mut idx = 0usize;
+        loop {
+            let batch: Vec<InvocationEvent> = {
+                let guard = self.events.lock().unwrap();
+                let guard = self.events_bump.wait_while(guard, |e| e.len() == idx).unwrap();
+                let batch = guard[idx..].to_vec();
+                idx = guard.len();
+                batch
+            };
+            for ev in &batch {
+                write_frame(conn, &encode(&ok(&ev.to_cbor())))?; // Err == client gone
+            }
+        }
+    }
+
+    /// Append one event to the invocation log and wake followers.
+    fn emit(&self, ev: InvocationEvent) {
+        let mut log = self.events.lock().unwrap();
+        log.push(ev);
+        drop(log);
+        self.events_bump.notify_all();
+    }
+
+    /// `hello` (§1e dial procedure): version handshake + workspace discrimination.
+    fn do_hello(&self, args: &Cbor) -> Result<VersionInfo, String> {
+        let h = Hello::from_cbor(args);
+        let me = version_info();
+        if h.protocol != me.protocol {
+            return Err(format!(
+                "wire protocol mismatch: client speaks {}, daemon speaks {} — restart the \
+                 older side (client build {}, daemon build {})",
+                h.protocol, me.protocol, h.build_version, me.version
+            ));
+        }
+        let served = self.workspace.canonicalize().unwrap_or_else(|_| self.workspace.clone());
+        let asked = std::path::Path::new(&h.workspace_root)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(&h.workspace_root));
+        if served != asked {
+            return Err(format!(
+                "this daemon serves workspace {}, hello named {}",
+                served.display(),
+                asked.display()
+            ));
+        }
+        Ok(me)
+    }
+
+    /// `run` (S3c, §4b stream-first): answer with the invocation id IMMEDIATELY;
+    /// the build proceeds on its own thread, emitting Progress events then the
+    /// terminal result onto the invocation log. v1 progress is phase-grained
+    /// (load/execute); sched_hook-fed counts arrive with the View work.
+    fn do_run(self: &Arc<Self>, args: &Cbor) -> Result<InvocationStarted, String> {
+        let Cbor::Text(target) = args.get(1) else {
+            return Err("run: missing target".into());
+        };
+        let target = target.clone();
+        let n = self.invocations.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = format!("inv-{n}");
+        let me = Arc::clone(self);
+        let ev_id = id.clone();
+        std::thread::spawn(move || {
+            let mut seq = 0i64;
+            let mut next = |progress, result| {
+                seq += 1;
+                InvocationEvent {
+                    invocation_id: ev_id.clone(),
+                    seq,
+                    progress,
+                    result,
+                }
+            };
+            me.emit(next(
+                Some(Progress {
+                    invocation_id: ev_id.clone(),
+                    phase: "load".into(),
+                    done: 0,
+                    total: 0,
+                    detail: Some(target.clone()),
+                }),
+                None,
+            ));
+            let result = me
+                .do_build(&Cbor::Map(vec![(1, Cbor::Text(target.clone()))]))
+                .unwrap_or_else(|e| BuildResult {
+                    target: target.clone(),
+                    status: BuildStatus::Failed,
+                    recomputes: 0,
+                    outputs: vec![],
+                    message: Some(e),
+                });
+            me.emit(next(None, Some(result)));
+        });
+        Ok(InvocationStarted { invocation_id: id })
     }
 
     /// `build.subscribe` (atom): send the current state, then a fresh snapshot each
@@ -181,15 +293,23 @@ impl Inner {
         }
     }
 
-    fn dispatch(&self, req: &Cbor) -> Cbor {
+    fn dispatch(self: &Arc<Self>, req: &Cbor) -> Cbor {
         let Cbor::Text(method) = req.get(1) else {
             return err("malformed request: missing method");
         };
         let args = req.get(2);
         match method.as_str() {
             "version" => ok(&version_info().to_cbor()),
+            "hello" => match self.do_hello(args) {
+                Ok(v) => ok(&v.to_cbor()),
+                Err(e) => err(&e),
+            },
             "build" => match self.do_build(args) {
                 Ok(r) => ok(&r.to_cbor()),
+                Err(e) => err(&e),
+            },
+            "run" => match self.do_run(args) {
+                Ok(s) => ok(&s.to_cbor()),
                 Err(e) => err(&e),
             },
             "affected" => match self.do_affected(args) {
@@ -392,6 +512,41 @@ pub fn req_subscribe() -> Cbor {
         (1, Cbor::Text("build.subscribe".into())),
         (2, Cbor::Null),
     ])
+}
+
+/// `hello` request envelope (§1e handshake).
+pub fn req_hello(h: &Hello) -> Cbor {
+    Cbor::Map(vec![(1, Cbor::Text("hello".into())), (2, h.to_cbor())])
+}
+
+/// `run <target> [args…]` request envelope (S3c stream-first command).
+pub fn req_run(target: &str, args: &[String]) -> Cbor {
+    Cbor::Map(vec![
+        (1, Cbor::Text("run".into())),
+        (
+            2,
+            Cbor::Map(vec![
+                (1, Cbor::Text(target.to_string())),
+                (2, Cbor::Array(args.iter().map(|a| Cbor::Text(a.clone())).collect())),
+            ]),
+        ),
+    ])
+}
+
+/// `invocation.events` request envelope (the log subscription).
+pub fn req_invocation_events() -> Cbor {
+    Cbor::Map(vec![
+        (1, Cbor::Text("invocation.events".into())),
+        (2, Cbor::Null),
+    ])
+}
+
+/// Open the `invocation.events` log stream (replays from 0, then follows). Read
+/// frames with [`next_frame`]; each payload is an `InvocationEvent`.
+pub fn invocation_events(socket: &Path) -> io::Result<Box<dyn transport::Conn>> {
+    let mut conn = transport::connect(socket)?;
+    write_frame(&mut conn, &encode(&req_invocation_events()))?;
+    Ok(conn)
 }
 
 /// Send one request envelope to the daemon at `socket`; return its response.
