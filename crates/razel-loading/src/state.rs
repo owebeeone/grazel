@@ -847,6 +847,11 @@ pub struct GlobalFlags {
     pub defines: Vec<(String, String)>,
     /// S2 test seam (see [`SchedHook`]). `None` in production.
     pub sched_hook: Option<SchedHook>,
+    /// `--strict_bazel` (V3sh1 §3d, the parity oracle switch): act as if this IS
+    /// bazel-7.7.0 — `.razel` files (`BUILD.razel`, `MODULE.razel`) are INVISIBLE,
+    /// never an error. Full rc/CLI wiring lands at S6; the engine honors the bool
+    /// from S1.
+    pub strict_bazel: bool,
 }
 
 impl GlobalFlags {

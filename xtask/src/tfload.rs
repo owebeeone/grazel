@@ -63,7 +63,7 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     // Load+parse / execute split: the pure half parallelizes; eval consumes the AST cache.
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
     let t0 = std::time::Instant::now();
-    let asts = prepare_build_asts(&ws, &packages, threads);
+    let asts = prepare_build_asts(&ws, &packages, threads, false);
     let parse_ms = t0.elapsed().as_millis();
     // Spine seeding: prepend the previous run's loaded-set (deps incl. — the llvm/mlir spine
     // is wide and mutually independent) so workers fan across it instead of queueing behind

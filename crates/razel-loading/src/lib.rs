@@ -34,7 +34,9 @@ mod py_rules;
 mod rust_rules;
 mod sh_rules;
 mod fetch; // Fetch R1: WORKSPACE spec extraction (RazelFetchPlan §3)
+mod workspace; // S1 (V3sh1): E-mode boundary walk + BUILD.razel XOR + boundary guard
 pub use fetch::{AttrV, RepoSpec, extract_workspace_repos};
+pub use workspace::{e_mode_guard, find_workspace_root};
 pub use rules::{
     analyze_bazel, analyze_bazel_with, analyze_starlark, analyze_workspace, analyze_workspace_with,
     load_tree_report, load_tree_report_prepared, load_tree_report_seeded,

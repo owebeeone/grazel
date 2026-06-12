@@ -793,18 +793,31 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
             .ok_or_else(|| LoadErr::declare("load_package called outside workspace mode"))?
             .join(pkg)
     };
+    // Resolve the package file UNCONDITIONALLY (cheap stat probes): the E-mode XOR and
+    // boundary guard must hold even when the parallel pre-pass already cached the AST.
+    let build_path = crate::workspace::resolve_build_file(&pkg_dir, sess.global.strict_bazel)
+        .map_err(LoadErr::declare)?
+        .ok_or_else(|| {
+            LoadErr::declare(format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))
+        })?;
+    // E-package in the MAIN repo: the boundary guard (§3c rule 2 — S1: warn, S3: error).
+    if build_path.file_name().is_some_and(|f| f == "BUILD.razel") && !pkg.starts_with('@') {
+        if let Some(root) = sess.workspace.as_deref() {
+            let ignore = std::fs::read_to_string(root.join(".bazelignore")).ok();
+            if let Some(w) = crate::workspace::e_mode_guard(
+                crate::workspace::root_is_dual(root),
+                ignore.as_deref(),
+                pkg,
+            ) {
+                eprintln!("{w}");
+            }
+        }
+    }
     // Pre-parsed AST present? Skip BOTH the read and the parse (the parallel pre-pass).
     let prepared = sess.ast_cache.borrow().contains_key(&format!("{pkg}/BUILD"));
     let src = if prepared {
         String::new()
     } else {
-        let build_path = ["BUILD", "BUILD.bazel"]
-            .iter()
-            .map(|f| pkg_dir.join(f))
-            .find(|p| p.exists())
-            .ok_or_else(|| {
-                LoadErr::declare(format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))
-            })?;
         std::fs::read_to_string(&build_path).map_err(|e| LoadErr::declare(e.to_string()))?
     };
 
@@ -990,6 +1003,7 @@ pub fn prepare_build_asts(
     root: &Path,
     packages: &[String],
     threads: usize,
+    strict_bazel: bool,
 ) -> Vec<(String, starlark::syntax::AstModule)> {
     let n = threads.max(1);
     let chunks: Vec<&[String]> = packages.chunks(packages.len().div_ceil(n)).collect();
@@ -1000,10 +1014,10 @@ pub fn prepare_build_asts(
                 scope.spawn(move || {
                     let mut out = Vec::new();
                     for pkg in chunk {
-                        let Some(path) = ["BUILD", "BUILD.bazel"]
-                            .iter()
-                            .map(|f| root.join(pkg).join(f))
-                            .find(|p| p.exists())
+                        // Same resolution as `load_package` (E-mode XOR, bazel precedence);
+                        // XOR errors are SKIPPED here so the sequential path surfaces them.
+                        let Ok(Some(path)) =
+                            crate::workspace::resolve_build_file(&root.join(pkg), strict_bazel)
                         else {
                             continue;
                         };
