@@ -1,0 +1,218 @@
+action 'Writing script main/hello-world.cppmap'
+  Mnemonic: CppModuleMap
+  Target: //main:hello-world
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/main/hello-world.cppmap]
+
+action 'Compiling main/hello-world.cc'
+  Mnemonic: CppCompile
+  Target: //main:hello-world
+  Inputs: [bazel-out/<cfg>/bin/external/<repo>/tools/cpp/link_extra_lib.cppmap, bazel-out/<cfg>/bin/external/<repo>/tools/cpp/malloc.cppmap, bazel-out/<cfg>/bin/external/<repo>/link_extra_lib.cppmap, bazel-out/<cfg>/bin/main/hello-greet.cppmap, bazel-out/<cfg>/bin/main/hello-world.cppmap, external/<repo>/builtin_include_directory_paths, external/<repo>/cc_wrapper.sh, external/<repo>/deps_scanner_wrapper.sh, external/<repo>/module.modulemap, external/<repo>/validate_static_library.sh, main/hello-greet.h, main/hello-world.cc]
+  Outputs: [bazel-out/<cfg>/bin/main/_objs/hello-world/hello-world.d, bazel-out/<cfg>/bin/main/_objs/hello-world/hello-world.o]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/cc_wrapper.sh \
+    -U_FORTIFY_SOURCE \
+    -fstack-protector \
+    -Wall \
+    -Wthread-safety \
+    -Wself-assign \
+    -Wunused-but-set-parameter \
+    -Wno-free-nonheap-object \
+    -fcolor-diagnostics \
+    -fno-omit-frame-pointer \
+    '-std=c++17' \
+    '-frandom-seed=bazel-out/<cfg>/bin/main/_objs/hello-world/hello-world.o' \
+    '-mmacosx-version-min=<sdk>' \
+    -MD \
+    -MF \
+    bazel-out/<cfg>/bin/main/_objs/hello-world/hello-world.d \
+    -iquote \
+    . \
+    -iquote \
+    bazel-out/<cfg>/bin \
+    -iquote \
+    external/rules_cc+ \
+    -iquote \
+    bazel-out/<cfg>/bin/external/rules_cc+ \
+    -iquote \
+    external/bazel_tools \
+    -iquote \
+    bazel-out/<cfg>/bin/external/bazel_tools \
+    -c \
+    main/hello-world.cc \
+    -o \
+    bazel-out/<cfg>/bin/main/_objs/hello-world/hello-world.o \
+    -no-canonical-prefixes \
+    -Wno-builtin-macro-redefined \
+    '-D__DATE__="redacted"' \
+    '-D__TIMESTAMP__="redacted"' \
+    '-D__TIME__="redacted"')
+
+action 'Linking main/hello-world'
+  Mnemonic: CppLink
+  Target: //main:hello-world
+  Inputs: [bazel-out/<cfg>/bin/main/_objs/hello-world/hello-world.o, bazel-out/<cfg>/bin/main/libhello-greet.a, external/<repo>/builtin_include_directory_paths, external/<repo>/cc_wrapper.sh, external/<repo>/deps_scanner_wrapper.sh, external/<repo>/validate_static_library.sh, external/<repo>/cc/private/toolchain/build_interface_so, external/<repo>/cc/private/toolchain/link_dynamic_library.sh]
+  Outputs: [bazel-out/<cfg>/bin/main/hello-world]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin, PWD=/proc/self/cwd, ZERO_AR_DATE=1]
+  Command Line: (exec external/<repo>/cc_wrapper.sh \
+    -o \
+    bazel-out/<cfg>/bin/main/hello-world \
+    bazel-out/<cfg>/bin/main/_objs/hello-world/hello-world.o \
+    bazel-out/<cfg>/bin/main/libhello-greet.a \
+    -Wl,-S \
+    '-mmacosx-version-min=<sdk>' \
+    -no-canonical-prefixes \
+    -fobjc-link-runtime \
+    -headerpad_max_install_names \
+    -lc++ \
+    -lm)
+
+action 'Stripping main/hello-world.stripped for @@//main:hello-world'
+  Mnemonic: CcStrip
+  Target: //main:hello-world
+  Inputs: [bazel-out/<cfg>/bin/main/hello-world]
+  Outputs: [bazel-out/<cfg>/bin/main/hello-world.stripped]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec /usr/bin/strip \
+    -S \
+    -o \
+    bazel-out/<cfg>/bin/main/hello-world.stripped \
+    bazel-out/<cfg>/bin/main/hello-world)
+
+action 'Writing file main/hello-world.dwp'
+  Mnemonic: FileWrite
+  Target: //main:hello-world
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/main/hello-world.dwp]
+  IsExecutable: false
+
+action 'Writing repo mapping manifest for //main:hello-world'
+  Mnemonic: RepoMappingManifest
+  Target: //main:hello-world
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/main/hello-world.repo_mapping]
+  IsExecutable: false
+
+action 'Creating source manifest for //main:hello-world'
+  Mnemonic: SourceSymlinkManifest
+  Target: //main:hello-world
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/main/hello-world.runfiles_manifest]
+  IsExecutable: false
+
+action 'Creating runfiles tree bazel-out/<cfg>/bin/main/hello-world.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //main:hello-world
+  Inputs: [bazel-out/<cfg>/bin/main/hello-world.runfiles_manifest]
+  Outputs: [bazel-out/<cfg>/bin/main/hello-world.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+runfiles for //main:hello-world
+  Mnemonic: RunfilesTree
+  Target: //main:hello-world
+  Inputs: [bazel-out/<cfg>/bin/main/hello-world, bazel-out/<cfg>/bin/main/hello-world.repo_mapping, bazel-out/<cfg>/bin/main/hello-world.runfiles/MANIFEST]
+  Outputs: [bazel-out/<cfg>/bin/main/hello-world.runfiles]
+
+action 'Writing script external/<repo>/link_extra_lib.cppmap'
+  Mnemonic: CppModuleMap
+  Target: @rules_cc//:link_extra_lib
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/external/<repo>/link_extra_lib.cppmap]
+
+action 'Writing script main/hello-greet.cppmap'
+  Mnemonic: CppModuleMap
+  Target: //main:hello-greet
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/main/hello-greet.cppmap]
+
+action 'Compiling main/hello-greet.cc'
+  Mnemonic: CppCompile
+  Target: //main:hello-greet
+  Inputs: [bazel-out/<cfg>/bin/main/hello-greet.cppmap, external/<repo>/builtin_include_directory_paths, external/<repo>/cc_wrapper.sh, external/<repo>/deps_scanner_wrapper.sh, external/<repo>/module.modulemap, external/<repo>/validate_static_library.sh, main/hello-greet.cc, main/hello-greet.h]
+  Outputs: [bazel-out/<cfg>/bin/main/_objs/hello-greet/hello-greet.d, bazel-out/<cfg>/bin/main/_objs/hello-greet/hello-greet.o]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/<repo>/cc_wrapper.sh \
+    -U_FORTIFY_SOURCE \
+    -fstack-protector \
+    -Wall \
+    -Wthread-safety \
+    -Wself-assign \
+    -Wunused-but-set-parameter \
+    -Wno-free-nonheap-object \
+    -fcolor-diagnostics \
+    -fno-omit-frame-pointer \
+    '-std=c++17' \
+    '-frandom-seed=bazel-out/<cfg>/bin/main/_objs/hello-greet/hello-greet.o' \
+    '-mmacosx-version-min=<sdk>' \
+    -MD \
+    -MF \
+    bazel-out/<cfg>/bin/main/_objs/hello-greet/hello-greet.d \
+    -iquote \
+    . \
+    -iquote \
+    bazel-out/<cfg>/bin \
+    -c \
+    main/hello-greet.cc \
+    -o \
+    bazel-out/<cfg>/bin/main/_objs/hello-greet/hello-greet.o \
+    -no-canonical-prefixes \
+    -Wno-builtin-macro-redefined \
+    '-D__DATE__="redacted"' \
+    '-D__TIMESTAMP__="redacted"' \
+    '-D__TIME__="redacted"')
+
+action 'Linking main/libhello-greet.a'
+  Mnemonic: CppArchive
+  Target: //main:hello-greet
+  Inputs: [bazel-out/<cfg>/bin/main/_objs/hello-greet/hello-greet.o, external/<repo>/builtin_include_directory_paths, external/<repo>/cc_wrapper.sh, external/<repo>/deps_scanner_wrapper.sh, external/<repo>/validate_static_library.sh]
+  Outputs: [bazel-out/<cfg>/bin/main/libhello-greet.a]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin, PWD=/proc/self/cwd, ZERO_AR_DATE=1]
+  Command Line: (exec /usr/bin/libtool \
+    -D \
+    -no_warning_for_no_symbols \
+    -static \
+    -o \
+    bazel-out/<cfg>/bin/main/libhello-greet.a \
+    bazel-out/<cfg>/bin/main/_objs/hello-greet/hello-greet.o)
+
+action 'Writing script external/<repo>/tools/cpp/link_extra_lib.cppmap'
+  Mnemonic: CppModuleMap
+  Target: @bazel_tools//tools/cpp:link_extra_lib
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/external/<repo>/tools/cpp/link_extra_lib.cppmap]
+
+action 'Writing script external/<repo>/tools/cpp/malloc.cppmap'
+  Mnemonic: CppModuleMap
+  Target: @bazel_tools//tools/cpp:malloc
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/external/<repo>/tools/cpp/malloc.cppmap]
+
+action 'Translating volatile BuildInfo file'
+  Mnemonic: TranslateBuildInfo
+  Target: @bazel_tools//tools/build_defs/build_info:cc_build_info
+  Inputs: [bazel-out/<cfg>/bazel_tools/tools/build_defs/build_info/templates/volatile_file.h.template]
+  Outputs: [bazel-out/<cfg>/bin/external/<repo>/tools/build_defs/build_info/volatile_file.h]
+
+action 'Translating stable BuildInfo file'
+  Mnemonic: TranslateBuildInfo
+  Target: @bazel_tools//tools/build_defs/build_info:cc_build_info
+  Inputs: [bazel-out/<cfg>/bazel_tools/tools/build_defs/build_info/templates/non_volatile_file.h.template]
+  Outputs: [bazel-out/<cfg>/bin/external/<repo>/tools/build_defs/build_info/non_volatile_file.h]
+
+action 'Creating symlink external/<repo>/tools/build_defs/build_info/redacted_file.h'
+  Mnemonic: Symlink
+  Target: @bazel_tools//tools/build_defs/build_info:cc_build_info
+  Inputs: [external/<repo>/tools/build_defs/build_info/templates/redacted_file.h.template]
+  Outputs: [bazel-out/<cfg>/bin/external/<repo>/tools/build_defs/build_info/redacted_file.h]
+
+action 'Writing script external/<repo>/tools/cpp/empty_lib.cppmap'
+  Mnemonic: CppModuleMap
+  Target: @bazel_tools//tools/cpp:empty_lib
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/external/<repo>/tools/cpp/empty_lib.cppmap]
+
+action 'Writing script external/<repo>/empty_lib.cppmap'
+  Mnemonic: CppModuleMap
+  Target: @rules_cc//:empty_lib
+  Inputs: []
+  Outputs: [bazel-out/<cfg>/bin/external/<repo>/empty_lib.cppmap]

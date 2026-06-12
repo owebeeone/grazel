@@ -12,4 +12,6 @@ publish = false
 [dependencies]
 razel-loading = { path = "../crates/razel-loading" } # the ladder probe drives the engine (probe)
 razel-parity = { path = "../crates/razel-parity" } # shared golden normalization (capture-goldens)
+razel-build = { path = "../crates/razel-build" } # S4b: examples harness runs targets
+razel-exec = { path = "../crates/razel-exec" } # S4b: cache for harness builds
 serde_json = "1" # fetch R1: the repo lockfile writer (RazelFetchPlan §3)

@@ -28,6 +28,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+mod examples;
 mod fetchcmd;
 mod fetchnpm;
 mod fetchpypi;
@@ -109,6 +110,10 @@ fn main() -> ExitCode {
             }
         }
         Some("capture-goldens") => capture_goldens(),
+        Some("examples") => examples::run_command(
+            &workspace_root(),
+            rest.first().map(String::as_str) == Some("--capture"),
+        ),
         other => {
             eprintln!(
                 "unknown xtask {other:?}\n\
@@ -191,7 +196,7 @@ fn find_build_packages(dir: &Path, corpus_root: &Path, out: &mut Vec<(PathBuf, S
 }
 
 /// Drop bazel CLI chatter that may reach stdout, leaving only the action-graph lines.
-fn filter_aquery(raw: &str) -> String {
+pub(crate) fn filter_aquery(raw: &str) -> String {
     let drop = |t: &str| {
         ["INFO:", "Loading", "Analyzing", "Computing", "Starting", "WARNING", "Fetching", "DEBUG", "Use "]
             .iter()
