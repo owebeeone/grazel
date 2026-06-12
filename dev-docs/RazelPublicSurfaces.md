@@ -145,10 +145,20 @@ crates** — a needed seam change is a request to the razel side, landed there a
 With that rule the two trees' file sets are disjoint by construction, so cross-pulls
 are routine and the conflict surface is confined to the declared seams (the razel-cli
 lib API and the razel-wire IR — IR changes land razel-side, since both trees consume
-the generated types). Sequencing consequence: **S0 lands in the razel tree FIRST; the
-grazel clone starts from the post-S0 state** — the grazel agent begins at a cut seam,
-not cutting one. The doc split mirrors the tree split: work items live in
-`dev-docs/ws-razel/` (this lane: V3 + spike) and `dev-docs/ws-grazel/`
+the generated types).
+
+**Share + comms mechanics (Gianni, 2026-06-12):** the share layer is a LOCAL BARE
+repo, `razel.git`, sibling to both trees; both work on the SAME branch (`razelv3`) and
+sync through it (remote `share` in razel/, `origin` in razel-grazel/) — merges stay
+trivial because the file-ownership rule keeps the trees' edits disjoint. The slow
+comms channel between the agents is a pair of INBOX folders that travel with the
+branch: `dev-docs/ws-razel/inbox/` (notes FOR the razel agent) and
+`dev-docs/ws-grazel/inbox/` (notes FOR the grazel agent) — one numbered note per
+requirement, `Status: open → done`, checked at every sync (protocol in each inbox's
+README). Sequencing: the clone exists from day one; work that CONSUMES the S0 seam
+waits for S0 to arrive by pull (announced via inbox), but grazel's design + additive
+crate creation start immediately. The doc split mirrors the tree split: work items
+live in `dev-docs/ws-razel/` (V3 + spike) and `dev-docs/ws-grazel/`
 (`GrazelWorkstream.md`, GR0–GR5); DESIGN docs — this one included — stay at the
 dev-docs root, shared by both.
 

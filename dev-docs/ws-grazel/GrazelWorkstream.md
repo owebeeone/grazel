@@ -2,7 +2,7 @@
 
 *2026-06-12. The work-item plan for the GRAZEL side of the two-tree split
 (`RazelPublicSurfaces.md` §1d): a separate agent executes this in the `razel-grazel/`
-clone, forked from the razel tree's post-S0 state. The razel/bazel lane's plan is
+clone, sharing branch `razelv3` through the local bare `razel.git`. The razel/bazel lane's plan is
 `dev-docs/ws-razel/RazelReleaseSpike.md` (V3sh1). Shared DESIGN lives at the dev-docs
 root — `RazelPublicSurfaces.md` is the contract this workstream implements (§1b
 distributions, §1d crates, §1e service scopes, §4/§4b taut + streaming).*
@@ -16,9 +16,13 @@ NOT this workstream's design and are banner-marked accordingly.
 
 - **Ownership:** this tree creates and owns `grazel-*` crates ONLY. It NEVER modifies a
   `razel-*` crate. A needed seam change (razel-cli lib API, razel-daemon lib,
-  razel-wire IR) is a REQUEST to the razel side, landed there and pulled — the crate
-  dependency arrow as a labor arrow. The CI deny rule (no razel-* → grazel-*/iroh dep)
-  must stay green in this tree too.
+  razel-wire IR) is a REQUEST to the razel side — a note in `dev-docs/ws-razel/inbox/`
+  — landed there and pulled: the crate dependency arrow as a labor arrow. The CI deny
+  rule (no razel-* → grazel-*/iroh dep) must stay green in this tree too.
+- **Share + comms:** both trees work on branch `razelv3`, syncing through the local
+  bare `razel.git` (this tree's `origin`). Check `dev-docs/ws-grazel/inbox/` at every
+  sync — requirements from the razel agent arrive there (protocol in the inbox README);
+  answer with notes into `ws-razel/inbox/`.
 - **TDD, e2e-grained (Gianni, 2026-06-12):** the grazel infrastructure is verified
   END-TO-END through the real CLI against a real daemon over a real socket — via the
   **`grazel ws test`** command — NOT by per-endpoint tests. Every GR step below is
@@ -56,14 +60,23 @@ nonzero on first principle: any failure. Properties:
 
 ## §2 The phases
 
-**GR0 — fork & baseline.**
-Precondition: S0 (plan 0) has landed in the razel tree — razel-cli lib split,
-`grazel-cli` + `grazel-cli-lib` stubs, deny gate, byte-identical fixture test.
-Scope: clone → `razel-grazel/`; full suite green in the clone; deny gate RE-red-tested
-here; the sync ritual defined and exercised once (pull razel main → rebuild → suite
-green; documented in this folder's README).
-Exit: green tree, one proven sync round-trip, `grazel ws test` exists as a verb with a
-single trivial stage (`harness-selftest`) so the ladder has a rung to grow from.
+**GR0 — crate design, skeletons & baseline.**
+The tree exists from day one (clone of `razel.git`, branch `razelv3`); S0 is NOT a
+precondition for starting — only for CONSUMING the razel-cli lib (announced via this
+inbox; stub that touchpoint until it arrives).
+Scope, strictly ordered per `inbox/0001`:
+(1) **`GrazelCrates.md`** — the crate-structure design FIRST: which `grazel-*` crates,
+responsibilities, how they play together, the dependency diagram into razel-*; the
+inbox note lists the fixed constraints and the open questions (scope/daemon machinery
+placement, ws-test stage registry, HTTP-edge crate timing).
+(2) **Additive skeletons** per that design — new `crates/grazel-*` dirs only (the
+workspace members glob picks them up; no existing file touched → trivial merge), each
+compiling with at least one test.
+(3) Baseline: full suite green in this tree; the sync ritual exercised once (pull
+razelv3 → rebuild → suite green).
+Exit: GrazelCrates.md committed; skeletons green; one proven sync round-trip;
+`grazel ws test` exists as a verb with a single trivial stage (`harness-selftest`) so
+the ladder has a rung to grow from.
 
 **GR1 — grazeld bring-up (default scope) + ws-test v1.**
 Scope, stages first: `daemon mode` entry (`grazel daemon run --scope=default`, riding

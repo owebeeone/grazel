@@ -261,23 +261,19 @@ form.* Scope (PublicSurfaces §1d made real; cheaper than §1d assumed — razel
 ALREADY a lib, and razel-cli is a 750-line main over the bazel_flags lib):
 - `razel-cli` gains a `[lib]` target: verb dispatch, flag parsing, daemon dialing,
   output rendering move into the library; `main.rs` becomes the thin `razel` bin.
-- New grazel crates, TWO from the start (§1d shape): `grazel-cli` — thin bin (binary
-  named `grazel`), rust/OS mechanics ONLY (argv/env, exit codes, signals), just invokes
-  the lib — and `grazel-cli-lib` holding all business logic, linking the SAME razel-cli
-  lib: razel's CLI surface verbatim (shared parser — identical behavior by construction)
-  plus the grazel-namespaced verb stub (`grazel node status` → "not implemented" is
-  enough; the crates and namespace are the deliverable, not the node).
 - The DENY RULE lands in CI: no `razel-*` crate may depend on a `grazel-*` crate or on
   iroh (dep-graph gate in xtask, same class as razel-loading's runtime-free rule).
-Exit: both bins build; a fixture test asserts `grazel build`/`query` output is
-byte-identical to `razel`'s (tested, not assumed from the shared lib); the deny gate is
-RED-TESTED (a deliberate violation fails); suite + TF floor green.
-S0 is also the FORK POINT for the two-tree split (PublicSurfaces §1d): `razel-grazel/`
-is cloned from the post-S0 state and a separate agent builds the grazel components
-there (`grazel-*` crates only — that tree never modifies `razel-*`; seam changes are
-requests back to this tree). This tree keeps S1/S2/S4–S6 and the razel side of S3
-(daemon mode + services); grazel's node/HTTP/scope work proceeds in razel-grazel
-against the S0 seam.
+- *(Reassigned 2026-06-12: grazel crate CREATION is the grazel agent's — design doc
+  first, then additive `crates/grazel-*` skeletons in the razel-grazel tree, per
+  `ws-grazel/inbox/0001`. S0 here is the SEAM only.)*
+Exit: `razel` behavior unchanged through the refactor (suite + sentinels + goldens
+green); the deny gate is RED-TESTED (a deliberate violation fails); TF floor green.
+The grazel-vs-razel byte-identity test lands grazel-side as a `grazel ws test` stage.
+Two-tree mechanics (PublicSurfaces §1d): both trees share branch `razelv3` through the
+local bare `razel.git`; S0 reaches razel-grazel by PULL, announced via
+`ws-grazel/inbox/`. This tree keeps S1/S2/S4–S6 and the razel side of S3 (daemon mode +
+services); grazel's crate/scope/HTTP work proceeds in razel-grazel per
+`ws-grazel/GrazelWorkstream.md`.
 
 **S1 (G1) — E-mode core.**
 Scope: boundary walk-up (`MODULE.razel` joins `MODULE.bazel`/`REPO.bazel`/`WORKSPACE[.bazel]`);
