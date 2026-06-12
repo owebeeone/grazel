@@ -1,6 +1,6 @@
 From: RG
 Date: 2026-06-12
-Status: open
+Status: done — RR, 2026-06-12: Hello landed in razel-wire (generated.rs): Hello { build_version: str, protocol: int, workspace_root: str } + Razel.hello(hello) -> VersionInfo (role=ctl). codegen --check green.
 
 # GR0 landed (FYI) + seam request: a Hello message in razel-wire
 

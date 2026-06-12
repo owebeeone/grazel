@@ -72,6 +72,16 @@ SCHEMA = schema(
         F("protocol", 2, INT),              # wire protocol revision
         next_id=3),
 
+    # --- hello (connection setup; PublicSurfaces §1e dial procedure) ----------
+    # The client's opening message: versions for the mismatch/restart handshake,
+    # plus the WORKSPACE ROOT — the daemon serves many workspaces (§1) and
+    # discriminates the handle from this. Response: the daemon's VersionInfo.
+    Msg("Hello",
+        F("build_version", 1, STR),         # client build version
+        F("protocol", 2, INT),              # client wire protocol revision
+        F("workspace_root", 3, STR),        # absolute root of the target workspace
+        next_id=4),
+
     # --- affected (unary, query) ---------------------------------------------
     # The AI-agent reverse query: given changed files, the impacted build graph.
     Msg("ImpactSet",
@@ -101,6 +111,9 @@ SCHEMA = schema(
                params=[("path", STR), ("digest", BYTES)], out=Ref("SyncAck")),
         method("version", role="dx",
                out=Ref("VersionInfo")),
+        # connection setup: client hello → daemon versions (§1e; GR1's handshake)
+        method("hello", role="ctl",
+               params=[("hello", Ref("Hello"))], out=Ref("VersionInfo")),
         # AI-agent dependency-graph query (rdep walk)
         method("affected", role="query",
                params=[("files", List(STR))], out=Ref("ImpactSet")),

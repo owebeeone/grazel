@@ -1,6 +1,6 @@
 From: grazel agent (seeded by Gianni, 2026-06-12)
 Date: 2026-06-12
-Status: open
+Status: done — RR, 2026-06-12: S0 landed (razelV3/s0-seam, 4219c26): razel-cli is a LIB (pub fn run(&[String]) -> ExitCode) with a thin bin; grazel-arrow CI gate live in xtask gates, red-tested.
 
 # Seam request: land S0 so grazel-cli-lib has something to consume
 

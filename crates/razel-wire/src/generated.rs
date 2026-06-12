@@ -174,6 +174,29 @@ impl VersionInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
+pub struct Hello {
+    pub build_version: String,
+    pub protocol: i64,
+    pub workspace_root: String,
+}
+impl Hello {
+    pub fn to_cbor(&self) -> Cbor {
+        Cbor::Map(vec![
+            (1, Cbor::Text(self.build_version.clone())),
+            (2, Cbor::Int(self.protocol)),
+            (3, Cbor::Text(self.workspace_root.clone())),
+        ])
+    }
+    pub fn from_cbor(c: &Cbor) -> Self {
+        Self {
+            build_version: c.get(1).text(),
+            protocol: c.get(2).int(),
+            workspace_root: c.get(3).text(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct ImpactSet {
     pub sources: Vec<String>,
     pub targets: Vec<TargetRef>,
