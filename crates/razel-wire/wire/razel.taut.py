@@ -72,6 +72,30 @@ SCHEMA = schema(
         F("protocol", 2, INT),              # wire protocol revision
         next_id=3),
 
+    # --- invocation envelope (S3c; PublicSurfaces §4b: nothing long blocks) ----
+    # `run`/long commands answer IMMEDIATELY with an id; results/diagnostics/
+    # progress arrive as InvocationEvents on the `invocation.events` log (shape=log:
+    # ordered, append-only — per-invocation ordering is the shape's contract).
+    # Guarantees (GR3's build-streamed stage asserts them): the id is returned
+    # before any of its events; `seq` is gap-free per invocation; progress events
+    # strictly precede the terminal `result` event, which closes the invocation.
+    Msg("InvocationStarted",
+        F("invocation_id", 1, STR),
+        next_id=2),
+    Msg("Progress",
+        F("invocation_id", 1, STR),
+        F("phase", 2, STR),                 # "load" | "analyze" | "execute"
+        F("done", 3, INT),                  # "300/2000 BUILD files loaded", "action k/n"
+        F("total", 4, INT),                 # 0 = not yet known
+        F("detail", 5, STR, optional=True),
+        next_id=6),
+    Msg("InvocationEvent",                  # envelope: exactly ONE arm set
+        F("invocation_id", 1, STR),
+        F("seq", 2, INT),
+        F("progress", 3, Ref("Progress"), optional=True),
+        F("result", 4, Ref("BuildResult"), optional=True),  # terminal
+        next_id=5),
+
     # --- hello (connection setup; PublicSurfaces §1e dial procedure) ----------
     # The client's opening message: versions for the mismatch/restart handshake,
     # plus the WORKSPACE ROOT — the daemon serves many workspaces (§1) and
@@ -114,6 +138,12 @@ SCHEMA = schema(
         # connection setup: client hello → daemon versions (§1e; GR1's handshake)
         method("hello", role="ctl",
                params=[("hello", Ref("Hello"))], out=Ref("VersionInfo")),
+        # stream-first command plane (S3c): id now, events on the log (§4b)
+        method("run", role="in",
+               params=[("target", STR), ("args", List(STR))],
+               out=Ref("InvocationStarted")),
+        method("invocation.events", role="out", shape="log",
+               out=Ref("InvocationEvent")),
         # AI-agent dependency-graph query (rdep walk)
         method("affected", role="query",
                params=[("files", List(STR))], out=Ref("ImpactSet")),

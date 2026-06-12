@@ -174,6 +174,111 @@ impl VersionInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
+pub struct InvocationStarted {
+    pub invocation_id: String,
+}
+impl InvocationStarted {
+    pub fn to_cbor(&self) -> Cbor {
+        Cbor::Map(vec![(1, Cbor::Text(self.invocation_id.clone()))])
+    }
+    pub fn from_cbor(c: &Cbor) -> Self {
+        Self {
+            invocation_id: c.get(1).text(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Progress {
+    pub invocation_id: String,
+    pub phase: String,
+    pub done: i64,
+    pub total: i64,
+    pub detail: Option<String>,
+}
+impl Progress {
+    pub fn to_cbor(&self) -> Cbor {
+        Cbor::Map(vec![
+            (1, Cbor::Text(self.invocation_id.clone())),
+            (2, Cbor::Text(self.phase.clone())),
+            (3, Cbor::Int(self.done)),
+            (4, Cbor::Int(self.total)),
+            (
+                5,
+                match &self.detail {
+                    Some(v) => Cbor::Text(v.clone()),
+                    None => Cbor::Null,
+                },
+            ),
+        ])
+    }
+    pub fn from_cbor(c: &Cbor) -> Self {
+        Self {
+            invocation_id: c.get(1).text(),
+            phase: c.get(2).text(),
+            done: c.get(3).int(),
+            total: c.get(4).int(),
+            detail: {
+                let v = c.get(5);
+                if v.is_null() { None } else { Some(v.text()) }
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct InvocationEvent {
+    pub invocation_id: String,
+    pub seq: i64,
+    pub progress: Option<Progress>,
+    pub result: Option<BuildResult>,
+}
+impl InvocationEvent {
+    pub fn to_cbor(&self) -> Cbor {
+        Cbor::Map(vec![
+            (1, Cbor::Text(self.invocation_id.clone())),
+            (2, Cbor::Int(self.seq)),
+            (
+                3,
+                match &self.progress {
+                    Some(v) => v.to_cbor(),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                4,
+                match &self.result {
+                    Some(v) => v.to_cbor(),
+                    None => Cbor::Null,
+                },
+            ),
+        ])
+    }
+    pub fn from_cbor(c: &Cbor) -> Self {
+        Self {
+            invocation_id: c.get(1).text(),
+            seq: c.get(2).int(),
+            progress: {
+                let v = c.get(3);
+                if v.is_null() {
+                    None
+                } else {
+                    Some(Progress::from_cbor(v))
+                }
+            },
+            result: {
+                let v = c.get(4);
+                if v.is_null() {
+                    None
+                } else {
+                    Some(BuildResult::from_cbor(v))
+                }
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Hello {
     pub build_version: String,
     pub protocol: i64,
