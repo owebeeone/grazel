@@ -5,19 +5,66 @@ razel adopts the same model (as Bazel does internally) and, UNLIKE Bazel, makes 
 API a FORMAL, VERSIONED, THIRD-PARTY surface. Companion to `RazelReleaseSpike.md` (V3sh1),
 which builds the first slice; subordinate to `RazelV3Plan.md`'s invariants.*
 
-## §1 The model
+## §1 The model — ONE daemon, MANY isolated workspaces
 
-A **resident workspace server**: one razel server per (workspace root, output base),
-auto-started by the first client, owning the hot state — the loaded/analyzed graph, the
-caches, file watches — with idle shutdown and a `--batch` escape (Bazel-parity lifecycle).
+**The deliberate break from Bazel (Gianni, 2026-06-12): Bazel runs one server per
+(workspace, output base); razel runs ONE resident daemon serving MULTIPLE isolated
+workspaces concurrently** — gryth clients work across workspaces, and the daemon is the
+one fabric they all reach. Mechanics:
+
+- **Workspace handles.** Lifecycle.open(path) → a workspace handle; every other call is
+  handle-scoped. Opening the same root twice yields the same context (refcounted); the
+  daemon idles out when no workspace is open.
+- **Isolation = one core ACTOR per workspace** (§1c): own Session lifecycle, own
+  single-writer command queue, own committed snapshot + views, own watches. No shared
+  mutable state between workspaces. Shared infra is read-only/content-addressed only:
+  the download cache is global by construction (content-addressed); materialized
+  externals and output trees stay per-workspace-hash (the round-36 layout already keys
+  this way — the cache decision survives intact).
+- **Bazel-compat is unaffected:** the CLI still resolves ITS workspace by boundary
+  walk-up and opens that one handle; `--batch` bypasses the daemon entirely. The
+  multi-workspace surface is razel-native (S-B), invisible to the Bazel story.
+
 Clients: the **razel CLI** (client #1), **gryth** (the driving consumer — graph oracle,
-builds, events for its agent/IDE surface), and any third party.
+builds, live views across its workspaces), and any third party.
 
 **The architectural rule that keeps the API honest: the CLI is a CLIENT, with no
 privileged in-process path.** Every verb goes through the same server API a third party
-would use, from the first implementation (V3sh1 S3) onward. A public API the first-party
-tool bypasses rots into a second-class surface; this rule makes that structurally
-impossible.
+would use, from the first implementation (V3sh1 S3) onward.
+
+## §1b Hosting: gryth inside the daemon's surface, outside its process
+
+The gryth service registers INTO the daemon's protocol namespace (one endpoint, one
+fabric) and is SUPERVISED by the daemon's Lifecycle service, but runs as its own OS
+process (ts/npm stays ts/npm; crashes isolate; declared as a workspace target —
+`razel_service(...)` in an E-mode package: server-as-declaration, the glade thesis in
+the daemon). Clients see one server whose capabilities include gryth; gryth sees the
+Command/Query/View/Events services over the same connection every client gets.
+
+## §1c Thread/async isolation (decided: EVENT QUEUE into the core)
+
+**The whole model in one sentence (Gianni): clients talk to the razel core via an event
+queue.** Concretely:
+
+- Each workspace context is an ACTOR: ONE command queue in, event streams out. The
+  single-writer invocation model IS the queue discipline — commands (build/fetch/
+  invalidate, incl. watch-triggered re-evaluations) execute one at a time per workspace,
+  on the actor's own engine threads (the loading pool, min(6, cores)).
+  DIFFERENT workspaces proceed concurrently (actor per workspace).
+- The async edge (a small tokio runtime: UDS accept, connection framing, subscription
+  fan-out, watchers, service supervision) NEVER touches engine state — it only enqueues
+  commands and forwards events. Engine code never runs on async threads; razel-loading
+  stays runtime-free (enforced by crate boundary).
+- Queries/Views read the last COMMITTED snapshot (swapped atomically at invocation
+  commit), never the live Session — consistent reads with zero locking against the
+  writer; the versioned store later upgrades the mechanics, not the contract.
+- Failure: each invocation runs behind a catch_unwind boundary — an engine panic fails
+  the invocation, never the actor or daemon. Cancellation v1 is coarse (cooperative
+  checks at package/action boundaries).
+- **Global thread budget (the multi-workspace consequence):** per-workspace pools are
+  lazy, and a DAEMON-LEVEL cap bounds total engine threads across actors (active
+  workspaces share the machine; v1 policy: cap = cores, actors acquire pool slots
+  on-demand and shrink when idle).
 
 ## §2 The surfaces (enumerated — nothing else is public)
 
