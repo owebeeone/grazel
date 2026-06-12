@@ -15,8 +15,8 @@ fn run_builds_and_executes_a_js_binary() {
     let _ = std::fs::remove_dir_all(&ws);
     write(
         &ws.join("srv/BUILD.razel"),
-        "load(\"@razel_js//js:defs.bzl\", \"js_binary\")\n\
-         js_binary(name = \"hello\", entry = \"server.js\")\n",
+        "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
+         js_binary(name = \"hello\", entry_point = \"server.js\")\n",
     );
     write(
         &ws.join("srv/server.js"),
@@ -44,8 +44,8 @@ fn run_propagates_the_program_exit_code() {
     let _ = std::fs::remove_dir_all(&ws);
     write(
         &ws.join("a/BUILD.razel"),
-        "load(\"@razel_js//js:defs.bzl\", \"js_binary\")\n\
-         js_binary(name = \"x\", entry = \"x.js\")\n",
+        "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
+         js_binary(name = \"x\", entry_point = \"x.js\")\n",
     );
     write(&ws.join("a/x.js"), "process.exit(3);\n");
     let out = Command::new(env!("CARGO_BIN_EXE_razel"))
@@ -63,8 +63,8 @@ fn run_fails_loud_when_the_build_fails() {
     let _ = std::fs::remove_dir_all(&ws);
     write(
         &ws.join("a/BUILD.razel"),
-        "load(\"@razel_js//js:defs.bzl\", \"js_binary\")\n\
-         js_binary(name = \"x\", entry = \"missing.js\")\n",
+        "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
+         js_binary(name = \"x\", entry_point = \"missing.js\")\n",
     );
     let out = Command::new(env!("CARGO_BIN_EXE_razel"))
         .args(["run", "//a:x", "-C"])

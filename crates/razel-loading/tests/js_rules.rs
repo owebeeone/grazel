@@ -23,8 +23,8 @@ fn js_binary_analyzes_with_launcher() {
     let ws = fixture("bin");
     write(
         &ws.join("srv/BUILD.razel"),
-        "load(\"@razel_js//js:defs.bzl\", \"js_binary\")\n\
-         js_binary(name = \"hello\", entry = \"server.js\", node_modules = \"node_modules\")\n",
+        "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
+         js_binary(name = \"hello\", entry_point = \"server.js\")\n",
     );
     write(&ws.join("srv/server.js"), "console.log('hi');\n");
     let targets = analyze_workspace_with(&ws, "//srv:hello", GlobalFlags::default()).unwrap();
@@ -40,14 +40,14 @@ fn js_binary_analyzes_with_launcher() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-/// `node_modules` is optional — a dependency-free script needs no runfiles link.
+/// Only `entry_point` is required (aspect surface; deps ride node walk-up).
 #[test]
-fn js_binary_without_node_modules() {
+fn js_binary_minimal() {
     let ws = fixture("nodeps");
     write(
         &ws.join("a/BUILD.razel"),
-        "load(\"@razel_js//js:defs.bzl\", \"js_binary\")\n\
-         js_binary(name = \"x\", entry = \"x.js\")\n",
+        "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
+         js_binary(name = \"x\", entry_point = \"x.js\")\n",
     );
     write(&ws.join("a/x.js"), "");
     let targets = analyze_workspace_with(&ws, "//a:x", GlobalFlags::default()).unwrap();
@@ -62,8 +62,8 @@ fn ts_project_lite_single_tsc_action() {
     let ws = fixture("ts");
     write(
         &ws.join("lib/BUILD.razel"),
-        "load(\"@razel_js//js:defs.bzl\", \"ts_project\")\n\
-         ts_project(name = \"core\", srcs = [\"a.ts\", \"b.ts\"], node_modules = \"node_modules\")\n",
+        "load(\"@aspect_rules_ts//ts:defs.bzl\", \"ts_project\")\n\
+         ts_project(name = \"core\", srcs = [\"a.ts\", \"b.ts\"])\n",
     );
     write(&ws.join("lib/a.ts"), "export const A = 1;\n");
     write(&ws.join("lib/b.ts"), "export const B = 2;\n");
@@ -88,11 +88,11 @@ fn js_binary_requires_entry() {
     let ws = fixture("noentry");
     write(
         &ws.join("a/BUILD.razel"),
-        "load(\"@razel_js//js:defs.bzl\", \"js_binary\")\n\
+        "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
          js_binary(name = \"x\")\n",
     );
     let err = analyze_workspace_with(&ws, "//a:x", GlobalFlags::default())
         .expect_err("entry is required");
-    assert!(err.contains("entry"), "{err}");
+    assert!(err.contains("entry_point"), "{err}");
     let _ = std::fs::remove_dir_all(&ws);
 }

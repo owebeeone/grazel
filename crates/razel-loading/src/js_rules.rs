@@ -1,17 +1,26 @@
-//! @razel_js → razel native rules: js_binary / ts_project-lite (S3a, V3sh1).
+//! @aspect_rules_js / @aspect_rules_ts → razel native rules: js_binary / ts_project
+//! (S3a, V3sh1 — re-surfaced same-day per Gianni's NO-COMPETING-SURFACES rule:
+//! anything with an existing bazel-ecosystem surface uses THAT surface; razel
+//! implements a faithful SUBSET, never a parallel dialect. Aspect's rules_js/rules_ts
+//! are the JS incumbents, so the load lines and attr names below are theirs:
+//! `load("@aspect_rules_js//js:defs.bzl", "js_binary")` with `entry_point`;
+//! `load("@aspect_rules_ts//ts:defs.bzl", "ts_project")`. The original `@razel_js`
+//! name lived for a few hours and died with zero consumers.)
 //!
-//! The razel-NATIVE rulepack (gryth's grammar — loaded in E-mode packages via
-//! `load("@razel_js//js:defs.bzl", ...)`; a bazel-side compat shim is design C's later
-//! work). Registered in `rules::ruleset_modules` under the `@razel_js//` prefix.
+//! Registered in `rules::ruleset_modules` under both `@aspect_rules_js//` and
+//! `@aspect_rules_ts//` prefixes (one module exports both names). SUBSET deviations,
+//! named: npm deps come from the S2 fetch-npm workspace `node_modules` via node's
+//! walk-up (not aspect's npm_translate_lock/linked-targets machinery); tsc resolves
+//! at action time from `node_modules/typescript` else host PATH; unknown attrs are
+//! absorbed, not modeled.
 //!
-//! - `js_binary(name, entry, srcs=[], node_modules=None)`: ONE action assembling a
-//!   runfiles dir (`<name>.runfiles/` with the entry+srcs copied in and `node_modules`
-//!   symlinked from the workspace — physical adjacency, so ESM resolution works) plus
-//!   a launcher script that execs host `node` on the entry. DefaultInfo = the launcher.
-//! - `ts_project(name, srcs, node_modules=None)`: ONE tsc action (`-lite`: no
-//!   tsconfig modeling yet) compiling srcs to `<name>_out/`; tsc comes from the
-//!   target's own node_modules (typescript dep) or host PATH — the cc-host-toolchain
-//!   posture: non-hermetic, visible in the argv.
+//! - `js_binary(name, entry_point, srcs=[], data=[])`: ONE action emitting a launcher
+//!   that execs the SOURCE entry (`$(dirname $0)/<entry_point>` — node's walk-up finds
+//!   the workspace node_modules; runfiles trees are the spike's later runfiles step).
+//!   DefaultInfo = the launcher.
+//! - `ts_project(name, srcs, deps=[])`: ONE tsc action (`-lite`: no tsconfig modeling
+//!   yet) compiling srcs to `<name>_out/` — the cc-host-toolchain posture:
+//!   non-hermetic, visible in the argv.
 //!
 //! Shared helpers from `crate::rules` per the sh_rules/py_rules pattern.
 
@@ -52,15 +61,13 @@ fn js_binary_action(entry: &str, entry_q: &str, srcs_q: &[String], out_q: &str) 
 fn analyze_js_binary(
     sess: &Session,
     name: String,
-    entry: Option<String>,
+    entry_point: Option<String>,
     srcs: Vec<String>,
-    node_modules: Option<String>,
 ) -> anyhow::Result<NoneType> {
-    let entry =
-        entry.ok_or_else(|| anyhow::anyhow!("js_binary `{name}`: `entry` is required"))?;
+    let entry = entry_point
+        .ok_or_else(|| anyhow::anyhow!("js_binary `{name}`: `entry_point` is required"))?;
     let entry_q = qualify(sess, &entry);
     let srcs_q: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
-    let _ = node_modules; // dep edge as data; resolution is node's walk-up (see above)
     let out_q = qualify(sess, &name);
     record_target(sess, AnalyzedTarget {
         name: canon_label(sess, &name),
@@ -76,18 +83,16 @@ fn analyze_ts_project(
     sess: &Session,
     name: String,
     srcs: Vec<String>,
-    node_modules: Option<String>,
 ) -> anyhow::Result<NoneType> {
     if srcs.is_empty() {
         anyhow::bail!("ts_project `{name}`: `srcs` must list the .ts sources");
     }
     let srcs_q: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
     let out_dir = qualify(sess, &format!("{name}_out"));
-    // tsc from the target's own node_modules (the locked typescript), else host PATH.
-    let tsc = match node_modules.map(|n| qualify(sess, &n)) {
-        Some(nm) => format!("node {nm}/typescript/bin/tsc"),
-        None => "tsc".to_string(),
-    };
+    // tsc resolved AT ACTION TIME: the workspace's locked typescript if materialized,
+    // else host PATH (constant argv — machine differences don't fork the cache key).
+    let tsc = "if [ -f node_modules/typescript/bin/tsc ]; \
+               then TSC='node node_modules/typescript/bin/tsc'; else TSC=tsc; fi; $TSC";
     let outputs: Vec<String> = srcs_q
         .iter()
         .map(|s| {
@@ -115,36 +120,35 @@ fn analyze_ts_project(
 fn js_rules(b: &mut GlobalsBuilder) {
     fn native_js_binary<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] entry: Option<String>,
+        #[starlark(require = named)] entry_point: Option<String>,
         #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] node_modules: Option<String>,
         #[starlark(require = named)] data: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let _ = data;
-        analyze_js_binary(session(eval), name, entry, unpack_strs(srcs), node_modules)
+        analyze_js_binary(session(eval), name, entry_point, unpack_strs(srcs))
     }
 
     fn native_ts_project<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] node_modules: Option<String>,
         #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let _ = deps;
-        analyze_ts_project(session(eval), name, unpack_strs(srcs), node_modules)
+        analyze_ts_project(session(eval), name, unpack_strs(srcs))
     }
 }
 
-/// The synthetic `@razel_js` module: re-exports under the loaded names.
+/// The synthetic aspect module: re-exports under the names real BUILD files `load()`
+/// (one module serves both `@aspect_rules_js//` and `@aspect_rules_ts//` prefixes).
 pub(crate) fn module() -> Result<FrozenModule, String> {
     let globals = GlobalsBuilder::standard().with(js_rules).build();
     Module::with_temp_heap(|module| {
         let ast = AstModule::parse(
-            "@razel_js",
+            "@aspect_rules_js",
             "js_binary = native_js_binary\nts_project = native_ts_project\n".to_owned(),
             &Dialect::Extended,
         )

@@ -585,9 +585,16 @@ pub(crate) fn ruleset_modules(cc_toolchain: CcToolchainMode) -> Result<Vec<Rules
             prefix: "@rules_shell//",
             module: crate::sh_rules::module()?,
         },
+        // S3a: js/ts via the ECOSYSTEM surface (no-competing-surfaces rule — aspect's
+        // rules are the incumbents; razel implements a faithful subset, one module
+        // serving both prefixes).
         Ruleset {
-            prefix: "@razel_js//",
-            module: crate::js_rules::module()?, // S3a: razel-native (E-mode) js rulepack
+            prefix: "@aspect_rules_js//",
+            module: crate::js_rules::module()?,
+        },
+        Ruleset {
+            prefix: "@aspect_rules_ts//",
+            module: crate::js_rules::module()?,
         },
     ])
 }

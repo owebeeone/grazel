@@ -213,6 +213,16 @@ targets carry a standard `razel-only` tag so Bazel users can exclude them with s
 cases always have C (you own the BUILD); third-party trees have D (repo patches). The
 escape-hatch role B was reserved for is covered by D.
 
+**The NO-COMPETING-SURFACES rule (Gianni, 2026-06-12):** anything that has an existing
+surface in the bazel ecosystem USES that surface — razel implements a faithful SUBSET
+(load lines, rule names, attr names all theirs; unmodeled attrs absorbed; deviations
+named in the shim's doc), NEVER a parallel dialect. Minting razel-only names where an
+incumbent exists creates a competing API: BUILD files stop being portable knowledge and
+every tool/doc/habit forks. razel-original names are reserved for things with NO bazel
+incumbent (e.g. `razel_service`). First application: the js/ts rulepack shipped briefly
+as `@razel_js//` and was re-surfaced same-day to aspect's `@aspect_rules_js//`
+`js_binary(entry_point=…)` / `@aspect_rules_ts//` `ts_project` — zero consumers harmed.
+
 ## §3d `--strict_bazel` mode (the parity oracle switch)
 
 **Definition (Gianni, 2026-06-12): under `--strict_bazel` razel behaves as if it WERE
