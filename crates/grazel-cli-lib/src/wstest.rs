@@ -47,6 +47,8 @@ pub fn stages() -> Vec<Stage> {
         Stage { name: "http-equivalence", run: http_equivalence },
         Stage { name: "http-localhost-only", run: http_localhost_only },
         Stage { name: "build-parity", run: build_parity },
+        Stage { name: "build-streamed", run: build_streamed },
+        Stage { name: "run-verb", run: run_verb },
     ]
 }
 
@@ -664,6 +666,98 @@ cc_obj(name="widget", src="widget.c")
         Ok(())
     })();
     stop_scope(ctx, &home, &ws, "par");
+    result
+}
+
+/// An executable fixture: cc-compiled C printing a marker and exiting 7.
+const RUN_BUILD: &str = r#"
+def _impl(ctx):
+    out = ctx.attr.name
+    ctx.actions.run(executable="/usr/bin/cc", outputs=[out], inputs=[ctx.attr.src],
+                    arguments=[ctx.attr.src, "-o", out])
+    return [DefaultInfo(files=[out])]
+cc_bin = rule(implementation=_impl, attrs={"src":1})
+cc_bin(name="hello", src="hello.c")
+"#;
+const RUN_SRC: &str = "#include <stdio.h>\nint main(void){ printf(\"hello-from-grazel-run\\n\"); return 7; }\n";
+
+/// The §4b ordering guarantees, asserted THROUGH grazeld (the GR3 point — the
+/// stream crosses the scope socket and the member router): id-before-events,
+/// gap-free per-invocation seq, progress strictly before the terminal result.
+fn build_streamed(ctx: &StageCtx) -> Result<(), String> {
+    use razel_wire::{InvocationEvent, InvocationStarted};
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("BUILD"), RUN_BUILD).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("hello.c"), RUN_SRC).map_err(|e| e.to_string())?;
+    let result = (|| {
+        ping(ctx, &home, &ws, Some("bs"), false)?; // daemon + membership
+        let socket = ScopePaths::new(&home, "bs")?.socket;
+        let resp = razel_daemon::rpc::call(&socket, &razel_daemon::rpc::req_run("hello", &[]))
+            .map_err(|e| e.to_string())?;
+        let started = InvocationStarted::from_cbor(
+            &razel_daemon::rpc::payload(&resp).map_err(|e| format!("run: {e}"))?,
+        );
+        if started.invocation_id.is_empty() {
+            return Err("no invocation id (id-first violated)".into());
+        }
+        let mut events = razel_daemon::rpc::invocation_events(&socket).map_err(|e| e.to_string())?;
+        // seq is 1-based: the server's transcripts pin gap-free-from-1 (rpc.rs).
+        let (mut next_seq, mut progress_seen, mut terminal) = (1i64, 0u32, false);
+        while !terminal {
+            let frame = razel_daemon::rpc::next_frame(&mut events).map_err(|e| e.to_string())?;
+            let ev = InvocationEvent::from_cbor(&razel_daemon::rpc::payload(&frame)?);
+            if ev.invocation_id != started.invocation_id {
+                continue;
+            }
+            if ev.seq != next_seq {
+                return Err(format!("seq gap: got {} want {next_seq}", ev.seq));
+            }
+            next_seq += 1;
+            match (&ev.progress, &ev.result) {
+                (Some(_), None) if !terminal => progress_seen += 1,
+                (None, Some(_)) => terminal = true,
+                _ => return Err(format!("event has bad arm shape at seq {}", ev.seq)),
+            }
+        }
+        if progress_seen == 0 {
+            return Err("no progress events before the terminal result".into());
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "bs");
+    result
+}
+
+/// `grazel run` end-to-end: streamed build through grazeld, then the program
+/// runs locally — stdout is the program's, exit code propagates.
+fn run_verb(ctx: &StageCtx) -> Result<(), String> {
+    let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
+    std::fs::create_dir_all(&ws).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("BUILD"), RUN_BUILD).map_err(|e| e.to_string())?;
+    std::fs::write(ws.join("hello.c"), RUN_SRC).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let out = Command::new(&ctx.grazel_bin)
+            .current_dir(&ws)
+            .env("GRAZEL_HOME", &home)
+            .env_remove("GRAZEL_SCOPE")
+            .args(["run", "hello", "--scope=rv"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.code() != Some(7) {
+            return Err(format!(
+                "exit code {:?}, want the program's 7; stderr: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !stdout.contains("hello-from-grazel-run") {
+            return Err(format!("program output missing from stdout: {stdout:?}"));
+        }
+        Ok(())
+    })();
+    stop_scope(ctx, &home, &ws, "rv");
     result
 }
 

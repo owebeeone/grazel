@@ -85,7 +85,8 @@ fn digest16(s: &str) -> String {
 // --- members ------------------------------------------------------------------
 
 struct Member {
-    server: rpc::Server,
+    /// Arc: stream connections borrow the server long-lived, outside the map lock.
+    server: Arc<rpc::Server>,
     pinned: bool,
     last_used: Instant,
     /// The §1b writer claim — RAII from razel-daemon (the ONE impl of the
@@ -128,7 +129,7 @@ impl State {
         members.insert(
             root.clone(),
             Member {
-                server: rpc::Server::new(root.clone(), root.join(".razel-cache")),
+                server: Arc::new(rpc::Server::new(root.clone(), root.join(".razel-cache"))),
                 pinned,
                 last_used: Instant::now(),
                 _lock: lock,
@@ -230,13 +231,71 @@ impl State {
     }
 
     fn handle(&self, conn: &mut dyn transport::Conn) -> std::io::Result<()> {
-        let req = decode(&read_frame(conn)?);
+        let raw = read_frame(conn)?;
+        let req = decode(&raw);
+        if let Cbor::Text(method) = req.get(1)
+            && matches!(method.as_str(), "invocation.events" | "build.subscribe")
+        {
+            // STREAM methods: hand the whole connection to the member's server
+            // (`serve_conn`, the inbox-0006 seam). It reads the first frame
+            // itself, so replay the one we consumed — deterministic CBOR makes
+            // the replayed bytes identical to what the client sent.
+            let members = self.members.lock().unwrap();
+            let resp = match members.len() {
+                0 => Some(err("no workspace member: hello first")),
+                1 => None,
+                n => Some(err(&format!(
+                    "scope {:?} serves {n} workspaces; per-invocation routing arrives with GR3",
+                    self.paths.scope
+                ))),
+            };
+            if let Some(resp) = resp {
+                drop(members);
+                return write_frame(conn, &encode(&resp));
+            }
+            let server = members.values().next().expect("len checked").server.clone();
+            drop(members);
+            let mut replay = ReplayConn::new(&raw, conn);
+            return server.serve_conn(&mut replay);
+        }
         let (resp, shutdown) = self.respond(&req);
         write_frame(conn, &encode(&resp))?;
         if shutdown {
             self.cleanup_and_exit()
         }
         Ok(())
+    }
+}
+
+/// A connection whose first frame has already been read by the router: replays
+/// those bytes (length prefix + payload) before passing through to the inner
+/// connection. Lets `Server::serve_conn` re-read the routed request verbatim.
+struct ReplayConn<'a> {
+    head: std::io::Cursor<Vec<u8>>,
+    inner: &'a mut dyn transport::Conn,
+}
+
+impl<'a> ReplayConn<'a> {
+    fn new(frame_payload: &[u8], inner: &'a mut dyn transport::Conn) -> Self {
+        let mut head = (frame_payload.len() as u32).to_be_bytes().to_vec();
+        head.extend_from_slice(frame_payload);
+        Self { head: std::io::Cursor::new(head), inner }
+    }
+}
+
+impl Read for ReplayConn<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.head.read(buf)?;
+        if n > 0 { Ok(n) } else { self.inner.read(buf) }
+    }
+}
+
+impl Write for ReplayConn<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 

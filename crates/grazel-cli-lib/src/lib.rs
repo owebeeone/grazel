@@ -81,7 +81,58 @@ pub fn run(args: &[String]) -> ExitCode {
         // GR3: build/affected go THROUGH the scope daemon (GrazelVerbs.md) —
         // §1e posture; flag semantics stay razel's verbatim.
         Some("build" | "affected") => routed_razel_verb(args),
+        // GR3b: run streams the invocation through grazeld (§4b client side).
+        Some("run") => grazel_run(&args[1..]),
         _ => razel_cli::run(args),
+    }
+}
+
+/// `grazel run <target> [-- prog args…]` — the streamed dev-loop verb. Flag
+/// surface is deliberately narrow (`--scope`, `-C`/`--workspace`) until razel-cli
+/// itself grows a daemon-routed run to delegate to.
+fn grazel_run(args: &[String]) -> ExitCode {
+    let mut flag_scope = None;
+    let mut target = None;
+    let mut prog_args: Vec<String> = vec![];
+    let mut workspace = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            prog_args = it.cloned().collect();
+            break;
+        } else if let Some(v) = a.strip_prefix("--scope=") {
+            flag_scope = Some(v.to_string());
+        } else if a == "-C" || a == "--workspace" {
+            workspace = it.next().map(PathBuf::from);
+        } else if let Some(v) = a.strip_prefix("--workspace=") {
+            workspace = Some(PathBuf::from(v));
+        } else if target.is_none() && !a.starts_with('-') {
+            target = Some(a.clone());
+        } else {
+            eprintln!("grazel run: unsupported argument {a:?} (target, --scope, -C, and `-- args` for now)");
+            return ExitCode::from(64);
+        }
+    }
+    let Some(target) = target else {
+        eprintln!("grazel run: expected <target> [-- args…]");
+        return ExitCode::from(64);
+    };
+    let workspace = workspace
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let workspace = workspace.canonicalize().unwrap_or(workspace);
+    let outcome = std::env::current_exe()
+        .map_err(|e| format!("current_exe: {e}"))
+        .and_then(|bin| {
+            let p = resolve_paths(flag_scope.as_deref(), &workspace)?;
+            dial::run_streamed(&p, &workspace, &target, &prog_args, &bin)
+        });
+    match outcome {
+        Ok(code) => ExitCode::from(code as u8),
+        Err(e) => {
+            eprintln!("grazel: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

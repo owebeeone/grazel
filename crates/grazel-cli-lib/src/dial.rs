@@ -120,6 +120,63 @@ fn hello_or_fail(socket: &Path, workspace: &Path, patience: Duration) -> Result<
     Err(format!("daemon at {} never answered hello: {last}", socket.display()))
 }
 
+/// `grazel run` (GR3): `Razel.run` over the scope socket → invocation id
+/// IMMEDIATELY → follow the `invocation.events` log, render Progress to STDERR
+/// (stdout stays the program's) → on a Built terminal, exec the output locally
+/// (same machine as the daemon — outputs are workspace paths), propagating the
+/// exit code. The §4b streaming contract, client side.
+pub fn run_streamed(
+    paths: &ScopePaths,
+    workspace: &Path,
+    target: &str,
+    prog_args: &[String],
+    grazel_bin: &Path,
+) -> Result<i32, String> {
+    use razel_wire::{BuildStatus, InvocationEvent, InvocationStarted};
+    ensure(paths, workspace, true, grazel_bin)?;
+    let resp = rpc::call(&paths.socket, &rpc::req_run(target, prog_args))
+        .map_err(|e| format!("run {target}: {e}"))?;
+    let started = InvocationStarted::from_cbor(&rpc::payload(&resp)?);
+    let mut events = rpc::invocation_events(&paths.socket)
+        .map_err(|e| format!("invocation.events: {e}"))?;
+    let result = loop {
+        let frame = rpc::next_frame(&mut events).map_err(|e| format!("event stream: {e}"))?;
+        let ev = InvocationEvent::from_cbor(&rpc::payload(&frame)?);
+        if ev.invocation_id != started.invocation_id {
+            continue; // the log is member-global; replay may carry other invocations
+        }
+        if let Some(p) = &ev.progress {
+            eprintln!(
+                "[{}] {}/{}{}",
+                p.phase,
+                p.done,
+                p.total,
+                p.detail.as_deref().map(|d| format!(" {d}")).unwrap_or_default()
+            );
+        }
+        if let Some(r) = ev.result {
+            break r; // terminal — strictly after all progress (§4b, server-pinned)
+        }
+    };
+    if result.status != BuildStatus::Built {
+        return Err(format!(
+            "run {target}: build failed{}",
+            result.message.map(|m| format!(": {m}")).unwrap_or_default()
+        ));
+    }
+    let exe = result
+        .outputs
+        .first()
+        .ok_or_else(|| format!("run {target}: produced no runnable output"))?;
+    let exe_path = workspace.join(&exe.path);
+    let status = std::process::Command::new(&exe_path)
+        .args(prog_args)
+        .current_dir(workspace)
+        .status()
+        .map_err(|e| format!("cannot exec {}: {e}", exe_path.display()))?;
+    Ok(status.code().unwrap_or(1).clamp(0, 255))
+}
+
 /// One hello round-trip, no autostart, no recovery — the probe ws-test stages use.
 pub fn hello_once(socket: &Path, workspace: &Path) -> Result<VersionInfo, String> {
     try_hello(socket, workspace).map_err(|e| match e {
