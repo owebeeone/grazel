@@ -1284,7 +1284,10 @@ dependencies = [
 name = "razel-deps-engine"
 version = "0.1.0"
 dependencies = [
+ "razel-core",
+ "razel-dds",
  "razel-loading",
+ "razel-wire",
 ]
 
 [[package]]

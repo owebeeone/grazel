@@ -631,6 +631,17 @@ profiles proved the eval wall is the inline single-heap demand recursion (not de
 single O(N²), not lock contention), which only a deps-as-data scheduler behind this seam can
 parallelize. Steps 2+ next.*
 
+*Status (2026-06-13): taut FACT CODEC LANDED (`facts.rs`) — `AnalyzedTarget` ⟷ taut/CBOR bytes
+(`razel-wire`) + a blake3 content `Digest` (`razel-core`). This is the move verified in Bazel's
+own source: `ObjectCodec.serialize(.., CodedOutputStream)` → `PackedFingerprint`, and the
+`NestedSetStore` fingerprint-DAG. `SnapshotCommitted` now carries the snapshot's content `Digest`
+(content-addressed commits). It is the keystone for the two biggest wins, neither needing the full
+scheduler: (a) serialized facts are `Send` bytes → a worker reads another's frozen result instead
+of re-analyzing the shared spine (the measured ~5000 6-thread re-analysis fallbacks); (b) the
+`Digest` keys a persistent cross-invocation cache → the second run is near-instant (why Bazel is
+fast incrementally). Next: route depset construction through interned fact ids; then the
+fingerprint store + cross-worker fact transfer.*
+
 1. Add the message API types and `LegacyDepsEngine`.
 2. Convert `SchedHook` tests to assert typed events via the adapter, keeping the
    old hook as compatibility.

@@ -84,6 +84,8 @@ impl LegacyDepsEngine {
 
         match razel_loading::analyze_bazel_with(&src, flags) {
             Ok(targets) => {
+                // Content-address the committed facts via taut (the cache/cross-worker key).
+                let content = crate::facts::snapshot_fingerprint(&targets);
                 let snapshot = {
                     let mut st = self.state.lock().expect("engine state");
                     let id = st.next_snapshot;
@@ -97,6 +99,7 @@ impl LegacyDepsEngine {
                         header: header(&seq, command_id, epoch, Some(snapshot)),
                         snapshot,
                         options_digest,
+                        content,
                     }),
                 );
                 emit(

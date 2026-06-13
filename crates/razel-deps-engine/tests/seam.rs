@@ -3,8 +3,8 @@
 //! separates semantic options from scheduling-only ones.
 
 use razel_deps_engine::{
-    legacy_sched_point, CommandOutcome, DiagnosticCode, EngineCommand, EngineEvent, EngineOptions,
-    EvalRoot, EvaluateRequest, LegacyDepsEngine, RazelDepsEngine,
+    legacy_sched_point, snapshot_fingerprint, CommandOutcome, DiagnosticCode, EngineCommand,
+    EngineEvent, EngineOptions, EvalRoot, EvaluateRequest, LegacyDepsEngine, RazelDepsEngine,
 };
 
 /// A BUILD that yields one analyzed target AND fires a loader `depset` event (so the SchedHook
@@ -74,6 +74,31 @@ fn evaluate_build_source_emits_lifecycle_and_commits_a_readable_snapshot() {
     assert!(events.iter().all(|e| e.header().command_id == Some(token.command_id)));
     let seqs: Vec<u64> = events.iter().map(|e| e.header().sequence).collect();
     assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>(), "gap-free seq from 1: {seqs:?}");
+}
+
+/// The committed snapshot is content-addressed by its taut serialization — the cross-run /
+/// cross-worker cache key. (The `SnapshotId` is the in-run handle; `content` is the identity.)
+#[test]
+fn committed_snapshot_is_content_addressed_by_taut() {
+    let engine = LegacyDepsEngine::new();
+    let sub = engine.subscribe();
+    evaluate(&engine, 1);
+    let events = sub.drain();
+
+    let (id, content) = events
+        .iter()
+        .find_map(|e| match e {
+            EngineEvent::SnapshotCommitted(s) => Some((s.snapshot, s.content)),
+            _ => None,
+        })
+        .expect("a snapshot was committed");
+
+    let targets = engine.snapshot(id).expect("snapshot readable by id");
+    assert_eq!(
+        content,
+        snapshot_fingerprint(&targets),
+        "the committed digest is the taut fingerprint of the committed facts"
+    );
 }
 
 /// REQ-DEPSV2-004, 015: the loader's stringly `SchedHook` becomes a typed event on the way out and

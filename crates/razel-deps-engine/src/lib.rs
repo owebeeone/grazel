@@ -9,7 +9,10 @@
 //! persistent `DepsetStore`, and the `graph`/`compare` engines. Those land behind this seam.
 
 pub mod api;
+pub mod facts;
 pub mod legacy;
+
+pub use facts::{decode_target, encode_target, snapshot_fingerprint, target_fingerprint};
 
 pub use api::{
     ApiVersion, CommandFinished, CommandId, CommandOutcome, CommandToken, DiagnosticCode,

@@ -2,6 +2,7 @@
 //! scheduler. The minimal surface: submit a command, subscribe to typed events, read results by
 //! committed [`SnapshotId`].
 
+use razel_core::Digest;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -168,6 +169,10 @@ pub struct SnapshotCommitted {
     pub header: EventHeader,
     pub snapshot: SnapshotId,
     pub options_digest: OptionsDigest,
+    /// Content address of the committed facts — blake3 over their taut serialization
+    /// (`facts::snapshot_fingerprint`). The `SnapshotId` is the in-run handle; this `Digest` is
+    /// the cross-run / cross-worker cache key (REQ-DEPSV2-012/013).
+    pub content: Digest,
 }
 
 #[derive(Debug, Clone)]
