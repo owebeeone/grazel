@@ -3,11 +3,30 @@
 use crate::state::Session;
 use std::path::Path;
 
+#[derive(Debug)]
+struct GlobPattern {
+    segments: Vec<String>,
+}
 
+impl GlobPattern {
+    fn new(pattern: &str) -> Self {
+        Self {
+            segments: pattern.split('/').map(String::from).collect(),
+        }
+    }
+
+    fn matches(&self, path: &[&str]) -> bool {
+        seg_match(&self.segments, path)
+    }
+}
 
 /// Shared `glob()`/`native.glob()` implementation: scan the current package dir
 /// against the include/exclude patterns, package-relative, sorted.
-pub(crate) fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>) -> anyhow::Result<Vec<String>> {
+pub(crate) fn do_glob(
+    sess: &Session,
+    include: Vec<String>,
+    exclude: Vec<String>,
+) -> anyhow::Result<Vec<String>> {
     // External packages (`@repo//pkg`) glob against the vendored repo's dir.
     let dir = sess.current_pkg().and_then(|pkg| {
         if let Some(rest) = pkg.strip_prefix('@') {
@@ -28,23 +47,58 @@ pub(crate) fn do_glob(sess: &Session, include: Vec<String>, exclude: Vec<String>
         return Ok(hit.as_ref().clone());
     }
     let files = crate::state::walk_cached(sess, &dir);
-    let mut out: Vec<String> = files
-        .iter()
-        .filter(|f| {
-            include.iter().any(|p| crate::glob_match(p, f))
-                && !exclude.iter().any(|p| crate::glob_match(p, f))
-        })
-        .cloned()
-        .collect();
+    let include: Vec<GlobPattern> = include.iter().map(|p| GlobPattern::new(p)).collect();
+    let exclude: Vec<GlobPattern> = exclude.iter().map(|p| GlobPattern::new(p)).collect();
+    let mut out = Vec::new();
+    for f in files.iter() {
+        let path: Vec<&str> = f.split('/').collect();
+        if include.iter().any(|p| p.matches(&path)) && !exclude.iter().any(|p| p.matches(&path)) {
+            out.push(f.clone());
+        }
+    }
     out.sort();
-    sess.glob_cache.borrow_mut().insert(key, std::sync::Arc::new(out.clone()));
+    sess.glob_cache
+        .borrow_mut()
+        .insert(key, std::sync::Arc::new(out.clone()));
     Ok(out)
 }
 
+pub(crate) fn glob_match(pattern: &str, path: &str) -> bool {
+    let pattern = GlobPattern::new(pattern);
+    let path: Vec<&str> = path.split('/').collect();
+    pattern.matches(&path)
+}
+
+fn seg_match(pat: &[String], path: &[&str]) -> bool {
+    match pat.first().map(String::as_str) {
+        None => path.is_empty(),
+        Some("**") => (0..=path.len()).any(|i| seg_match(&pat[1..], &path[i..])),
+        Some(seg) => {
+            !path.is_empty() && star_match(seg, path[0]) && seg_match(&pat[1..], &path[1..])
+        }
+    }
+}
+
+/// Single-segment match with `*` = any run of non-`/` chars.
+fn star_match(pat: &str, s: &str) -> bool {
+    match pat.split_once('*') {
+        None => pat == s,
+        Some((pre, rest)) => {
+            if !s.starts_with(pre) {
+                return false;
+            }
+            let s = &s[pre.len()..];
+            (0..=s.len()).any(|i| star_match(rest, &s[i..]))
+        }
+    }
+}
 
 /// Recursively collect files under `dir` as paths relative to `base` (skipping
 /// dot-directories like `.razel-sandbox`/`.razel-cache`).
 pub(crate) fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
+    if dir != base && (dir.join("BUILD").is_file() || dir.join("BUILD.bazel").is_file()) {
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -71,4 +125,3 @@ pub(crate) fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
         }
     }
 }
-

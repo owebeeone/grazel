@@ -4,6 +4,7 @@
 //! silent-wrong class this lane exists to kill. Test-first (AGENTS.md).
 
 use razel_loading::analyze_starlark;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn args_add_and_add_all_fidelity() {
@@ -26,8 +27,9 @@ r(name = "t")
 "#;
     let targets = analyze_starlark("BUILD", src).unwrap();
     let argv = &targets[0].actions[0].argv;
-    let expect =
-        ["tool", "--flag", "v", "--x", "a", "--x", "b", "--lib=c", "m-one", "m-two"];
+    let expect = [
+        "tool", "--flag", "v", "--x", "a", "--x", "b", "--lib=c", "m-one", "m-two",
+    ];
     assert_eq!(argv, &expect, "Args expansion fidelity");
 }
 
@@ -49,7 +51,11 @@ r(name = "t", srcs = ["a.c", "b.c"])
 "#;
     let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
     let argv = &targets[0].actions[0].argv;
-    assert_eq!(argv, &["tool", "p-a.c", "p-b.c"], "File elements kept .path through the depset");
+    assert_eq!(
+        argv,
+        &["tool", "p-a.c", "p-b.c"],
+        "File elements kept .path through the depset"
+    );
 }
 
 /// FROZEN depsets behave like depsets (round 30 — the TF `depset has no attribute 'count'`
@@ -101,6 +107,47 @@ r(name = "t")
     );
 }
 
+#[test]
+fn depset_diagnostic_reports_dedupe_shape() {
+    let root = std::env::temp_dir().join(format!("razel-depset-diag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("app/BUILD"),
+        r#"
+def _impl(ctx):
+    base = depset(["a", "b"])
+    merged = depset(["b", "c"], transitive = [base])
+    ctx.actions.run(executable = "tool", outputs = [], inputs = [], arguments = [str(len(merged.to_list()))])
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "t")
+"#,
+    )
+    .unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook_events = Arc::clone(&events);
+    let mut flags = razel_loading::GlobalFlags::default();
+    flags.sched_hook = Some(razel_loading::SchedHook(Arc::new(move |point, key| {
+        if point == "depset" {
+            hook_events.lock().unwrap().push(key.to_string());
+        }
+    })));
+
+    let res = razel_loading::analyze_workspace_with(&root, "//app:t", flags);
+    let _ = std::fs::remove_dir_all(&root);
+    res.unwrap();
+
+    let events = events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e == "direct=2 transitive=1 input=4 unique=3 dup=1 max_seen=3"),
+        "expected merged depset diagnostic, got {events:?}"
+    );
+}
+
 /// `ctx.actions.write(…, is_executable = True)` chmods the output (the launcher-script shape).
 #[test]
 fn write_is_executable_chmods() {
@@ -113,5 +160,8 @@ r(name = "t")
 "#;
     let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
     let script = &targets[0].actions[0].argv[2];
-    assert!(script.contains("chmod +x"), "is_executable adds the chmod: {script}");
+    assert!(
+        script.contains("chmod +x"),
+        "is_executable adds the chmod: {script}"
+    );
 }

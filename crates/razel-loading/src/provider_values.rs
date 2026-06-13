@@ -11,7 +11,6 @@ use starlark::values::{
 };
 use std::fmt;
 
-
 /// A `provider()` value (D4.2/L2): a callable constructing provider instances. With `init=`
 /// (Bazel's `CcInfo, _raw = provider(init = f)` shape) the kwargs route through `init` (which
 /// returns the field dict) and `provider()` returns a 2-tuple `(Provider, raw_ctor)`. Generic
@@ -26,16 +25,13 @@ pub(crate) struct ProviderCallableGen<V: ValueLifetimeless> {
     pub(crate) fields: Vec<String>,
 }
 
-
 starlark_complex_value!(pub(crate) ProviderCallable);
-
 
 impl<V: ValueLifetimeless> fmt::Display for ProviderCallableGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<provider>")
     }
 }
-
 
 #[starlark_value(type = "provider")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ProviderCallableGen<V>
@@ -52,8 +48,10 @@ where
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
         let named = args.names_map()?;
-        let kwargs: Vec<(String, Value<'v>)> =
-            named.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect();
+        let kwargs: Vec<(String, Value<'v>)> = named
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), *v))
+            .collect();
         let pos: Vec<Value<'v>> = args.positions(eval.heap())?.collect();
         let init = self.init.to_value();
         let fields = if !init.is_none() {
@@ -82,10 +80,12 @@ where
             }
             kwargs
         };
-        Ok(eval.heap().alloc(ProviderInstance { callable: me, fields }))
+        Ok(eval.heap().alloc(ProviderInstance {
+            callable: me,
+            fields,
+        }))
     }
 }
-
 
 /// The raw constructor from `provider(init=…)` — builds instances of the SAME provider
 /// (instances carry the CANONICAL provider's identity, so `dep[P]` finds raw-made ones),
@@ -96,16 +96,13 @@ pub(crate) struct RawCtorGen<V: ValueLifetimeless> {
     pub(crate) canonical: V,
 }
 
-
 starlark_complex_value!(pub(crate) RawCtor);
-
 
 impl<V: ValueLifetimeless> fmt::Display for RawCtorGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<provider raw constructor>")
     }
 }
-
 
 #[starlark_value(type = "provider_raw_constructor")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for RawCtorGen<V>
@@ -119,14 +116,16 @@ where
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
         let named = args.names_map()?;
-        let fields: Vec<(String, Value<'v>)> =
-            named.iter().map(|(k, v)| (k.as_str().to_string(), *v)).collect();
-        Ok(eval
-            .heap()
-            .alloc(ProviderInstance { callable: self.canonical.to_value(), fields }))
+        let fields: Vec<(String, Value<'v>)> = named
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), *v))
+            .collect();
+        Ok(eval.heap().alloc(ProviderInstance {
+            callable: self.canonical.to_value(),
+            fields,
+        }))
     }
 }
-
 
 /// A constructed provider instance (L2a): the fields plus the constructor's identity. Field reads
 /// (`info.msg`) go through `get_attr`; a rule impl returning instances gets them captured onto the
@@ -140,16 +139,13 @@ pub(crate) struct ProviderInstanceGen<V: ValueLifetimeless> {
     fields: Vec<(String, V)>,
 }
 
-
 starlark_complex_value!(pub(crate) ProviderInstance);
-
 
 impl<V: ValueLifetimeless> fmt::Display for ProviderInstanceGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<provider instance>")
     }
 }
-
 
 #[starlark_value(type = "provider_instance")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ProviderInstanceGen<V>
@@ -170,14 +166,16 @@ where
     }
 }
 
-
-/// An `aspect(implementation=, attrs=, ...)` value: applied along label-attr edges at dep
-/// resolution (L5). `attrs` is the aspect's OWN implicit-attr schema dict (or none).
+/// An `aspect(implementation=, attrs=, attr_aspects=, ...)` value: applied along label-attr
+/// edges at dep resolution (L5). `attrs` is the aspect's OWN implicit-attr schema dict (or
+/// none); `attr_aspects` names the target attrs along which this aspect propagates.
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative, Trace, Freeze, Coerce, Clone)]
 #[repr(C)]
 pub(crate) struct AspectObjGen<V: ValueLifetimeless> {
+    pub(crate) id: u64,
     pub(crate) implementation: V,
     pub(crate) attrs: V,
+    pub(crate) attr_aspects: Vec<String>,
 }
 starlark_complex_value!(pub(crate) AspectObj);
 
@@ -201,7 +199,6 @@ pub(crate) fn instance_callable<'v>(item: Value<'v>) -> Option<Value<'v>> {
     }
 }
 
-
 /// A resolved dependency as seen by a rule impl (L2a): the plain projected fields (`files`,
 /// `headers`, …) via `get_attr`, plus `dep[MyInfo]` indexing into the dep's captured provider
 /// instances (constructor identity — `Value::ptr_eq`).
@@ -214,16 +211,13 @@ pub(crate) struct DepTargetGen<V: ValueLifetimeless> {
     pub(crate) providers: Vec<(V, V)>,
 }
 
-
 starlark_complex_value!(pub(crate) DepTarget);
-
 
 impl<V: ValueLifetimeless> fmt::Display for DepTargetGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<dep>")
     }
 }
-
 
 #[starlark_value(type = "dep_target")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for DepTargetGen<V>
@@ -259,11 +253,17 @@ where
                 overrides: vec![("executable".to_string(), exe)],
             }));
         }
-        self.fields.iter().find(|(k, _)| k == attribute).map(|(_, v)| v.to_value())
+        self.fields
+            .iter()
+            .find(|(k, _)| k == attribute)
+            .map(|(_, v)| v.to_value())
     }
     /// `dep[MyInfo]` — the instance this dep's rule returned for that provider.
     /// Dep targets key dicts (`label_keyed_string_dict`): identity = canonical label.
-    fn write_hash(&self, hasher: &mut starlark::collections::StarlarkHasher) -> starlark::Result<()> {
+    fn write_hash(
+        &self,
+        hasher: &mut starlark::collections::StarlarkHasher,
+    ) -> starlark::Result<()> {
         use std::hash::Hash;
         self.label.hash(hasher);
         Ok(())
@@ -278,7 +278,10 @@ where
     }
     /// `Provider in dep` — true for registered providers (and the implicit DefaultInfo).
     fn is_in(&self, other: Value<'v>) -> starlark::Result<bool> {
-        Ok(self.providers.iter().any(|(c, _)| c.to_value().ptr_eq(other))
+        Ok(self
+            .providers
+            .iter()
+            .any(|(c, _)| c.to_value().ptr_eq(other))
             || other.to_string() == "DefaultInfo")
     }
     fn at(&self, index: Value<'v>, _heap: Heap<'v>) -> starlark::Result<Value<'v>> {
@@ -305,9 +308,9 @@ where
                             .iter()
                             .map(|it| match it.unpack_str() {
                                 // Stray path STRINGS coerce to File (impls read .extension).
-                                Some(p) => {
-                                    _heap.alloc(crate::values::File { path: p.to_string() })
-                                }
+                                Some(p) => _heap.alloc(crate::values::File {
+                                    path: p.to_string(),
+                                }),
                                 None => it,
                             })
                             .collect(),
@@ -318,15 +321,26 @@ where
             use starlark::values::structs::AllocStruct;
             return Ok(_heap.alloc(AllocStruct([
                 ("files".to_string(), files),
-                ("default_runfiles".to_string(), _heap.alloc(crate::engine::Absorb)),
-                ("data_runfiles".to_string(), _heap.alloc(crate::engine::Absorb)),
-                ("files_to_run".to_string(), _heap.alloc(crate::engine::Absorb)),
+                (
+                    "default_runfiles".to_string(),
+                    _heap.alloc(crate::engine::Absorb),
+                ),
+                (
+                    "data_runfiles".to_string(),
+                    _heap.alloc(crate::engine::Absorb),
+                ),
+                (
+                    "files_to_run".to_string(),
+                    _heap.alloc(crate::engine::Absorb),
+                ),
             ])));
         }
         // An ABSORBED provider key (platform_common.* etc.): the lookup absorbs.
         if index.downcast_ref::<crate::engine::Absorb>().is_some()
             || index.downcast_ref::<crate::engine::AbsorbWith>().is_some()
-            || index.downcast_ref::<crate::engine::FrozenAbsorbWith>().is_some()
+            || index
+                .downcast_ref::<crate::engine::FrozenAbsorbWith>()
+                .is_some()
         {
             return Ok(_heap.alloc(crate::engine::Absorb));
         }
@@ -334,7 +348,9 @@ where
         // ctor identity across modules) — synthesize an absorbing instance. Registered debt:
         // output groups don't flow.
         if index.to_string() == "OutputGroupInfo" {
-            return Ok(_heap.alloc(crate::engine::AbsorbWith { overrides: Vec::new() }));
+            return Ok(_heap.alloc(crate::engine::AbsorbWith {
+                overrides: Vec::new(),
+            }));
         }
         // A Starlark provider read off a NATIVE-rule dep (round 32 — protobuf_python's
         // `dep[PyInfo]`, 72 pkgs): native rules speak the DDS field channel and capture no
@@ -347,7 +363,9 @@ where
                 if let Some(pc) = index.downcast_ref::<ProviderCallable<'v>>() {
                     Some(pc.fields.clone())
                 } else {
-                    index.downcast_ref::<FrozenProviderCallable>().map(|pc| pc.fields.clone())
+                    index
+                        .downcast_ref::<FrozenProviderCallable>()
+                        .map(|pc| pc.fields.clone())
                 };
             if let Some(declared) = declared {
                 let overrides: Vec<(String, Value<'v>)> = declared

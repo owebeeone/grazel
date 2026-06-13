@@ -1,19 +1,17 @@
 //! The rule-authoring API: Ctx, the rule() object, rule_globals (rule/Label/select/providers). C0.
 
-use crate::state::{AnalyzedTarget, canon_label, qualify, session, with_current};
-use crate::values::{Depset, extract_files, file_path, unpack};
-use crate::glob::do_glob;
 use crate::deps::record_target;
+use crate::glob::do_glob;
+use crate::state::{AnalyzedTarget, canon_label, qualify, session, with_current};
+use crate::values::{Depset, extract_files, file_path};
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
+use starlark::values::Value;
 use starlark::values::list::{ListRef, UnpackList};
-use starlark::values::tuple::UnpackTuple;
 use starlark::values::none::NoneType;
 use starlark::values::structs::AllocStruct;
-use starlark::values::{
-    Value, ValueLike,
-};
+use starlark::values::tuple::UnpackTuple;
 
 // C0-style split (2059 → modules by axis of change). Glob re-exports keep every existing
 // `crate::dialect::X` path working; tighten to explicit imports opportunistically.
@@ -39,7 +37,11 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // mandatory. alloc (freezable) so the rule survives module.freeze() (defined in a .bzl + load()ed).
         let attrs = attrs.unwrap_or_else(Value::new_none);
         let outputs = _kw.get("outputs").copied().unwrap_or_else(Value::new_none);
-        Ok(eval.heap().alloc(RuleObjGen { implementation, attrs, outputs }))
+        Ok(eval.heap().alloc(RuleObjGen {
+            implementation,
+            attrs,
+            outputs,
+        }))
     }
 
     /// `provider(doc=?, fields=?, init=?)` → a callable provider constructor (D4.2). With `init`
@@ -56,9 +58,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let fields: Vec<String> = match kw.get("fields") {
             Some(f) => {
                 if let Some(l) = starlark::values::list::ListRef::from_value(*f) {
-                    l.iter().filter_map(|v| v.unpack_str().map(String::from)).collect()
+                    l.iter()
+                        .filter_map(|v| v.unpack_str().map(String::from))
+                        .collect()
                 } else if let Some(d) = starlark::values::dict::DictRef::from_value(*f) {
-                    d.iter().filter_map(|(k, _)| k.unpack_str().map(String::from)).collect()
+                    d.iter()
+                        .filter_map(|(k, _)| k.unpack_str().map(String::from))
+                        .collect()
                 } else {
                     Vec::new()
                 }
@@ -81,32 +87,28 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let fields: Vec<(String, Value<'v>)> =
-            kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let fields: Vec<(String, Value<'v>)> = kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
         Ok(eval.heap().alloc(AllocStruct(fields)))
     }
     fn AnalysisFailureInfo<'v>(
         #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let fields: Vec<(String, Value<'v>)> =
-            kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let fields: Vec<(String, Value<'v>)> = kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
         Ok(eval.heap().alloc(AllocStruct(fields)))
     }
     fn AnalysisTestResultInfo<'v>(
         #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let fields: Vec<(String, Value<'v>)> =
-            kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let fields: Vec<(String, Value<'v>)> = kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
         Ok(eval.heap().alloc(AllocStruct(fields)))
     }
     fn OutputGroupInfo<'v>(
         #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let fields: Vec<(String, Value<'v>)> =
-            kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let fields: Vec<(String, Value<'v>)> = kw.iter().map(|(k, v)| (k.clone(), *v)).collect();
         Ok(eval.heap().alloc(AllocStruct(fields)))
     }
 
@@ -143,12 +145,18 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let members = members.iter().map(|m| canon_label(sess, m)).collect();
         sess.config_specs.borrow_mut().insert(
             canon_label(sess, &name),
-            crate::state::ConfigSpec { group: Some((all, members)), ..Default::default() },
+            crate::state::ConfigSpec {
+                group: Some((all, members)),
+                ..Default::default()
+            },
         );
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
 
@@ -175,16 +183,35 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     }
 
     /// `aspect(implementation, attrs=?, ...)` → a real aspect value, applied along label-attr
-    /// edges at dep resolution (L5 MVP: attr_aspects propagation is the `deps` edge).
+    /// edges at dep resolution.
     fn aspect<'v>(
         #[starlark(require = named)] implementation: Option<Value<'v>>,
         #[starlark(require = named)] attrs: Option<Value<'v>>,
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        #[starlark(require = named)] attr_aspects: Option<UnpackList<String>>,
+        #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
+        let id = session(eval)
+            .aspect_ids
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let attr_aspects = attr_aspects
+            .map(|l| l.items)
+            .or_else(|| {
+                kw.get("attr_aspects").and_then(|v| {
+                    ListRef::from_value(*v).map(|l| {
+                        l.iter()
+                            .filter_map(|v| v.unpack_str().map(String::from))
+                            .collect()
+                    })
+                })
+            })
+            .unwrap_or_default();
         Ok(eval.heap().alloc(crate::provider_values::AspectObj {
+            id,
             implementation: implementation.unwrap_or_else(Value::new_none),
             attrs: attrs.unwrap_or_else(Value::new_none),
+            attr_aspects,
         }))
     }
 
@@ -196,10 +223,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
 
@@ -233,9 +263,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     }
 
     /// `visibility(...)` — .bzl load-visibility declaration (compat stub: not enforced).
-    fn visibility<'v>(
-        #[starlark(args)] _a: UnpackTuple<Value<'v>>,
-    ) -> anyhow::Result<NoneType> {
+    fn visibility<'v>(#[starlark(args)] _a: UnpackTuple<Value<'v>>) -> anyhow::Result<NoneType> {
         Ok(NoneType)
     }
 
@@ -302,12 +330,18 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 .filter(|f| f.starts_with('@'))
                 .and_then(|f| f.split("//").next().map(String::from));
             call_site.or_else(|| {
-                session(eval).bzl_repo_last().flatten()
+                session(eval)
+                    .bzl_repo_last()
+                    .flatten()
                     .filter(|(r, _)| !r.is_empty())
                     .map(|(r, _)| format!("@{r}"))
             })
         };
-        Ok(eval.heap().alloc(LabelV { repo, package: pkg, name }))
+        Ok(eval.heap().alloc(LabelV {
+            repo,
+            package: pkg,
+            name,
+        }))
     }
 
     /// BUILD package-declaration builtins. razel doesn't enforce visibility/licenses
@@ -342,7 +376,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
-        record_target(sess, AnalyzedTarget { name: canon_label(sess, &name), ..Default::default() });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
     fn constraint_value<'v>(
@@ -362,7 +402,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 ..Default::default()
             },
         );
-        record_target(sess, AnalyzedTarget { name: canon, ..Default::default() });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon,
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
     fn platform<'v>(
@@ -371,7 +417,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
-        record_target(sess, AnalyzedTarget { name: canon_label(sess, &name), ..Default::default() });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
 
@@ -383,10 +435,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
     fn toolchain_type<'v>(
@@ -395,10 +450,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
 
@@ -413,7 +471,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // A label flag/setting FORWARDS to its default target (providers flow through) —
         // alias semantics; razel doesn't model flag overrides (registered debt).
         if let Some(d) = build_setting_default {
-            let d = d.unpack_str().map(String::from).unwrap_or_else(|| d.to_string());
+            let d = d
+                .unpack_str()
+                .map(String::from)
+                .unwrap_or_else(|| d.to_string());
             if !d.is_empty() {
                 let actual = crate::state::canon_label(sess, &d);
                 sess.aliases
@@ -421,10 +482,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                     .insert(crate::state::canon_label(sess, &name), actual);
             }
         }
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
     fn label_setting<'v>(
@@ -437,7 +501,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // A label flag/setting FORWARDS to its default target (providers flow through) —
         // alias semantics; razel doesn't model flag overrides (registered debt).
         if let Some(d) = build_setting_default {
-            let d = d.unpack_str().map(String::from).unwrap_or_else(|| d.to_string());
+            let d = d
+                .unpack_str()
+                .map(String::from)
+                .unwrap_or_else(|| d.to_string());
             if !d.is_empty() {
                 let actual = crate::state::canon_label(sess, &d);
                 sess.aliases
@@ -445,10 +512,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                     .insert(crate::state::canon_label(sess, &name), actual);
             }
         }
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
 
@@ -489,60 +559,70 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 idx.insert(canon_label(sess, o), (label.clone(), qualify(sess, o)));
             }
         }
-        record_native(eval, label, crate::state::native_decl(move |eval| {
-            let sess = session(eval);
-            // Split srcs: labels resolve to their files (their package loads/analyzes on
-            // demand); plain names are this package's files. `loc` keys keep the as-written
-            // form for `$(location X)`.
-            let srcs = crate::values::resolve_str_parts(eval, &src_parts)?;
-            let (mut inputs, mut deps) = (Vec::new(), Vec::new());
-            let mut loc: Vec<(String, Vec<String>)> = Vec::new();
-            for s in srcs {
-                if s.starts_with(':') || s.starts_with("//") {
-                    let dep = crate::deps::resolve_dep(eval, &s)?;
-                    loc.push((s.clone(), dep.libs.clone()));
-                    inputs.extend(dep.libs);
-                    deps.push(dep.canon);
-                } else {
-                    let q = qualify(sess, &s);
-                    loc.push((s, vec![q.clone()]));
-                    inputs.push(q);
+        record_native(
+            eval,
+            label,
+            crate::state::native_decl(move |eval| {
+                let sess = session(eval);
+                // Split srcs: labels resolve to their files (their package loads/analyzes on
+                // demand); plain names are this package's files. `loc` keys keep the as-written
+                // form for `$(location X)`.
+                let srcs = crate::values::resolve_str_parts(eval, &src_parts)?;
+                let (mut inputs, mut deps) = (Vec::new(), Vec::new());
+                let mut loc: Vec<(String, Vec<String>)> = Vec::new();
+                for s in srcs {
+                    if s.starts_with(':') || s.starts_with("//") {
+                        let dep = crate::deps::resolve_dep(eval, &s)?;
+                        loc.push((s.clone(), dep.libs.clone()));
+                        inputs.extend(dep.libs);
+                        deps.push(dep.canon);
+                    } else {
+                        let q = qualify(sess, &s);
+                        loc.push((s, vec![q.clone()]));
+                        inputs.push(q);
+                    }
                 }
-            }
-            let outs_raw: Vec<String> = outs.items.clone();
-            let outs: Vec<String> = outs.items.iter().map(|o| qualify(sess, o)).collect();
-            // Bazel's $(location X) resolves against srcs, tools AND the genrule's OWN
-            // outs (tf_gen_op_wrapper_cc locates its outputs in cmd) — round 42.
-            for (raw, q) in outs_raw.iter().zip(outs.iter()) {
-                loc.push((raw.clone(), vec![q.clone()]));
-                loc.push((format!(":{raw}"), vec![q.clone()]));
-            }
-            // $(@D)/$(RULEDIR): the package's output root — qualified out minus the
-            // as-written path (single-out @D is the output's own directory).
-            let out_dir = match (outs.first(), outs_raw.first()) {
-                (Some(q), Some(raw)) if outs.len() > 1 => q
-                    .strip_suffix(raw.as_str())
-                    .map(|d| d.trim_end_matches('/').to_string())
-                    .unwrap_or_default(),
-                (Some(q), _) => q.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default(),
-                _ => String::new(),
-            };
-            let cmd = crate::values::resolve_scalar_parts(eval, &cmd_parts)?;
-            let expanded = expand_genrule_cmd(&cmd, &inputs, &outs, &loc, &out_dir)?;
-            record_target(sess, AnalyzedTarget {
-                name: canon_label(sess, &name),
-                deps,
-                actions: vec![crate::state::AnalyzedAction {
-                    mnemonic: "Genrule".into(),
-                    argv: vec!["/bin/bash".into(), "-c".into(), expanded],
-                    inputs,
-                    outputs: outs.clone(),
-                }],
-                default_info: outs,
-                ..Default::default()
-            });
-            Ok(())
-        }))?;
+                let outs_raw: Vec<String> = outs.items.clone();
+                let outs: Vec<String> = outs.items.iter().map(|o| qualify(sess, o)).collect();
+                // Bazel's $(location X) resolves against srcs, tools AND the genrule's OWN
+                // outs (tf_gen_op_wrapper_cc locates its outputs in cmd) — round 42.
+                for (raw, q) in outs_raw.iter().zip(outs.iter()) {
+                    loc.push((raw.clone(), vec![q.clone()]));
+                    loc.push((format!(":{raw}"), vec![q.clone()]));
+                }
+                // $(@D)/$(RULEDIR): the package's output root — qualified out minus the
+                // as-written path (single-out @D is the output's own directory).
+                let out_dir = match (outs.first(), outs_raw.first()) {
+                    (Some(q), Some(raw)) if outs.len() > 1 => q
+                        .strip_suffix(raw.as_str())
+                        .map(|d| d.trim_end_matches('/').to_string())
+                        .unwrap_or_default(),
+                    (Some(q), _) => q
+                        .rsplit_once('/')
+                        .map(|(d, _)| d.to_string())
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let cmd = crate::values::resolve_scalar_parts(eval, &cmd_parts)?;
+                let expanded = expand_genrule_cmd(&cmd, &inputs, &outs, &loc, &out_dir)?;
+                record_target(
+                    sess,
+                    AnalyzedTarget {
+                        name: canon_label(sess, &name),
+                        deps,
+                        actions: vec![crate::state::AnalyzedAction {
+                            mnemonic: "Genrule".into(),
+                            argv: vec!["/bin/bash".into(), "-c".into(), expanded],
+                            inputs,
+                            outputs: outs.clone(),
+                        }],
+                        default_info: outs,
+                        ..Default::default()
+                    },
+                );
+                Ok(())
+            }),
+        )?;
         Ok(NoneType)
     }
 
@@ -560,7 +640,9 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let sess = session(eval);
         let spec = crate::state::ConfigSpec {
             values: values.map(|m| m.into_iter().collect()).unwrap_or_default(),
-            define_values: define_values.map(|m| m.into_iter().collect()).unwrap_or_default(),
+            define_values: define_values
+                .map(|m| m.into_iter().collect())
+                .unwrap_or_default(),
             group: None,
             // flag_values reference build-setting values razel doesn't model — CONSERVATIVE:
             // the condition never matches (CPU-host posture; registered debt).
@@ -570,11 +652,16 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 .map(|c| crate::state::canon_label(sess, c))
                 .collect(),
         };
-        sess.config_specs.borrow_mut().insert(canon_label(sess, &name), spec);
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        sess.config_specs
+            .borrow_mut()
+            .insert(canon_label(sess, &name), spec);
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
     fn test_suite<'v>(
@@ -583,10 +670,13 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let sess = session(eval);
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
     fn alias<'v>(
@@ -606,12 +696,17 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         let sess = session(eval);
         if let Some(a) = actual {
             let canon_actual = canon_label(sess, &a);
-            sess.aliases.borrow_mut().insert(canon_label(sess, &name), canon_actual);
+            sess.aliases
+                .borrow_mut()
+                .insert(canon_label(sess, &name), canon_actual);
         }
-        record_target(sess, AnalyzedTarget {
-            name: canon_label(sess, &name),
-            ..Default::default()
-        });
+        record_target(
+            sess,
+            AnalyzedTarget {
+                name: canon_label(sess, &name),
+                ..Default::default()
+            },
+        );
         Ok(NoneType)
     }
     fn filegroup<'v>(
@@ -625,27 +720,34 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // select expression now that select() never resolves eagerly).
         let src_parts = crate::values::str_attr_parts(eval, srcs)?;
         // E0c: deferred — label srcs resolve to their files on demand (filegroup-of-filegroup).
-        record_native(eval, label, crate::state::native_decl(move |eval| {
-            let srcs = crate::values::resolve_str_parts(eval, &src_parts)?;
-            let sess = session(eval);
-            let mut files: Vec<String> = Vec::new();
-            for s in srcs {
-                if s.starts_with(':') || s.starts_with("//") || s.starts_with('@') {
-                    let dep = crate::deps::resolve_dep(eval, &s)?;
-                    files.extend(dep.libs);
-                } else {
-                    files.push(qualify(session(eval), &s));
+        record_native(
+            eval,
+            label,
+            crate::state::native_decl(move |eval| {
+                let srcs = crate::values::resolve_str_parts(eval, &src_parts)?;
+                let sess = session(eval);
+                let mut files: Vec<String> = Vec::new();
+                for s in srcs {
+                    if s.starts_with(':') || s.starts_with("//") || s.starts_with('@') {
+                        let dep = crate::deps::resolve_dep(eval, &s)?;
+                        files.extend(dep.libs);
+                    } else {
+                        files.push(qualify(session(eval), &s));
+                    }
                 }
-            }
-            let _ = sess;
-            let sess = session(eval);
-            record_target(sess, AnalyzedTarget {
-                name: canon_label(sess, &name),
-                default_info: files,
-                ..Default::default()
-            });
-            Ok(())
-        }))?;
+                let _ = sess;
+                let sess = session(eval);
+                record_target(
+                    sess,
+                    AnalyzedTarget {
+                        name: canon_label(sess, &name),
+                        default_info: files,
+                        ..Default::default()
+                    },
+                );
+                Ok(())
+            }),
+        )?;
         Ok(NoneType)
     }
 
@@ -694,7 +796,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         // loudly on a non-default order rather than silently produce a possibly-wrong sequence (F36).
         if let Some(o) = &order
             && o != "default"
-            && session(eval).warned.borrow_mut().insert(format!("depset-order-{o}"))
+            && session(eval)
+                .warned
+                .borrow_mut()
+                .insert(format!("depset-order-{o}"))
         {
             eprintln!(
                 "razel: warning: depset(order={o:?}) — traversal order not yet modeled, treating as \
@@ -702,19 +807,30 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             );
         }
         // Dedup by string path; store the live Value so map_each sees File attributes.
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen = std::collections::BTreeSet::<String>::new();
         let mut items: Vec<Value<'v>> = Vec::new();
-        let push = |v: Value<'v>, seen: &mut Vec<String>, items: &mut Vec<Value<'v>>| {
+        let mut direct_count = 0usize;
+        let mut transitive_count = 0usize;
+        let mut input_count = 0usize;
+        let mut duplicate_count = 0usize;
+        let mut max_seen = 0usize;
+        let mut push = |v: Value<'v>,
+                        seen: &mut std::collections::BTreeSet<String>,
+                        items: &mut Vec<Value<'v>>| {
             let key = file_path(v);
-            if !seen.contains(&key) {
-                seen.push(key);
+            input_count += 1;
+            if seen.insert(key) {
                 items.push(v);
+                max_seen = max_seen.max(seen.len());
+            } else {
+                duplicate_count += 1;
             }
         };
         if let Some(d) = direct
             && let Some(list) = ListRef::from_value(d)
         {
             for it in list.iter() {
+                direct_count += 1;
                 push(it, &mut seen, &mut items);
             }
         }
@@ -724,11 +840,24 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
             for dep in list.iter() {
                 // LIVE or FROZEN member depsets (round 30 — frozen ones were silently skipped).
                 if let Some(members) = crate::values::depset_items(dep) {
+                    transitive_count += 1;
                     for v in members {
                         push(v, &mut seen, &mut items);
                     }
                 }
             }
+        }
+        let sess = session(eval);
+        if sess.global.sched_hook.is_some() {
+            crate::state::load_event(
+                sess,
+                "depset",
+                &format!(
+                    "direct={direct_count} transitive={transitive_count} input={input_count} \
+                     unique={} dup={duplicate_count} max_seen={max_seen}",
+                    items.len()
+                ),
+            );
         }
         Ok(eval.heap().alloc(Depset { items }))
     }
@@ -742,7 +871,9 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     /// Keys may be strings or `Label`s; `select + list` concatenation is supported (SelectExpr).
     fn select<'v>(
         branches: Value<'v>,
-        #[starlark(require = named)] #[allow(unused_variables)] no_match_error: Option<String>,
+        #[starlark(require = named)]
+        #[allow(unused_variables)]
+        no_match_error: Option<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
         let Some(d) = starlark::values::dict::DictRef::from_value(branches) else {
@@ -813,6 +944,10 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<String>> {
-        do_glob(session(eval), include.map(|l| l.items).unwrap_or_default(), exclude.map(|l| l.items).unwrap_or_default())
+        do_glob(
+            session(eval),
+            include.map(|l| l.items).unwrap_or_default(),
+            exclude.map(|l| l.items).unwrap_or_default(),
+        )
     }
 }

@@ -8,78 +8,48 @@
 //! `query_targets` + the `CTX` thread-local — which had no live callers (the live path never
 //! used it). V2 rebuilds loading as a graph effect over the DDS (RazelV2Contracts §6).
 
-pub mod rules;
-pub mod state; // C0 decomposition: per-analysis state + core types + the host-cc tool layer
-mod values;
-mod dialect;
 mod ctxv;
+pub mod dds; // C2: loader -> DDS provider bridge
 mod decls;
+mod deps;
+mod dialect;
+mod engine;
 mod genrule_cmd;
+mod glob;
 mod host; // razelV3: compiled-in host repos (@bazel_tools etc.)
 mod labels;
-mod provider_values;
-mod selects;
-mod glob;
-mod deps;
 mod native_cc;
+mod provider_values;
+mod registry;
+pub mod rules;
+mod selects;
 mod shims;
-mod engine;
+pub mod state; // C0 decomposition: per-analysis state + core types + the host-cc tool layer
 mod toolchains; // C3b: the toolchain resolver (name -> config; the engine reads it)
-pub mod dds; // C2: loader -> DDS provider bridge
-mod registry; // C3a: the provider-schema registry (source of truth for schemas/folds/projections)
+mod values; // C3a: the provider-schema registry (source of truth for schemas/folds/projections)
 // Per-language native rulesets — each maps a `@rules_*//` load to native rules, registered in
 // `rules::ruleset_modules`. (Independent modules so language support lands without touching the
 // shared cc/analysis core.)
+mod fetch; // Fetch R1: WORKSPACE spec extraction (RazelFetchPlan §3)
 mod js_rules; // S3a: the razel-native js rulepack (@razel_js// — gryth's grammar)
 mod py_rules;
 mod rust_rules;
 mod sh_rules;
-mod fetch; // Fetch R1: WORKSPACE spec extraction (RazelFetchPlan §3)
 mod workspace; // S1 (V3sh1): E-mode boundary walk + BUILD.razel XOR + boundary guard
 pub use fetch::{AttrV, RepoSpec, extract_workspace_repos};
-pub use workspace::{e_mode_guard, find_workspace_root};
 pub use rules::{
     analyze_bazel, analyze_bazel_with, analyze_starlark, analyze_workspace, analyze_workspace_with,
     load_tree_report, load_tree_report_prepared, load_tree_report_seeded,
     load_tree_report_with_threads, prepare_build_asts,
 };
 pub use state::{AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags, SchedHook};
+pub use workspace::{e_mode_guard, find_workspace_root};
 
 /// Match a `glob` pattern against a path. Supports `*` (within a segment) and `**`
 /// (across segments). A documented subset of Bazel glob — enough for `*.cc`, `a/*.h`,
 /// `src/**/*.cc`. (No `?`, char-classes, or `**` mid-segment.)
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    let p: Vec<&str> = pattern.split('/').collect();
-    let s: Vec<&str> = path.split('/').collect();
-    seg_match(&p, &s)
-}
-
-fn seg_match(pat: &[&str], path: &[&str]) -> bool {
-    match pat.first() {
-        None => path.is_empty(),
-        Some(&"**") => {
-            // `**` matches zero or more path segments.
-            (0..=path.len()).any(|i| seg_match(&pat[1..], &path[i..]))
-        }
-        Some(seg) => {
-            !path.is_empty() && star_match(seg, path[0]) && seg_match(&pat[1..], &path[1..])
-        }
-    }
-}
-
-/// Single-segment match with `*` = any run of non-`/` chars.
-fn star_match(pat: &str, s: &str) -> bool {
-    match pat.split_once('*') {
-        None => pat == s,
-        Some((pre, rest)) => {
-            if !s.starts_with(pre) {
-                return false;
-            }
-            let s = &s[pre.len()..];
-            // try every split point for the `*`.
-            (0..=s.len()).any(|i| star_match(rest, &s[i..]))
-        }
-    }
+    glob::glob_match(pattern, path)
 }
 
 #[cfg(test)]

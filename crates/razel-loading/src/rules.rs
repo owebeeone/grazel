@@ -8,23 +8,18 @@
 //! escapes the heap) — sidestepping module freezing. Tier-2.5 simplification; a two-phase
 //! freeze model comes when caching / cross-target dep-providers demand it.
 
-
-use crate::state::{AnalyzedTarget, CcToolchainMode, GlobalFlags, Session, canon_label, pkg_of};
+use crate::dialect::rule_globals;
 use crate::engine::{
     attr_members, config_common_members, config_members, native_members, razel_build_members,
 };
 use crate::shims::{auto_config_module, rules_cc_module, rules_java_module, rules_skylib_module};
-use crate::dialect::rule_globals;
-use starlark::environment::{
-    FrozenModule, Globals, GlobalsBuilder, LibraryExtension, Module,
-};
+use crate::state::{AnalyzedTarget, CcToolchainMode, GlobalFlags, Session, canon_label, pkg_of};
+use starlark::environment::{FrozenModule, Globals, GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::{Evaluator, FileLoader};
-use starlark::values::Value;
 use starlark::syntax::{AstModule, Dialect};
+use starlark::values::Value;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-
-
 
 pub(crate) fn build_globals() -> Globals {
     builder_base().build()
@@ -93,13 +88,17 @@ fn autoload_stub_globals(b: &mut GlobalsBuilder) {
         let sep = sep.unwrap_or_else(|| " ".to_string());
         let mut parts: Vec<String> = Vec::new();
         if let Some(m) = msg {
-            parts.push(m.unpack_str().map(String::from).unwrap_or_else(|| m.to_string()));
+            parts.push(
+                m.unpack_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| m.to_string()),
+            );
         }
-        parts.extend(
-            args.items
-                .iter()
-                .map(|a| a.unpack_str().map(String::from).unwrap_or_else(|| a.to_string())),
-        );
+        parts.extend(args.items.iter().map(|a| {
+            a.unpack_str()
+                .map(String::from)
+                .unwrap_or_else(|| a.to_string())
+        }));
         let body = parts.join(&sep);
         match attr {
             Some(a) => Err(anyhow::anyhow!("fail: attribute {a}: {body}")),
@@ -162,11 +161,7 @@ fn autoload_stub_globals(b: &mut GlobalsBuilder) {
 /// the WORKSPACE-only globals (the `repository_rule` recorder, `workspace()`,
 /// `register_*` no-ops). Declarations record but never drive; no freeze/harvest — the
 /// Session's `repo_specs` are the product.
-pub(crate) fn eval_workspace_src(
-    session: &Session,
-    name: &str,
-    src: &str,
-) -> Result<(), String> {
+pub(crate) fn eval_workspace_src(session: &Session, name: &str, src: &str) -> Result<(), String> {
     let rulesets = ruleset_modules(session.global.cc_toolchain)?;
     let globals = builder_base().with(crate::fetch::workspace_globals).build();
     let loader = BzlLoader {
@@ -183,7 +178,8 @@ pub(crate) fn eval_workspace_src(
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
         eval.extra = Some(session);
-        eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
+        eval.eval_module(ast, &globals)
+            .map_err(|e| format!("{e}"))?;
         Ok(())
     });
     session.bzl_repo_pop();
@@ -194,7 +190,9 @@ pub(crate) fn eval_workspace_src(
 /// BUILD files; TF uses it bare everywhere). Aliased from razel's native cc rules; `cc_test` is
 /// loading-grade (the binary backend).
 pub(crate) fn bazel_native_rule_globals(b: &mut GlobalsBuilder) {
-    let native_cc = GlobalsBuilder::standard().with(crate::native_cc::cc_rules).build();
+    let native_cc = GlobalsBuilder::standard()
+        .with(crate::native_cc::cc_rules)
+        .build();
     let get = |name: &str| {
         native_cc
             .iter()
@@ -206,7 +204,9 @@ pub(crate) fn bazel_native_rule_globals(b: &mut GlobalsBuilder) {
     b.set("cc_binary", get("native_cc_binary"));
     b.set("cc_test", get("native_cc_binary"));
     b.set("cc_libc_top_alias", get("native_cc_libc_top_alias"));
-    let native_py = GlobalsBuilder::standard().with(crate::py_rules::py_rules).build();
+    let native_py = GlobalsBuilder::standard()
+        .with(crate::py_rules::py_rules)
+        .build();
     let getp = |name: &str| {
         native_py
             .iter()
@@ -219,7 +219,6 @@ pub(crate) fn bazel_native_rule_globals(b: &mut GlobalsBuilder) {
     b.set("py_test", getp("native_py_test"));
 }
 
-
 /// The engine's `.bzl`-facing namespaces — razel's own (`native`/`attr`/`razel_build`) plus the Bazel
 /// builtin-namespace stubs (D4) that let real upstream `.bzl` resolve. Shared by both globals builders
 /// (workspace + inline) so the surface is identical in every analysis path.
@@ -230,15 +229,29 @@ pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
         // Bazel-7-era claim, consistent with the all-True @bazel_features posture.
         nb.set("bazel_version", "7.4.5");
         // WORKSPACE-macro surface (fetch R1): registration no-ops, namespaced form.
-        let ws_g = GlobalsBuilder::standard().with(crate::fetch::workspace_globals).build();
-        for name in ["register_toolchains", "register_execution_platforms", "bind"] {
+        let ws_g = GlobalsBuilder::standard()
+            .with(crate::fetch::workspace_globals)
+            .build();
+        for name in [
+            "register_toolchains",
+            "register_execution_platforms",
+            "bind",
+        ] {
             if let Some((_, v)) = ws_g.iter().find(|(n, _)| *n == name) {
                 nb.set(name, v);
             }
         }
         // Platform-family declare rules (round 43) — BUILD globals AND native.* forms.
-        let stub_g = GlobalsBuilder::standard().with(autoload_stub_globals).build();
-        for name in ["platform", "constraint_setting", "constraint_value", "toolchain", "java_library"] {
+        let stub_g = GlobalsBuilder::standard()
+            .with(autoload_stub_globals)
+            .build();
+        for name in [
+            "platform",
+            "constraint_setting",
+            "constraint_value",
+            "toolchain",
+            "java_library",
+        ] {
             if let Some((_, v)) = stub_g.iter().find(|(n, _)| *n == name) {
                 nb.set(name, v);
             }
@@ -259,7 +272,9 @@ pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
                 nb.set(name, v);
             }
         }
-        let cc = GlobalsBuilder::standard().with(crate::native_cc::cc_rules).build();
+        let cc = GlobalsBuilder::standard()
+            .with(crate::native_cc::cc_rules)
+            .build();
         for (alias, src) in [
             ("cc_library", "native_cc_library"),
             ("cc_binary", "native_cc_binary"),
@@ -281,7 +296,20 @@ pub(crate) fn engine_namespaces(b: &mut GlobalsBuilder) {
     });
     // Foreign host namespaces ABSORB (any member resolves; surfaces only at analysis use —
     // registered debt). config/attr/native/razel_build stay explicit + typed.
-    for ns in ["cc_common", "coverage_common", "testing", "apple_common", "java_common", "proto_common", "platform_common", "proto_common_do_not_use", "py_internal", "android_common", "ApkInfo", "AndroidIdeInfo"] {
+    for ns in [
+        "cc_common",
+        "coverage_common",
+        "testing",
+        "apple_common",
+        "java_common",
+        "proto_common",
+        "platform_common",
+        "proto_common_do_not_use",
+        "py_internal",
+        "android_common",
+        "ApkInfo",
+        "AndroidIdeInfo",
+    ] {
         b.set(ns, crate::engine::Absorb);
     }
     // The absorber itself, for razel's HOST .bzl files (host-repos/) to bind symbols with.
@@ -310,7 +338,6 @@ fn razel_host_helpers(b: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc(crate::engine::AbsorbWith { overrides }))
     }
 }
-
 
 /// Bazel accepts TAB indentation (a tab advances to the next multiple-of-8 column);
 /// starlark-rust rejects tabs outright. Expand each line's LEADING whitespace run by the
@@ -351,7 +378,11 @@ pub(crate) fn detab_leading(src: &str) -> std::borrow::Cow<'_, str> {
 /// Resolve a project `.bzl` load to a file under `root`. `//pkg:f.bzl` → `root/pkg/f.bzl`;
 /// `:f.bzl` → `root/<current pkg>/f.bzl`. (`@repo` loads go through [`external_bzl_path`] /
 /// the synthetic rulesets, not here.)
-pub(crate) fn resolve_bzl(root: &Path, label: &str, current_pkg: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn resolve_bzl(
+    root: &Path,
+    label: &str,
+    current_pkg: Option<&str>,
+) -> Result<PathBuf, String> {
     if let Some(rest) = label.strip_prefix("//") {
         let (pkg, file) = rest
             .split_once(':')
@@ -371,7 +402,6 @@ pub(crate) fn resolve_bzl(root: &Path, label: &str, current_pkg: Option<&str>) -
     }
 }
 
-
 /// Resolve a vendored/fetched external load `@repo//pkg:file` to a real file (D4 + fetch
 /// R4): candidates fold over [`GlobalFlags::external_repo_dirs`] — hand-vendored first
 /// (with the `_`/`-` name tolerance), the fetched root second. `None` if not an
@@ -388,7 +418,6 @@ pub(crate) fn external_bzl_path(global: &GlobalFlags, label: &str) -> Option<Pat
         .find(|p| p.exists())
 }
 
-
 /// A natively-provided ruleset: `load()`s whose path starts with `prefix`
 /// (e.g. `@rules_cc//`, `@rules_rust//`) resolve to `module`, a synthetic module
 /// re-exporting razel's native rules under the names real BUILD files import.
@@ -396,7 +425,6 @@ pub(crate) struct Ruleset {
     pub(crate) prefix: &'static str,
     pub(crate) module: FrozenModule,
 }
-
 
 /// File loader for BUILD/`.bzl` evaluation: resolves a `@repo//...` load to its
 /// native [`Ruleset`] module, and any other `//pkg:f.bzl`/`:f.bzl` to a project
@@ -431,7 +459,11 @@ impl BzlLoader<'_> {
         // Main-repo modules carry `repo == ""` — relative loads resolve against the MODULE's
         // package (not the BUILD package that triggered the load).
         if let Some(rest) = path.strip_prefix("//") {
-            if repo.is_empty() { path.to_string() } else { format!("@{repo}//{rest}") }
+            if repo.is_empty() {
+                path.to_string()
+            } else {
+                format!("@{repo}//{rest}")
+            }
         } else if let Some(file) = path.strip_prefix(':') {
             if repo.is_empty() {
                 format!("//{pkg}:{file}")
@@ -480,7 +512,8 @@ impl FileLoader for BzlLoader<'_> {
             parse_external(path)
         } else if let Some(rest) = path.strip_prefix("//") {
             // A workspace .bzl: its own package is the context for ITS relative loads.
-            rest.split_once(':').map(|(pkg, _)| (String::new(), pkg.to_string()))
+            rest.split_once(':')
+                .map(|(pkg, _)| (String::new(), pkg.to_string()))
         } else {
             None
         };
@@ -545,7 +578,6 @@ impl FileLoader for BzlLoader<'_> {
     }
 }
 
-
 /// Every natively-provided ruleset, by `load()` prefix. New languages register a
 /// row here (the rule logic itself lives in the per-language module). Each maps a
 /// `@repo//` to a synthetic module re-exporting razel's native rules.
@@ -599,7 +631,6 @@ pub(crate) fn ruleset_modules(cc_toolchain: CcToolchainMode) -> Result<Vec<Rules
     ])
 }
 
-
 /// Evaluate one BUILD source with the ruleset loaders + the rule globals.
 /// Targets it instantiates are recorded into STATE/RESULTS (re-entrant: a nested
 /// cross-package load appends, never clears).
@@ -650,25 +681,36 @@ fn eval_build_src_inner(
             eval.set_loader(loader);
             eval.extra = Some(session); // builtins read the Session via `session(eval)`
             // DECLARE phase: an error here is Bazel's "package in error" (cacheable).
-            eval.eval_module(ast, globals).map_err(|e| LoadErr::declare(format!("{e}")))?;
+            eval.eval_module(ast, globals)
+                .map_err(|e| LoadErr::declare(format!("{e}")))?;
         }
         // E0 phase 2: analyze the recorded declarations, demand-driven (forward refs resolve).
         // ANALYSIS phase: failures are retryable — the declarations are fine.
-        {
+        let drive_res = {
             let mut eval = Evaluator::new(&module);
             eval.set_loader(loader);
             eval.extra = Some(session);
             crate::dialect::drive_decls(&mut eval, drive_all)
-                .map_err(|e| LoadErr { msg: format!("{e}"), pkg_in_error: false })?;
+        };
+        if let Err(e) = drive_res {
+            let msg = format!("{e}");
+            salvage_captured_after_analysis_failure(session, module);
+            return Err(LoadErr {
+                msg,
+                pkg_in_error: false,
+            });
         }
         // Layer 0: stash the captured provider instances as plain dict/list/tuple values,
         // unroot the (unfreezable) decl store, freeze the module, harvest into the Session.
         // Conservative: freeze/harvest failures stay retryable.
-        crate::dialect::stash_captured_for_freeze(&module, session)
-            .map_err(|e| LoadErr { msg: format!("{e}"), pkg_in_error: false })?;
-        let fm = module
-            .freeze()
-            .map_err(|e| LoadErr { msg: format!("freeze: {e:?}"), pkg_in_error: false })?;
+        crate::dialect::stash_captured_for_freeze(&module, session).map_err(|e| LoadErr {
+            msg: format!("{e}"),
+            pkg_in_error: false,
+        })?;
+        let fm = module.freeze().map_err(|e| LoadErr {
+            msg: format!("freeze: {e:?}"),
+            pkg_in_error: false,
+        })?;
         if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
             index_harvest(&owned, &session.cross_captured, &session.cross_index);
         }
@@ -677,6 +719,21 @@ fn eval_build_src_inner(
         }
         Ok(())
     })
+}
+
+fn salvage_captured_after_analysis_failure<'v>(session: &Session, module: Module<'v>) {
+    let Ok(has_captures) = crate::dialect::stash_captured_only_for_freeze(&module) else {
+        return;
+    };
+    if !has_captures {
+        return;
+    }
+    let Ok(fm) = module.freeze() else {
+        return;
+    };
+    if let Ok(owned) = fm.get(crate::dialect::CAPTURED_VAR) {
+        index_harvest(&owned, &session.cross_captured, &session.cross_index);
+    }
 }
 
 /// Push a harvest dict and index its label keys → owner position (O(1) demand lookups).
@@ -705,14 +762,12 @@ fn index_harvest(
     }
 }
 
-
 /// Evaluate a **real Bazel `BUILD`** that `load()`s cc rules from `@rules_cc`,
 /// resolving those loads to razel's native rules (no rules_cc execution, no repo
 /// fetch). Single-package (bare-name targets).
 pub fn analyze_bazel(build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
     analyze_bazel_with(build_src, GlobalFlags::default())
 }
-
 
 /// [`analyze_bazel`] with build-wide [`GlobalFlags`] (the CLI's `--copt`/`-c`/… )
 /// applied to every cc action.
@@ -724,7 +779,6 @@ pub fn analyze_bazel_with(
     eval_build_src(&session, "BUILD", build_src)?;
     Ok(session.take_targets())
 }
-
 
 /// Load a package's BUILD (once) under workspace mode, evaluating it with that
 /// package as context. Cross-package deps trigger further loads via `resolve_dep`.
@@ -749,7 +803,10 @@ pub(crate) struct LoadErr {
 
 impl LoadErr {
     fn declare(msg: impl Into<String>) -> Self {
-        LoadErr { msg: msg.into(), pkg_in_error: true }
+        LoadErr {
+            msg: msg.into(),
+            pkg_in_error: true,
+        }
     }
 }
 
@@ -782,7 +839,8 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
     // Host-materialized packages (Bazel built-ins) take precedence over vendoring.
     if let Some(src) = crate::host::host_build(pkg) {
         let repo_ctx = pkg.strip_prefix('@').and_then(|rest| {
-            rest.split_once("//").map(|(r, sub)| (r.to_string(), sub.to_string()))
+            rest.split_once("//")
+                .map(|(r, sub)| (r.to_string(), sub.to_string()))
         });
         let prev = sess.set_current_pkg(Some(pkg.to_string()));
         let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), src, repo_ctx, drive_all);
@@ -792,8 +850,9 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
     // External package (`@repo//pkg`): its BUILD lives under the vendored repo's root.
     // Failures up to the eval are PRE-EVAL — the package is in error (cacheable).
     let pkg_dir = if let Some(rest) = pkg.strip_prefix('@') {
-        let (repo, sub) =
-            rest.split_once("//").ok_or_else(|| LoadErr::declare(format!("bad package `{pkg}`")))?;
+        let (repo, sub) = rest
+            .split_once("//")
+            .ok_or_else(|| LoadErr::declare(format!("bad package `{pkg}`")))?;
         sess.global
             .external_repo_dir(repo)
             .ok_or_else(|| LoadErr::declare(format!("external repo for `{pkg}` not vendored")))?
@@ -809,7 +868,10 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
     let build_path = crate::workspace::resolve_build_file(&pkg_dir, sess.global.strict_bazel)
         .map_err(LoadErr::declare)?
         .ok_or_else(|| {
-            LoadErr::declare(format!("no BUILD in package `{pkg}` ({})", pkg_dir.display()))
+            LoadErr::declare(format!(
+                "no BUILD in package `{pkg}` ({})",
+                pkg_dir.display()
+            ))
         })?;
     // E-package in the MAIN repo: the boundary guard (§3c rule 2 — warning during
     // S1 only; a hard ERROR since S3d: boundary divergence must not be warnable).
@@ -826,7 +888,10 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
         }
     }
     // Pre-parsed AST present? Skip BOTH the read and the parse (the parallel pre-pass).
-    let prepared = sess.ast_cache.borrow().contains_key(&format!("{pkg}/BUILD"));
+    let prepared = sess
+        .ast_cache
+        .borrow()
+        .contains_key(&format!("{pkg}/BUILD"));
     let src = if prepared {
         String::new()
     } else {
@@ -836,7 +901,8 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
     // Short borrows around the nested eval (the [R1] discipline): set current_pkg, drop the
     // borrow, recurse, then restore — never hold a Session borrow across `eval_build_src`.
     let repo_ctx = pkg.strip_prefix('@').and_then(|rest| {
-        rest.split_once("//").map(|(r, sub)| (r.to_string(), sub.to_string()))
+        rest.split_once("//")
+            .map(|(r, sub)| (r.to_string(), sub.to_string()))
     });
     let prev = sess.set_current_pkg(Some(pkg.to_string()));
     let res = eval_build_src_in(sess, &format!("{pkg}/BUILD"), &src, repo_ctx, drive_all);
@@ -844,14 +910,12 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
     res
 }
 
-
 /// Analyze a **multi-package** workspace rooted at `root`, starting from
 /// `top_label` (`//pkg:name`) and loading dependency packages on demand. Targets
 /// are keyed by canonical `//pkg:name` labels with package-qualified paths.
 pub fn analyze_workspace(root: &Path, top_label: &str) -> Result<Vec<AnalyzedTarget>, String> {
     analyze_workspace_with(root, top_label, GlobalFlags::default())
 }
-
 
 /// [`analyze_workspace`] with build-wide [`GlobalFlags`] applied to every cc action.
 pub fn analyze_workspace_with(
@@ -910,7 +974,10 @@ pub fn load_tree_report_seeded(
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or_else(|| {
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(6)
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .min(6)
         });
     load_tree_report_with_threads(root, flags, packages, asts, threads)
 }
@@ -951,7 +1018,11 @@ pub fn load_tree_report_with_threads(
                     if r.is_err() && session.partial_reads() > before {
                         retry.lock().expect("retry").push(i);
                     }
-                    results.lock().expect("results").get_mut(i).map(|slot| *slot = Some(r));
+                    results
+                        .lock()
+                        .expect("results")
+                        .get_mut(i)
+                        .map(|slot| *slot = Some(r));
                 }
             });
         }
@@ -1033,9 +1104,15 @@ pub fn prepare_build_asts(
                         else {
                             continue;
                         };
-                        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+                        let Ok(src) = std::fs::read_to_string(&path) else {
+                            continue;
+                        };
                         let name = format!("{pkg}/BUILD");
-                        if let Ok(ast) = AstModule::parse(&name, detab_leading(&src).into_owned(), &Dialect::Extended) {
+                        if let Ok(ast) = AstModule::parse(
+                            &name,
+                            detab_leading(&src).into_owned(),
+                            &Dialect::Extended,
+                        ) {
                             out.push((name, ast));
                         }
                     }
@@ -1043,17 +1120,19 @@ pub fn prepare_build_asts(
                 })
             })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
     })
 }
-
 
 /// Evaluate a `BUILD`/`.bzl` that defines and instantiates Starlark rules, running each
 /// rule impl (same-scope analysis); returns the analyzed targets.
 pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, String> {
     let session = Session::default();
-    let ast =
-        AstModule::parse(name, detab_leading(src).into_owned(), &Dialect::Extended).map_err(|e| format!("{e}"))?;
+    let ast = AstModule::parse(name, detab_leading(src).into_owned(), &Dialect::Extended)
+        .map_err(|e| format!("{e}"))?;
     // ONE globals surface everywhere (round 44: a private duplicate here predated
     // builder_base and silently missed later dialect additions — the shadowed fail()).
     let globals = build_globals();
@@ -1062,7 +1141,8 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
         {
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(&session);
-            eval.eval_module(ast, &globals).map_err(|e| format!("{e}"))?;
+            eval.eval_module(ast, &globals)
+                .map_err(|e| format!("{e}"))?;
         }
         // E0 phase 2: analyze the recorded declarations, demand-driven (forward refs resolve).
         {
@@ -1081,13 +1161,11 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
     Ok(session.take_targets())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // ── fold_field (F3/F24): the LIVE transitive fold, tested directly (not only via the .bzl). ──
-
 
     #[test]
     fn tab_indented_source_parses_like_bazel() {
@@ -1098,7 +1176,11 @@ mod tests {
         let src = "def _impl(ctx):\n\treturn [DefaultInfo(files = [\"a\tb\"])]\n\nr = rule(implementation = _impl, attrs = {})\nr(name = \"x\")\n";
         let targets = analyze_starlark("BUILD", src).unwrap();
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].default_info, vec!["a\tb"], "string-internal tab preserved");
+        assert_eq!(
+            targets[0].default_info,
+            vec!["a\tb"],
+            "string-internal tab preserved"
+        );
     }
 
     #[test]
@@ -1149,7 +1231,10 @@ thing(name = "x", flags = select({"//conditions:default": ["-O2"], ":dbg": ["-g"
         let targets = analyze_starlark("BUILD", src).unwrap();
         let x = targets.iter().find(|t| t.name.ends_with("x")).unwrap();
         assert_eq!(x.actions[0].mnemonic, "cc");
-        assert!(x.actions[0].argv.contains(&"-O2".to_string()), "default branch picked");
+        assert!(
+            x.actions[0].argv.contains(&"-O2".to_string()),
+            "default branch picked"
+        );
     }
 
     #[test]

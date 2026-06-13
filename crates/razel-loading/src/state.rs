@@ -5,7 +5,6 @@
 use razel_dds::{FieldId, FieldValue, ProviderTypeId, Scalar};
 use starlark::any::ProvidesStaticType;
 use starlark::eval::Evaluator;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
@@ -36,14 +35,21 @@ pub struct AnalyzedTarget {
 }
 
 fn scalar_str(s: &Scalar) -> Option<String> {
-    if let Scalar::Str(x) = s { Some(x.clone()) } else { None }
+    if let Scalar::Str(x) = s {
+        Some(x.clone())
+    } else {
+        None
+    }
 }
 
 impl AnalyzedTarget {
     /// A provider field's string elements (`Set` or `OrderedDepset`), empty if absent. Generic — the
     /// caller names the provider/field (language modules + tests); `state` stays language-free (C3a.5b).
     pub fn field_strs(&self, ty: &str, field: &str) -> Vec<String> {
-        match self.providers.get(&(ProviderTypeId::new(ty), FieldId::new(field))) {
+        match self
+            .providers
+            .get(&(ProviderTypeId::new(ty), FieldId::new(field)))
+        {
             Some(FieldValue::Set(s)) => s.iter().filter_map(scalar_str).collect(),
             Some(FieldValue::OrderedDepset(v)) => v.iter().filter_map(scalar_str).collect(),
             _ => Vec::new(),
@@ -52,18 +58,24 @@ impl AnalyzedTarget {
     /// A `Scalar(Bool)` provider field (e.g. java `neverlink`), false if absent. Generic.
     pub fn scalar_bool(&self, ty: &str, field: &str) -> bool {
         matches!(
-            self.providers.get(&(ProviderTypeId::new(ty), FieldId::new(field))),
+            self.providers
+                .get(&(ProviderTypeId::new(ty), FieldId::new(field))),
             Some(FieldValue::Scalar(Scalar::Bool(true)))
         )
     }
     /// Set a provider field (the capture write — `razel_build.info` + the native rules).
     pub fn set_provider(&mut self, ty: &str, field: &str, value: FieldValue) {
-        self.providers.insert((ProviderTypeId::new(ty), FieldId::new(field)), value);
+        self.providers
+            .insert((ProviderTypeId::new(ty), FieldId::new(field)), value);
     }
     /// Set a `Set`-valued provider field from strings — the common native-rule capture. Generic: the
     /// rule names its own provider (allowed); `state` stays language-free.
     pub(crate) fn set_set(&mut self, ty: &str, field: &str, values: Vec<String>) {
-        self.set_provider(ty, field, FieldValue::Set(values.into_iter().map(Scalar::Str).collect()));
+        self.set_provider(
+            ty,
+            field,
+            FieldValue::Set(values.into_iter().map(Scalar::Str).collect()),
+        );
     }
 }
 
@@ -132,8 +144,7 @@ pub(crate) struct Session {
     pub(crate) configs: SyncCell<Vec<String>>,
     /// P4a: per-worker eval-stack state (see [`EvalStack`]). Access via the `current_pkg()`/
     /// `set_current_pkg()`/`bzl_repo_*`/`analyzing_*`/`*_current_target` accessors only.
-    pub(crate) eval_stacks:
-        SyncCell<std::collections::HashMap<std::thread::ThreadId, EvalStack>>,
+    pub(crate) eval_stacks: SyncCell<std::collections::HashMap<std::thread::ThreadId, EvalStack>>,
     /// The single-flight WAIT GRAPH: per-package + per-`.bzl` load state AND the waits-for
     /// edges (P3 + P4a — see [`acquire_resource`]). `InFlight(thread)` lets a demanding
     /// worker WAIT for the owner; detected cycles take over instead of deadlocking.
@@ -175,7 +186,8 @@ pub(crate) struct Session {
     /// Session-wide `.bzl` module cache (canonical label → frozen module). ONE evaluation per
     /// `.bzl` per Session — provider identities (`dep[MyInfo]` ptr-eq) hold across packages,
     /// and TF's macro layer evaluates once, not per-package.
-    pub(crate) bzl_cache: SyncCell<std::collections::HashMap<String, starlark::environment::FrozenModule>>,
+    pub(crate) bzl_cache:
+        SyncCell<std::collections::HashMap<String, starlark::environment::FrozenModule>>,
     /// Harvested UNDRIVEN Starlark declarations (one frozen dict per dependency-loaded
     /// package) — analyzed on demand cross-package ([`crate::dialect`] `analyze_deferred`).
     pub(crate) deferred_decls: SyncCell<Vec<starlark::values::OwnedFrozenValue>>,
@@ -202,8 +214,14 @@ pub(crate) struct Session {
     /// glob() RESULT memo, keyed (package dir, include, exclude) — after the walk cache,
     /// pattern-matching huge trees per call was the top CPU frame (TF macros repeat globs).
     pub(crate) glob_cache: SyncCell<
-        std::collections::HashMap<(std::path::PathBuf, String, String), std::sync::Arc<Vec<String>>>,
+        std::collections::HashMap<
+            (std::path::PathBuf, String, String),
+            std::sync::Arc<Vec<String>>,
+        >,
     >,
+    /// Stable ids for aspect values. Cache keys cannot use `Display` (`<aspect>`) and the
+    /// Starlark pointer accessor is crate-private, so aspects get a session-local identity.
+    pub(crate) aspect_ids: std::sync::atomic::AtomicU64,
     /// Pre-parsed BUILD ASTs (key = the eval name, `{pkg}/BUILD`): read+parse is pure and
     /// parallelizes across files; the sequential eval consumes them (load+parse / execute split).
     pub(crate) ast_cache: SyncCell<std::collections::HashMap<String, starlark::syntax::AstModule>>,
@@ -228,7 +246,10 @@ pub(crate) type NativeAnalyzeFn =
 /// Coerce a closure to [`NativeAnalyzeFn`] (pins the higher-ranked lifetimes for inference).
 pub(crate) fn native_decl<F>(f: F) -> NativeAnalyzeFn
 where
-    F: for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()> + Send + Sync + 'static,
+    F: for<'v, 'a, 'e> FnOnce(&mut Evaluator<'v, 'a, 'e>) -> anyhow::Result<()>
+        + Send
+        + Sync
+        + 'static,
 {
     Box::new(f)
 }
@@ -313,17 +334,25 @@ pub(crate) enum FinishOutcome {
 /// per event (loads are low-frequency; no cached static — AD2).
 fn trace_load(point: &str, key: &str) {
     if std::env::var_os("RAZEL_TRACE_LOAD").is_some() {
-        eprintln!("razel-trace: {:?} {point} `{key}`", std::thread::current().id());
+        eprintln!(
+            "razel-trace: {:?} {point} `{key}`",
+            std::thread::current().id()
+        );
     }
 }
 
-/// Emit a wait-graph event to the trace + the S2 hook. MUST be called WITHOUT the graph
-/// lock held (hooks may block at "enter" by design — that is how tests script schedules).
-fn sched_event(sess: &Session, point: &str, key: &str) {
+/// Emit a loading diagnostic event to the trace + the S2 hook.
+pub(crate) fn load_event(sess: &Session, point: &str, key: &str) {
     trace_load(point, key);
     if let Some(h) = &sess.global.sched_hook {
         (h.0)(point, key);
     }
+}
+
+/// Emit a wait-graph event. MUST be called WITHOUT the graph lock held (hooks may block at
+/// "enter" by design — that is how tests script schedules).
+fn sched_event(sess: &Session, point: &str, key: &str) {
+    load_event(sess, point, key);
 }
 
 /// Single-flight acquire with DEADLOCK-FREE waiting: before parking, walk the waits-for chain
@@ -442,7 +471,9 @@ fn walk_cycle_kind(
     let mut cur = start;
     let mut has_breaker = false;
     for _ in 0..128 {
-        let Some(next_key) = g.waiting.get(&cur) else { return None };
+        let Some(next_key) = g.waiting.get(&cur) else {
+            return None;
+        };
         if !matches!(next_key, ResKey::Decl(_)) {
             has_breaker = true;
         }
@@ -505,7 +536,11 @@ pub(crate) fn finish_resource(sess: &Session, key: &ResKey, outcome: FinishOutco
         sess.loaded_cv.notify_all();
         may_purge
     };
-    sched_event(sess, if ok { "finish-ok" } else { "finish-err" }, key.name());
+    sched_event(
+        sess,
+        if ok { "finish-ok" } else { "finish-err" },
+        key.name(),
+    );
     may_purge
 }
 
@@ -681,16 +716,19 @@ pub(crate) fn finish_bzl_load(sess: &Session, key: &str, ok: bool) {
     finish_resource(
         sess,
         &ResKey::Bzl(key.to_string()),
-        if ok { FinishOutcome::Ok } else { FinishOutcome::FailRetry },
+        if ok {
+            FinishOutcome::Ok
+        } else {
+            FinishOutcome::FailRetry
+        },
     );
 }
 
 /// A failed package eval must not poison its RESULTS either (the loaded-set twin): targets
-/// analyzed before the failure sit in `results` with their captured provider instances DEAD
-/// (the harvest is skipped on error), so every later consumer would read providerless deps
-/// (`have 0 pairs`) — the TF enable_registration_v2 class. Drop the package's partial
-/// entries; a dep re-load re-declares and re-analyzes them cleanly (the same idempotent
-/// re-analysis consumers already do for harvested decls).
+/// from the failed package may have partial rows in `results`, so every later consumer could
+/// read stale facts. Drop the package's partial entries; a dep re-load re-declares and
+/// re-analyzes them cleanly. Cross-package captures completed inside the failed eval are
+/// salvaged before this purge, because their result rows belong to another package.
 fn purge_partial_package(sess: &Session, pkg: &str) {
     let in_pkg = |label: &str| pkg_of(label).is_some_and(|p| p == pkg);
     sess.results.borrow_mut().retain(|k, _| !in_pkg(k));
@@ -700,7 +738,11 @@ fn purge_partial_package(sess: &Session, pkg: &str) {
 
 impl Session {
     pub(crate) fn new(workspace: Option<PathBuf>, global: GlobalFlags) -> Self {
-        Session { workspace, global, ..Default::default() }
+        Session {
+            workspace,
+            global,
+            ..Default::default()
+        }
     }
 
     /// THIS worker's eval stack, mutable (write-locks the map — keep `f` tiny, never recurse
@@ -712,7 +754,10 @@ impl Session {
 
     /// Read-only view (read lock — the hot path: `canon_label`/`qualify` per label).
     fn read_stack<R>(&self, f: impl FnOnce(&EvalStack) -> R) -> Option<R> {
-        self.eval_stacks.borrow().get(&std::thread::current().id()).map(f)
+        self.eval_stacks
+            .borrow()
+            .get(&std::thread::current().id())
+            .map(f)
     }
 
     /// The package THIS worker is evaluating (`None` ⇒ single-package mode).
@@ -752,7 +797,8 @@ impl Session {
     }
 
     pub(crate) fn analyzing_contains(&self, label: &str) -> bool {
-        self.read_stack(|s| s.analyzing.contains(label)).unwrap_or(false)
+        self.read_stack(|s| s.analyzing.contains(label))
+            .unwrap_or(false)
     }
 
     /// Install/replace THIS worker's in-flight target.
@@ -804,12 +850,12 @@ pub(crate) fn session<'a>(eval: &Evaluator<'_, 'a, '_>) -> &'a Session {
         .expect("eval.extra is not a Session")
 }
 
-/// A wait-graph observation hook (the S2 deterministic-interleaving seam): called with
-/// `(point, key)` at load-coordination events. Points: `"enter"` (before the graph lock —
+/// A loading observation hook (the S2 deterministic-interleaving seam): called with
+/// `(point, key)` at load-coordination and diagnostic events. Points: `"enter"` (before the graph lock —
 /// the ONLY point where a test may block, e.g. on a barrier, to script an interleaving),
 /// and post-lock outcomes: `"own"`, `"ready"`, `"reentry"`, `"cycle-proceed"`,
-/// `"takeover-timeout"`, `"finish-ok"`, `"finish-err"`. Production runs carry `None` —
-/// one Option read per package/module load.
+/// `"takeover-timeout"`, `"finish-ok"`, `"finish-err"`. Diagnostic points include
+/// `"provider-reanalyze"`. Production runs carry `None` — one Option read per event.
 #[derive(Clone)]
 pub struct SchedHook(pub std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>);
 
@@ -857,7 +903,11 @@ pub struct GlobalFlags {
 impl GlobalFlags {
     /// The effective compilation mode (`fastbuild` when unset — Bazel's default).
     pub(crate) fn mode(&self) -> &str {
-        if self.compilation_mode.is_empty() { "fastbuild" } else { &self.compilation_mode }
+        if self.compilation_mode.is_empty() {
+            "fastbuild"
+        } else {
+            &self.compilation_mode
+        }
     }
 
     /// Candidate DIRS for external repo `repo` (bare name — no `@`, no `//`), in
@@ -881,7 +931,9 @@ impl GlobalFlags {
 
     /// First existing candidate dir for `repo` (see [`Self::external_repo_dirs`]).
     pub(crate) fn external_repo_dir(&self, repo: &str) -> Option<std::path::PathBuf> {
-        self.external_repo_dirs(repo).into_iter().find(|p| p.exists())
+        self.external_repo_dirs(repo)
+            .into_iter()
+            .find(|p| p.exists())
     }
 }
 
@@ -899,7 +951,11 @@ pub(crate) fn host_cpu() -> &'static str {
 /// Does a `constraint_value` (package family, value name) describe the REAL host? `@platforms`'
 /// os/cpu families match the host; foreign constraint families are conservative-false.
 pub(crate) fn host_constraint_matches(pkg: &str, name: &str) -> bool {
-    let fam = pkg.rsplit('/').next().unwrap_or(pkg).trim_start_matches("@platforms//");
+    let fam = pkg
+        .rsplit('/')
+        .next()
+        .unwrap_or(pkg)
+        .trim_start_matches("@platforms//");
     match fam {
         "os" => match std::env::consts::OS {
             "macos" => matches!(name, "osx" | "macos"),
@@ -931,24 +987,29 @@ pub(crate) struct ConfigSpec {
 
 impl ConfigSpec {
     /// Does every constraint hold against the configuration?
-    pub(crate) fn matches(&self, flags: &GlobalFlags) -> Result<bool, String> {
-        let has_define =
-            |k: &str, v: &str| flags.defines.iter().any(|(dk, dv)| dk == k && dv == v);
+    pub(crate) fn matches(&self, sess: &Session) -> Result<bool, String> {
+        let flags = &sess.global;
+        let has_define = |k: &str, v: &str| flags.defines.iter().any(|(dk, dv)| dk == k && dv == v);
         for (key, want) in &self.values {
             let ok = match key.as_str() {
                 "compilation_mode" => flags.mode() == want,
                 "define" => match want.split_once('=') {
                     Some((k, v)) => has_define(k, v),
-                    None => return Err(format!("config_setting `define` value `{want}` is not k=v")),
+                    None => {
+                        return Err(format!("config_setting `define` value `{want}` is not k=v"));
+                    }
                 },
                 "cpu" => want == host_cpu(),
                 // Unmodeled host-config keys (crosstool_top, apple cpus, …): CONSERVATIVE — the
                 // condition doesn't match on this host. Loud once per key (registered debt).
                 other => {
-                    eprintln!(
-                        "razel: warning: config_setting key `{other}` not modeled — treating \
-                         condition as non-matching"
-                    );
+                    let warn_key = format!("config_setting key {other}");
+                    if sess.warned.borrow_mut().insert(warn_key) {
+                        eprintln!(
+                            "razel: warning: config_setting key `{other}` not modeled — treating \
+                             condition as non-matching"
+                        );
+                    }
                     false
                 }
             };
@@ -974,7 +1035,11 @@ impl ConfigSpec {
         self.values
             .iter()
             .map(|(k, v)| ("v".to_string(), k.clone(), v.clone()))
-            .chain(self.define_values.iter().map(|(k, v)| ("d".to_string(), k.clone(), v.clone())))
+            .chain(
+                self.define_values
+                    .iter()
+                    .map(|(k, v)| ("d".to_string(), k.clone(), v.clone())),
+            )
             .collect()
     }
 }
@@ -1142,7 +1207,10 @@ mod tests {
             p == std::path::Path::new("/usr/bin/c++")
                 || p == std::path::Path::new("/usr/local/bin/clang++")
         };
-        assert_eq!(first_on_path(&["c++", "clang++"], &dirs, present).as_deref(), Some("/usr/bin/c++"));
+        assert_eq!(
+            first_on_path(&["c++", "clang++"], &dirs, present).as_deref(),
+            Some("/usr/bin/c++")
+        );
         // Falls through candidates when the preferred one is absent anywhere.
         let only_clang = |p: &std::path::Path| p == std::path::Path::new("/usr/local/bin/clang++");
         assert_eq!(
@@ -1153,7 +1221,6 @@ mod tests {
         assert_eq!(first_on_path(&["c++"], &dirs, |_| false), None);
     }
 }
-
 
 /// Cached file-existence check (the dep/file-label fallbacks stat per srcs entry).
 pub(crate) fn path_is_file(sess: &Session, p: &std::path::Path) -> bool {
@@ -1173,7 +1240,9 @@ pub(crate) fn walk_cached(sess: &Session, dir: &std::path::Path) -> std::sync::A
     let mut files = Vec::new();
     crate::glob::walk_files(dir, dir, &mut files);
     let arc = std::sync::Arc::new(files);
-    sess.walk_cache.borrow_mut().insert(dir.to_path_buf(), arc.clone());
+    sess.walk_cache
+        .borrow_mut()
+        .insert(dir.to_path_buf(), arc.clone());
     arc
 }
 

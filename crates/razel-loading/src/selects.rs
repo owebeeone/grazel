@@ -1,5 +1,6 @@
 //! select(): deferred values, condition matching, attr-value resolution.
 
+use crate::labels::LabelV;
 use crate::state::{canon_label, session};
 use allocative::Allocative;
 use starlark::any::ProvidesStaticType;
@@ -12,11 +13,8 @@ use starlark::values::{
     starlark_value,
 };
 use std::fmt;
-use crate::labels::LabelV;
-
 
 // ---- select: deferred values + resolution (Bazel's select-as-value model) ---------------------
-
 
 /// One deferred `select({...})`: raw (key, value) branch pairs, resolved at attr consumption.
 /// Freeze-generic — module-level selects in `.bzl` freeze with their module.
@@ -26,16 +24,13 @@ pub(crate) struct SelectBranchesGen<V: ValueLifetimeless> {
     pub(crate) branches: Vec<(V, V)>,
 }
 
-
 starlark_complex_value!(pub(crate) SelectBranches);
-
 
 impl<V: ValueLifetimeless> fmt::Display for SelectBranchesGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "select({{…}})")
     }
 }
-
 
 #[starlark_value(type = "select")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for SelectBranchesGen<V>
@@ -45,19 +40,30 @@ where
     /// `select({...}) + x` — a select expression (Bazel's concatenation).
     fn add(&self, other: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
         let me = heap.alloc(SelectBranches {
-            branches: self.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect(),
+            branches: self
+                .branches
+                .iter()
+                .map(|(k, v)| (k.to_value(), v.to_value()))
+                .collect(),
         });
-        Some(Ok(heap.alloc(SelectExpr { parts: vec![me, other] })))
+        Some(Ok(heap.alloc(SelectExpr {
+            parts: vec![me, other],
+        })))
     }
     /// `x + select({...})`.
     fn radd(&self, lhs: Value<'v>, heap: Heap<'v>) -> Option<starlark::Result<Value<'v>>> {
         let me = heap.alloc(SelectBranches {
-            branches: self.branches.iter().map(|(k, v)| (k.to_value(), v.to_value())).collect(),
+            branches: self
+                .branches
+                .iter()
+                .map(|(k, v)| (k.to_value(), v.to_value()))
+                .collect(),
         });
-        Some(Ok(heap.alloc(SelectExpr { parts: vec![lhs, me] })))
+        Some(Ok(heap.alloc(SelectExpr {
+            parts: vec![lhs, me],
+        })))
     }
 }
-
 
 /// A select EXPRESSION: ordered parts (plain lists and selects) — `["-a"] + select({…}) + …`.
 /// Freeze-generic: real `.bzl` build these in module-level default args (XLA's tsl.bzl).
@@ -67,16 +73,13 @@ pub(crate) struct SelectExprGen<V: ValueLifetimeless> {
     pub(crate) parts: Vec<V>,
 }
 
-
 starlark_complex_value!(pub(crate) SelectExpr);
-
 
 impl<V: ValueLifetimeless> fmt::Display for SelectExprGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "select-expr({} parts)", self.parts.len())
     }
 }
-
 
 #[starlark_value(type = "select_expr")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for SelectExprGen<V>
@@ -95,7 +98,6 @@ where
     }
 }
 
-
 /// A select condition key as a canonical-izable string: a string label or a `Label` struct
 /// (`.package`/`.name` — `clean_dep()` results in real `.bzl`).
 pub(crate) fn key_string<'v>(heap: Heap<'v>, key: Value<'v>) -> Option<String> {
@@ -105,11 +107,14 @@ pub(crate) fn key_string<'v>(heap: Heap<'v>, key: Value<'v>) -> Option<String> {
     if let Some(l) = key.downcast_ref::<LabelV>() {
         return Some(l.to_string());
     }
-    let pkg = key.get_attr("package", heap).ok()??.unpack_str()?.to_string();
+    let pkg = key
+        .get_attr("package", heap)
+        .ok()??
+        .unpack_str()?
+        .to_string();
     let name = key.get_attr("name", heap).ok()??.unpack_str()?.to_string();
     Some(format!("//{pkg}:{name}"))
 }
-
 
 /// Resolve a select's branches against the configuration. `defer_on_undeclared`: return
 /// `Ok(None)` when a condition isn't a declared config_setting (the caller defers); at analysis
@@ -148,11 +153,9 @@ pub(crate) fn pick_branch<'v>(
         }
     }
     if matches.is_empty() {
-        return default
-            .map(Some)
-            .ok_or_else(|| {
-                anyhow::anyhow!("select() matched no condition and has no //conditions:default")
-            });
+        return default.map(Some).ok_or_else(|| {
+            anyhow::anyhow!("select() matched no condition and has no //conditions:default")
+        });
     }
     // Most-specialized wins: the winner's constraint set must contain every other match's.
     matches.sort_by_key(|(_, s, _)| std::cmp::Reverse(s.constraints().len()));
@@ -169,7 +172,6 @@ pub(crate) fn pick_branch<'v>(
     Ok(Some(matches[0].2))
 }
 
-
 /// Does a condition label match the configuration? Follows `alias()` chains, answers FALSE for
 /// host-materialized GPU repos and unmodeled (`flag_values`) settings, recurses through
 /// `config_setting_group`s, and (when allowed) loads the condition's package on demand — a failed
@@ -181,7 +183,9 @@ pub(crate) fn condition_matches(
     fuel: u32,
 ) -> anyhow::Result<Option<bool>> {
     if fuel == 0 {
-        return Err(anyhow::anyhow!("condition alias/group nesting too deep at `{canon}`"));
+        return Err(anyhow::anyhow!(
+            "condition alias/group nesting too deep at `{canon}`"
+        ));
     }
     let aliased = sess.aliases.borrow().get(canon).cloned();
     if let Some(t) = aliased {
@@ -237,12 +241,14 @@ pub(crate) fn condition_matches(
         }
         return Ok(Some(*all));
     }
-    spec.matches(&sess.global).map(Some).map_err(|e| anyhow::anyhow!(e))
+    spec.matches(sess).map(Some).map_err(|e| anyhow::anyhow!(e))
 }
 
-
 /// The (alias-dereffed) spec for specialization ordering; groups/undeclared → empty constraints.
-pub(crate) fn deref_spec(sess: &crate::state::Session, canon: &str) -> Option<crate::state::ConfigSpec> {
+pub(crate) fn deref_spec(
+    sess: &crate::state::Session,
+    canon: &str,
+) -> Option<crate::state::ConfigSpec> {
     let mut cur = canon.to_string();
     for _ in 0..16 {
         match sess.aliases.borrow().get(&cur).cloned() {
@@ -252,7 +258,6 @@ pub(crate) fn deref_spec(sess: &crate::state::Session, canon: &str) -> Option<cr
     }
     sess.config_specs.borrow().get(&cur).cloned()
 }
-
 
 /// Resolve any deferred select machinery in an attr VALUE at consumption time (analysis):
 /// a deferred select picks its branch; a select expression resolves each part and concatenates
@@ -265,7 +270,12 @@ pub(crate) fn resolve_attr_value<'v>(
         if let Some(sb) = v.downcast_ref::<SelectBranches<'v>>() {
             Some(sb.branches.clone())
         } else if let Some(sb) = v.downcast_ref::<FrozenSelectBranches>() {
-            Some(sb.branches.iter().map(|(k, x)| (k.to_value(), x.to_value())).collect())
+            Some(
+                sb.branches
+                    .iter()
+                    .map(|(k, x)| (k.to_value(), x.to_value()))
+                    .collect(),
+            )
         } else {
             None
         };
@@ -273,14 +283,13 @@ pub(crate) fn resolve_attr_value<'v>(
         let picked = pick_branch(eval, &pairs, false, true)?.expect("non-deferring pick");
         return resolve_attr_value(eval, picked);
     }
-    let expr_parts: Option<Vec<Value<'v>>> =
-        if let Some(se) = v.downcast_ref::<SelectExpr<'v>>() {
-            Some(se.parts.clone())
-        } else if let Some(se) = v.downcast_ref::<FrozenSelectExpr>() {
-            Some(se.parts.iter().map(|p| p.to_value()).collect())
-        } else {
-            None
-        };
+    let expr_parts: Option<Vec<Value<'v>>> = if let Some(se) = v.downcast_ref::<SelectExpr<'v>>() {
+        Some(se.parts.clone())
+    } else if let Some(se) = v.downcast_ref::<FrozenSelectExpr>() {
+        Some(se.parts.iter().map(|p| p.to_value()).collect())
+    } else {
+        None
+    };
     if let Some(parts) = expr_parts {
         let mut out: Vec<Value<'v>> = Vec::new();
         for p in parts {

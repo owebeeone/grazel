@@ -2,9 +2,52 @@
 //! one shared session, and report the coverage curve + the top failure classes — the
 //! checkpoint-3 yardstick. A package = a directory with a BUILD file.
 
-use razel_loading::{GlobalFlags, load_tree_report, load_tree_report_seeded, prepare_build_asts};
+use razel_loading::{
+    GlobalFlags, SchedHook, load_tree_report, load_tree_report_seeded, prepare_build_asts,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+type ProviderReanalyzeDiag = Arc<Mutex<BTreeMap<String, usize>>>;
+type DepsetDiagHandle = Arc<Mutex<DepsetDiag>>;
+
+#[derive(Debug, Default)]
+struct DepsetDiag {
+    calls: usize,
+    direct: usize,
+    transitive: usize,
+    input: usize,
+    unique: usize,
+    duplicates: usize,
+    max_input: usize,
+    max_seen: usize,
+}
+
+impl DepsetDiag {
+    fn record(&mut self, key: &str) {
+        let direct = depset_stat(key, "direct").unwrap_or(0);
+        let transitive = depset_stat(key, "transitive").unwrap_or(0);
+        let input = depset_stat(key, "input").unwrap_or(0);
+        let unique = depset_stat(key, "unique").unwrap_or(0);
+        let dup = depset_stat(key, "dup").unwrap_or(0);
+        let max_seen = depset_stat(key, "max_seen").unwrap_or(0);
+
+        self.calls += 1;
+        self.direct += direct;
+        self.transitive += transitive;
+        self.input += input;
+        self.unique += unique;
+        self.duplicates += dup;
+        self.max_input = self.max_input.max(input);
+        self.max_seen = self.max_seen.max(max_seen);
+    }
+}
+
+fn depset_stat(key: &str, name: &str) -> Option<usize> {
+    key.split_whitespace()
+        .find_map(|part| part.strip_prefix(name)?.strip_prefix('=')?.parse().ok())
+}
 
 /// Every package (dir with a BUILD file) under `<ws>/tensorflow`, sorted; `sample` keeps
 /// every Nth (the fast inner loop). Shared by `tfload` and `stress`.
@@ -12,12 +55,17 @@ pub(crate) fn discover_packages(ws: &Path, sample: usize) -> Vec<String> {
     let mut packages = Vec::new();
     let mut stack = vec![ws.join("tensorflow")];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.file_name().is_some_and(|f| f == "BUILD" || f == "BUILD.bazel") {
+            } else if p
+                .file_name()
+                .is_some_and(|f| f == "BUILD" || f == "BUILD.bazel")
+            {
                 if let Ok(rel) = dir.strip_prefix(ws) {
                     packages.push(rel.to_string_lossy().to_string());
                 }
@@ -44,6 +92,8 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     let mut flags = GlobalFlags::default();
     flags.external_base = Some(root.join("../third-party"));
     flags.fetched_external_base = crate::fetchcmd::fetched_external_dir(&ws);
+    let provider_reanalyze_diag = install_provider_reanalyze_diag(&mut flags);
+    let depset_diag = install_depset_diag(&mut flags);
     // RAZEL_TFLOAD_ONE=<pkg>[,<pkg>…]: print FULL errors (debugging a failure class). A comma
     // list loads in order in ONE session — replicates sweep context (earlier packages paving
     // aliases/config_settings) for order-dependent classes.
@@ -53,15 +103,21 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
         for (pkg, r) in &report {
             match r {
                 Ok(()) => println!("{pkg}: OK"),
-                Err(e) => println!("{pkg}: FAIL
-{e}"),
+                Err(e) => println!(
+                    "{pkg}: FAIL
+{e}"
+                ),
             }
         }
+        print_provider_reanalyze_diag(&provider_reanalyze_diag);
+        print_depset_diag(&depset_diag);
         return Ok(());
     }
     let total = packages.len();
     // Load+parse / execute split: the pure half parallelizes; eval consumes the AST cache.
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
     let t0 = std::time::Instant::now();
     let asts = prepare_build_asts(&ws, &packages, threads, false);
     let parse_ms = t0.elapsed().as_millis();
@@ -78,11 +134,14 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     // RazelGaps.md); coverage printed at threads>1 is not a coverage number.
     let seed_enabled = std::env::var("RAZEL_TFLOAD_SEED").is_ok();
     if let Ok(spine) = std::fs::read_to_string(&spine_path).and_then(|s| {
-        if seed_enabled { Ok(s) } else { Err(std::io::Error::other("seeding disabled")) }
+        if seed_enabled {
+            Ok(s)
+        } else {
+            Err(std::io::Error::other("seeding disabled"))
+        }
     }) {
         let mut seeded: Vec<String> = spine.lines().map(String::from).collect();
-        let known: std::collections::BTreeSet<&str> =
-            seeded.iter().map(|s| s.as_str()).collect();
+        let known: std::collections::BTreeSet<&str> = seeded.iter().map(|s| s.as_str()).collect();
         let _ = known; // seed list first, sweep list after (dedup below)
         seeded.extend(packages.iter().cloned());
         seeded.dedup();
@@ -97,13 +156,21 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
         let report: Vec<(String, Result<(), String>)> = packages
             .iter()
             .map(|p| {
-                (p.clone(), by_pkg.get(p.as_str()).map(|r| (*r).clone()).unwrap_or(Ok(())))
+                (
+                    p.clone(),
+                    by_pkg
+                        .get(p.as_str())
+                        .map(|r| (*r).clone())
+                        .unwrap_or(Ok(())),
+                )
             })
             .collect();
         println!(
             "phases: parallel read+parse {parse_ms}ms ({threads} threads), eval {}ms (seeded)",
             t1.elapsed().as_millis()
         );
+        print_provider_reanalyze_diag(&provider_reanalyze_diag);
+        print_depset_diag(&depset_diag);
         return summarize(report, packages.len());
     }
     let t1 = std::time::Instant::now();
@@ -113,7 +180,81 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
         "phases: parallel read+parse {parse_ms}ms ({threads} threads), eval {}ms",
         t1.elapsed().as_millis()
     );
+    print_provider_reanalyze_diag(&provider_reanalyze_diag);
+    print_depset_diag(&depset_diag);
     summarize(report, total)
+}
+
+fn install_provider_reanalyze_diag(flags: &mut GlobalFlags) -> Option<ProviderReanalyzeDiag> {
+    if std::env::var_os("RAZEL_TFLOAD_DIAG_PROVIDER_REANALYZE").is_none() {
+        return None;
+    }
+    let counts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+    let hook_counts = Arc::clone(&counts);
+    let previous = flags.sched_hook.clone();
+    flags.sched_hook = Some(SchedHook(Arc::new(move |point, key| {
+        if let Some(hook) = &previous {
+            (hook.0)(point, key);
+        }
+        if point == "provider-reanalyze" {
+            *hook_counts
+                .lock()
+                .expect("provider reanalyze counts")
+                .entry(key.to_string())
+                .or_default() += 1;
+        }
+    })));
+    Some(counts)
+}
+
+fn print_provider_reanalyze_diag(diag: &Option<ProviderReanalyzeDiag>) {
+    let Some(counts) = diag else { return };
+    let counts = counts.lock().expect("provider reanalyze counts");
+    let total: usize = counts.values().sum();
+    println!(
+        "provider-reanalyze: {total} fallback(s) across {} label(s)",
+        counts.len()
+    );
+    let mut sorted: Vec<_> = counts.iter().collect();
+    sorted.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    for (label, n) in sorted.into_iter().take(15) {
+        println!("  {n:4}  {label}");
+    }
+}
+
+fn install_depset_diag(flags: &mut GlobalFlags) -> Option<DepsetDiagHandle> {
+    if std::env::var_os("RAZEL_TFLOAD_DIAG_DEPSET").is_none() {
+        return None;
+    }
+    let counts = Arc::new(Mutex::new(DepsetDiag::default()));
+    let hook_counts = Arc::clone(&counts);
+    let previous = flags.sched_hook.clone();
+    flags.sched_hook = Some(SchedHook(Arc::new(move |point, key| {
+        if let Some(hook) = &previous {
+            (hook.0)(point, key);
+        }
+        if point == "depset" {
+            hook_counts.lock().expect("depset diag").record(key);
+        }
+    })));
+    Some(counts)
+}
+
+fn print_depset_diag(diag: &Option<DepsetDiagHandle>) {
+    let Some(counts) = diag else { return };
+    let counts = counts.lock().expect("depset diag");
+    println!(
+        "depset: {} call(s), input {} item(s), unique {} item(s), duplicate {} item(s), \
+         direct {} item(s), transitive {} depset(s), max input {}, max seen {}",
+        counts.calls,
+        counts.input,
+        counts.unique,
+        counts.duplicates,
+        counts.direct,
+        counts.transitive,
+        counts.max_input,
+        counts.max_seen
+    );
 }
 
 fn summarize(report: Vec<(String, Result<(), String>)>, total: usize) -> Result<(), String> {
@@ -121,8 +262,9 @@ fn summarize(report: Vec<(String, Result<(), String>)>, total: usize) -> Result<
     // RAZEL_TFLOAD_CLASS=<substr>: print the FIRST full error matching — the class-member
     // debugger for order-dependent classes the ONE probe can't reach standalone.
     if let Ok(pat) = std::env::var("RAZEL_TFLOAD_CLASS") {
-        if let Some((pkg, Err(e))) =
-            report.iter().find(|(_, r)| r.as_ref().is_err_and(|e| e.contains(&pat)))
+        if let Some((pkg, Err(e))) = report
+            .iter()
+            .find(|(_, r)| r.as_ref().is_err_and(|e| e.contains(&pat)))
         {
             println!("=== {pkg}: first `{pat}` member, full error ===\n{e}");
         }
@@ -145,10 +287,32 @@ fn summarize(report: Vec<(String, Result<(), String>)>, total: usize) -> Result<
     }
     let mut sorted: Vec<_> = classes.into_iter().collect();
     sorted.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
-    println!("tfload: {ok}/{total} packages load ({:.1}%)", 100.0 * ok as f64 / total as f64);
+    println!(
+        "tfload: {ok}/{total} packages load ({:.1}%)",
+        100.0 * ok as f64 / total as f64
+    );
     println!("top failure classes:");
     for (sig, (n, example)) in sorted.iter().take(15) {
         println!("  {n:4}  {sig}  (e.g. {example})");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depset_diag_aggregates_shape_events() {
+        let mut diag = DepsetDiag::default();
+        diag.record("direct=2 transitive=0 input=2 unique=2 dup=0 max_seen=2");
+        diag.record("direct=2 transitive=1 input=4 unique=3 dup=1 max_seen=3");
+
+        assert_eq!(diag.calls, 2);
+        assert_eq!(diag.input, 6);
+        assert_eq!(diag.unique, 5);
+        assert_eq!(diag.duplicates, 1);
+        assert_eq!(diag.max_input, 4);
+        assert_eq!(diag.max_seen, 3);
+    }
 }
