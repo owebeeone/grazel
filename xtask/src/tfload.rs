@@ -227,44 +227,89 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     summarize(report, total)
 }
 
-/// Coarse whole-corpus input fingerprint: the sorted package list + each package's BUILD file
-/// (size, mtime). NOTE: this does NOT yet track the `.bzl` closure a package loads — a real
-/// read-set fingerprint would. For a read-only corpus between runs it is sufficient; a
-/// stale-after-`.bzl`-edit miss is a known limitation of this first cut.
+/// Cache key = the package selection + options + a SOURCE fingerprint over every BUILD/`.bzl`
+/// under the corpus. Any source edit (incl. a loaded `.bzl`) changes the key → a miss → re-analyze
+/// — so the cache is SOUND for a read-only corpus. Two honest limits, both fine for tfload and
+/// noted for the general build-path cache: it does not catch a glob-affecting change to a
+/// NON-BUILD/`.bzl` file (e.g. a new `.cc`), and it uses size+mtime (a content edit that preserves
+/// both — rare — would be missed); a precise read-set + content hash is the follow-up.
 fn tfcache_fingerprint(ws: &Path, packages: &[String]) -> Digest {
     let mut buf = Vec::new();
-    buf.extend_from_slice(b"tfload-cache-v1\0");
+    buf.extend_from_slice(b"tfload-cache-v2\0");
     for pkg in packages {
         buf.extend_from_slice(pkg.as_bytes());
         buf.push(0);
-        for name in ["BUILD", "BUILD.bazel"] {
-            if let Ok(md) = std::fs::metadata(ws.join(pkg).join(name)) {
-                buf.extend_from_slice(&md.len().to_le_bytes());
-                if let Ok(m) = md.modified() {
-                    if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
-                        buf.extend_from_slice(&d.as_nanos().to_le_bytes());
-                    }
+    }
+    buf.push(0xff);
+    buf.extend_from_slice(source_fingerprint(&ws.join("tensorflow")).as_bytes());
+    Digest::of(&buf)
+}
+
+/// Fingerprint every `BUILD`/`BUILD.bazel`/`*.bzl` under `root` by (relpath, size, mtime), sorted.
+/// Non-source files are ignored. Iterative walk (no recursion).
+fn source_fingerprint(root: &Path) -> Digest {
+    let mut entries: Vec<(String, u64, u128)> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(e.path());
+                continue;
+            }
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name == "BUILD" || name == "BUILD.bazel" || name.ends_with(".bzl") {
+                if let Ok(md) = e.metadata() {
+                    let mtime = md
+                        .modified()
+                        .ok()
+                        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
+                    let path = e.path();
+                    let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+                    entries.push((rel, md.len(), mtime));
                 }
-                break;
             }
         }
+    }
+    entries.sort();
+    let mut buf = Vec::new();
+    for (rel, size, mtime) in &entries {
+        buf.extend_from_slice(rel.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(&size.to_le_bytes());
+        buf.extend_from_slice(&mtime.to_le_bytes());
     }
     Digest::of(&buf)
 }
 
-/// Cache file = `[ok_count: u64-le][taut snapshot bytes]`.
+/// Cache file = `[ok_count: u64-le][gzip(taut snapshot bytes)]`. The taut facts repeat paths and
+/// labels heavily, so deflate shrinks them a lot; the cost is paid on the slow miss, and gzip
+/// inflate on the hit is fast.
 fn encode_tfcache(ok_count: usize, targets: &[AnalyzedTarget]) -> Vec<u8> {
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+    let _ = enc.write_all(&razel_deps_engine::encode_snapshot(targets));
     let mut buf = (ok_count as u64).to_le_bytes().to_vec();
-    buf.extend_from_slice(&razel_deps_engine::encode_snapshot(targets));
+    buf.extend_from_slice(&enc.finish().unwrap_or_default());
     buf
 }
 
 fn decode_tfcache(bytes: &[u8]) -> Option<(usize, Vec<AnalyzedTarget>)> {
+    use std::io::Read;
     if bytes.len() < 8 {
         return None;
     }
     let ok = u64::from_le_bytes(bytes[..8].try_into().ok()?) as usize;
-    let targets = razel_deps_engine::decode_snapshot(&bytes[8..]).ok()?;
+    let mut snapshot = Vec::new();
+    flate2::read::GzDecoder::new(&bytes[8..]).read_to_end(&mut snapshot).ok()?;
+    let targets = razel_deps_engine::decode_snapshot(&snapshot).ok()?;
     Some((ok, targets))
 }
 
@@ -389,5 +434,31 @@ mod tests {
         assert_eq!(diag.transitive, 1);
         assert_eq!(diag.max_direct, 5);
         assert_eq!(diag.max_transitive, 1);
+    }
+
+    #[test]
+    fn source_fingerprint_changes_on_bzl_edit_not_on_unrelated_files() {
+        let dir = std::env::temp_dir().join(format!("razel-srcfp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pkg")).unwrap();
+        std::fs::write(dir.join("pkg/BUILD"), "filegroup(name='g')").unwrap();
+        std::fs::write(dir.join("pkg/defs.bzl"), "A = 1").unwrap();
+        let fp0 = source_fingerprint(&dir);
+
+        // Unrelated (non-BUILD/.bzl) files do NOT change the key.
+        std::fs::write(dir.join("pkg/notes.txt"), "hello").unwrap();
+        std::fs::write(dir.join("pkg/main.cc"), "int main(){}").unwrap();
+        assert_eq!(fp0, source_fingerprint(&dir), "non-source files are ignored");
+
+        // A loaded `.bzl` edit DOES (size + mtime move) — the caveat-1 fix.
+        std::fs::write(dir.join("pkg/defs.bzl"), "A = 2  # edited").unwrap();
+        let fp1 = source_fingerprint(&dir);
+        assert_ne!(fp0, fp1, "a .bzl edit must invalidate the cache key");
+
+        // …and a BUILD edit.
+        std::fs::write(dir.join("pkg/BUILD"), "filegroup(name='g2')").unwrap();
+        assert_ne!(fp1, source_fingerprint(&dir), "a BUILD edit must invalidate");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

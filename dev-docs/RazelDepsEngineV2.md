@@ -651,11 +651,23 @@ miniature.*
 gained `load_tree_report_with_targets` (the analyzed facts out of a tree load, via a `drive_tree`
 refactor; existing signatures intact). `tfload` got an opt-in `RAZEL_TFLOAD_CACHE=<dir>` path:
 miss → analyze + serialize all facts to a content-addressed file; hit → decode, skipping analysis.
-MEASURED (sample-256, 1 thread): cold **198907ms** → warm **465ms** ≈ **428×**, identical load
-verdict. Caveats (honest): the input fingerprint is coarse (BUILD size+mtime, not the `.bzl`
-closure — a stale-after-`.bzl`-edit miss is possible); and the cache is large (178 MB / 3459 facts,
-uncompressed taut) → compression / finer grain is a follow-up. But the incremental win — the whole
-reason "make it taut" mattered — is real and demonstrated end-to-end on the TF corpus.*
+MEASURED (sample-256, 1 thread): cold **~199s** → warm **2.2s** ≈ **91×**, identical load verdict —
+the incremental win, real and end-to-end on TF.*
+
+*Caveats — ADDRESSED (2026-06-13):*
+- *Soundness (was the serious one): the key is now a SOURCE fingerprint over every `BUILD`/`.bzl`
+  under the corpus (size+mtime), so a loaded-`.bzl` or BUILD edit invalidates it (unit-tested:
+  `source_fingerprint_changes_on_bzl_edit_not_on_unrelated_files`); it still hits an unchanged
+  corpus. The hit cost rose 465ms→2.2s — that's the whole-corpus walk, the price of soundness. Two
+  residual limits, fine for a read-only corpus and noted for the editable build-path cache: it
+  ignores glob-affecting changes to NON-`BUILD`/`.bzl` files, and uses size+mtime (not content). A
+  precise read-set + content hash (and a faster hit) is the follow-up.*
+- *Size: gzip the (highly repetitive) facts — **178 MB → 19 MB (~9×)**.*
+- *Granularity: whole-corpus all-or-nothing is DELIBERATE — it sidesteps the live-instance problem
+  (a partial cache where an un-cached package depends on a cached one needs live provider
+  instances, which the DDS-fact serialization cannot reconstruct — same blocker as the cross-worker
+  fallback below). Right for tfload/CI; true incremental is the build-path effort gated on the
+  live-instance/typed-provider work.*
 
 *Correction (2026-06-13): the cross-WORKER (cross-thread) fallback is NOT a clean taut slice. Read
 the path (`decls.rs` ~1083–1111): the 6-thread fallback re-analyzes because a dep's LIVE Starlark

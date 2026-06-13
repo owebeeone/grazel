@@ -17,3 +17,4 @@ razel-exec = { path = "../crates/razel-exec" } # S4b: cache for harness builds
 razel-deps-engine = { path = "../crates/razel-deps-engine" } # taut fact (de)serialization for the tfload cache
 razel-core = { path = "../crates/razel-core" } # content Digest for the tfload cache key
 serde_json = "1" # fetch R1: the repo lockfile writer (RazelFetchPlan §3)
+flate2 = "1" # tfload cache: compress the (highly repetitive) serialized facts
