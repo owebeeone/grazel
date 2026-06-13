@@ -579,7 +579,7 @@ pub(crate) fn razel_build_members(b: &mut GlobalsBuilder) {
         let registry = crate::registry::builtin_registry();
         let ty = ProviderTypeId::new(provider.as_str());
         let strs = |v: Value<'v>| -> Vec<Scalar> {
-            crate::values::extract_files(v).into_iter().map(Scalar::Str).collect()
+            crate::values::extract_files(v).into_iter().map(|f| Scalar::Str(f.into())).collect()
         };
         let mut captured: Vec<(String, FieldValue)> = Vec::new();
         for (field, value) in &fields {

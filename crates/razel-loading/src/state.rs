@@ -36,7 +36,7 @@ pub struct AnalyzedTarget {
 
 fn scalar_str(s: &Scalar) -> Option<String> {
     if let Scalar::Str(x) = s {
-        Some(x.clone())
+        Some(x.to_string())
     } else {
         None
     }
@@ -74,7 +74,7 @@ impl AnalyzedTarget {
         self.set_provider(
             ty,
             field,
-            FieldValue::Set(values.into_iter().map(Scalar::Str).collect()),
+            FieldValue::Set(values.into_iter().map(|v| Scalar::Str(v.into())).collect()),
         );
     }
 }

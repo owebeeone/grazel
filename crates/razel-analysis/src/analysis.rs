@@ -119,7 +119,7 @@ cc_library(name = "greet", srcs = ["greet.cc"], hdrs = ["greet.h"])
         let dds = wire_to_dds(&targets, InstanceId::SINGLE).unwrap();
         let key = TargetKey::new(InstanceId::SINGLE, Label::parse_canonical("//:greet").unwrap());
 
-        let want_set = |x: &str| FieldValue::Set([Scalar::Str(x.to_string())].into_iter().collect());
+        let want_set = |x: &str| FieldValue::Set([Scalar::Str(x.into())].into_iter().collect());
         // DefaultInfo.files = the archive; CcInfo.hdrs = the exported header.
         let di = dds.provider(&key, &ProviderTypeId::new("DefaultInfo")).unwrap();
         assert_eq!(di.get(&FieldId::new("files")), Some(&want_set("libgreet.a")));
@@ -144,7 +144,7 @@ cc_library(name = "util", srcs = ["util.cc"], hdrs = ["util.h"], deps = [":base"
         let own = dds.provider(&util, &cc).unwrap().get(&hdrs).unwrap();
         assert_eq!(*own, FieldValue::Set([Scalar::Str("util.h".into())].into_iter().collect()));
         let want: BTreeSet<Scalar> =
-            ["base.h", "util.h"].iter().map(|s| Scalar::Str(s.to_string())).collect();
+            ["base.h", "util.h"].iter().map(|s| Scalar::Str(s.to_string().into())).collect();
         assert_eq!(dds.fold_set(&util, &cc, &hdrs), want);
     }
 }

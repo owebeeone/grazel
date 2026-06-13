@@ -2,6 +2,59 @@
 //! and the logical id newtypes used as stable node identities (§2.1 / F11).
 
 use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
+
+// ── Istr: shared string slice (Arc<str>, value semantics) ────────────────────────────
+//
+// The analysis hot path (DDS folds, dep-DAG traversal) CLONES the same path / label strings
+// millions of times — a `sample` profile of the TF sweep put ~26% of eval in malloc/free,
+// almost all of it String churn. `Istr` wraps `Arc<str>`: `Clone` is a refcount bump (no
+// alloc), so the fold's per-step clones stop hitting malloc. Eq/Hash/Ord are VALUE-based
+// (derived) — no hash-cons table, hence NO process-global ambient state (AD2/F13) and
+// determinism is trivially preserved (`Ord` is the same byte order `String` had, so sorted
+// sets / the taut content `Digest` are unchanged). A per-Session interner could additionally
+// make Eq/Hash pointer ops (killing the memcmp half), but that needs threading the interner
+// through every construction site — deferred; not worth the ambient-state cost yet.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Istr(Arc<str>);
+
+impl Istr {
+    pub fn new(s: &str) -> Self {
+        Istr(Arc::from(s))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for Istr {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Istr {
+    fn from(s: &str) -> Self {
+        Istr(Arc::from(s))
+    }
+}
+impl From<String> for Istr {
+    fn from(s: String) -> Self {
+        Istr(Arc::from(s))
+    }
+}
+impl fmt::Display for Istr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl fmt::Debug for Istr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", &*self.0)
+    }
+}
 
 /// Content-addressed digest. F3: blake3 behind a newtype so the algorithm is swappable.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -70,9 +123,9 @@ pub enum NodeRef {
 /// it needs a repo map (Phase 2 follow-up / F6).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Label {
-    repo: String,
-    package: String,
-    name: String,
+    repo: Istr,
+    package: Istr,
+    name: Istr,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -88,13 +141,13 @@ impl std::error::Error for LabelError {}
 impl Label {
     /// `""` for the main repository.
     pub fn repository(&self) -> &str {
-        &self.repo
+        self.repo.as_str()
     }
     pub fn package_name(&self) -> &str {
-        &self.package
+        self.package.as_str()
     }
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.as_str()
     }
 
     /// Parse a canonical label: `@@repo//pkg:name`, `@repo//pkg:name`, `@repo`
@@ -113,9 +166,9 @@ impl Label {
                 // `@foo` shorthand → repo=foo, pkg="", name="foo".
                 None if rest.is_empty() => Err(err("empty repository name")),
                 None => Ok(Label {
-                    repo: rest.to_string(),
-                    package: String::new(),
-                    name: rest.to_string(),
+                    repo: rest.into(),
+                    package: "".into(),
+                    name: rest.into(),
                 }),
                 Some(idx) => {
                     let repo_name = &rest[..idx];
@@ -147,9 +200,9 @@ impl Label {
             return None;
         }
         Some(Label {
-            repo: repo.to_string(),
-            package,
-            name,
+            repo: repo.into(),
+            package: package.into(),
+            name: name.into(),
         })
     }
 }
@@ -167,6 +220,23 @@ impl fmt::Display for Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn istr_value_semantics_eq_ord_and_hashset_dedup() {
+        let a = Istr::new("tensorflow/core/lib");
+        let b = Istr::new(&String::from("tensorflow/core/lib")); // distinct source String
+        let c = Istr::new("tensorflow/core");
+        // Value equality (Arc<str> derives) — independent allocations, equal content.
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        // Deref reads as the underlying str.
+        assert_eq!(&*a, "tensorflow/core/lib");
+        // Ord is VALUE-based — determinism for sorted sets / the taut content Digest.
+        assert!(c < a, "'tensorflow/core' < 'tensorflow/core/lib' by value");
+        // Hash agrees with Eq: equal Istrs collapse in a HashSet.
+        let set: std::collections::HashSet<Istr> = [a.clone(), b, c].into_iter().collect();
+        assert_eq!(set.len(), 2);
+    }
 
     fn lbl(s: &str) -> Label {
         Label::parse_canonical(s).unwrap()

@@ -27,7 +27,7 @@ fn texts(xs: &[String]) -> Cbor {
 
 fn scalar_cbor(s: &Scalar) -> Cbor {
     match s {
-        Scalar::Str(x) => Cbor::Array(vec![Cbor::Int(0), Cbor::Text(x.clone())]),
+        Scalar::Str(x) => Cbor::Array(vec![Cbor::Int(0), Cbor::Text(x.to_string())]),
         Scalar::Int(n) => Cbor::Array(vec![Cbor::Int(1), Cbor::Int(*n)]),
         Scalar::Bool(b) => Cbor::Array(vec![Cbor::Int(2), Cbor::Bool(*b)]),
     }
@@ -158,7 +158,7 @@ fn texts_of(c: &Cbor) -> R<Vec<String>> {
 fn scalar_of(c: &Cbor) -> R<Scalar> {
     let a = as_array(c)?;
     match as_int(at(a, 0)?)? {
-        0 => Ok(Scalar::Str(as_text(at(a, 1)?)?)),
+        0 => Ok(Scalar::Str(as_text(at(a, 1)?)?.into())),
         1 => Ok(Scalar::Int(as_int(at(a, 1)?)?)),
         2 => Ok(Scalar::Bool(as_bool(at(a, 1)?)?)),
         t => Err(format!("fact: bad scalar tag {t}")),

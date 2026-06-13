@@ -25,7 +25,7 @@ pub fn target_key(instance: InstanceId, name: &str) -> Result<TargetKey, String>
 }
 
 fn set(xs: &[String]) -> FieldValue {
-    FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.clone())).collect())
+    FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.clone().into())).collect())
 }
 
 /// A fresh fact store with the registry's provider schemas registered (C3a.2: the registry is the
@@ -113,7 +113,7 @@ pub(crate) fn fold_dep_fields(dds: &Dds, root: &TargetKey) -> Vec<(String, Vec<S
     use crate::registry::{FoldPolicy, builtin_registry};
     use razel_dds::{DdsRead, FieldKind};
     let to_strs = |xs: Vec<Scalar>| -> Vec<String> {
-        xs.into_iter().filter_map(|s| if let Scalar::Str(x) = s { Some(x) } else { None }).collect()
+        xs.into_iter().filter_map(|s| if let Scalar::Str(x) = s { Some(x.to_string()) } else { None }).collect()
     };
     let registry = builtin_registry();
     let mut out = Vec::new();
@@ -139,10 +139,10 @@ mod tests {
     use razel_dds::DdsRead;
 
     fn sset(xs: &[&str]) -> FieldValue {
-        FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+        FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string().into())).collect())
     }
     fn odep(xs: &[&str]) -> FieldValue {
-        FieldValue::OrderedDepset(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+        FieldValue::OrderedDepset(xs.iter().map(|s| Scalar::Str(s.to_string().into())).collect())
     }
     fn at(name: &str, deps: &[&str], hdrs: &[&str], cj: &[&str]) -> AnalyzedTarget {
         let mut t = AnalyzedTarget {
@@ -155,7 +155,7 @@ mod tests {
         t
     }
     fn strs(xs: Vec<Scalar>) -> Vec<String> {
-        xs.into_iter().map(|s| if let Scalar::Str(x) = s { x } else { unreachable!() }).collect()
+        xs.into_iter().map(|s| if let Scalar::Str(x) = s { x.to_string() } else { unreachable!() }).collect()
     }
 
     #[test]

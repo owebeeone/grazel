@@ -115,10 +115,10 @@ mod tests {
         ProviderTypeId::new("DefaultInfo")
     }
     fn set(xs: &[&str]) -> FieldValue {
-        FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+        FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string().into())).collect())
     }
     fn want(xs: &[&str]) -> BTreeSet<Scalar> {
-        xs.iter().map(|s| Scalar::Str(s.to_string())).collect()
+        xs.iter().map(|s| Scalar::Str(s.to_string().into())).collect()
     }
 
     #[test]

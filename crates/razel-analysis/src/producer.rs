@@ -131,7 +131,7 @@ fn target_key(instance: InstanceId, name: &str) -> Result<TargetKey, String> {
 }
 
 fn str_set(xs: &[String]) -> FieldValue {
-    FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.clone())).collect())
+    FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.clone().into())).collect())
 }
 
 #[cfg(test)]
@@ -140,7 +140,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn set(xs: &[&str]) -> FieldValue {
-        FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+        FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string().into())).collect())
     }
     fn key(n: &str) -> TargetKey {
         TargetKey::new(InstanceId::SINGLE, Label::parse_canonical(&format!("//:{n}")).unwrap())
@@ -177,7 +177,7 @@ mod tests {
         );
         // Transitive headers = the fold over deps: {base.h, util.h} (propagation-as-query).
         let want: BTreeSet<Scalar> =
-            ["base.h", "util.h"].iter().map(|s| Scalar::Str(s.to_string())).collect();
+            ["base.h", "util.h"].iter().map(|s| Scalar::Str(s.to_string().into())).collect();
         assert_eq!(dds.fold_set(&key("util"), &cci, &hdrs), want);
     }
 
@@ -208,7 +208,7 @@ mod tests {
         );
         let want: BTreeSet<Scalar> = ["libbase_rs.rlib", "libutil_rs.rlib"]
             .iter()
-            .map(|s| Scalar::Str(s.to_string()))
+            .map(|s| Scalar::Str(s.to_string().into()))
             .collect();
         assert_eq!(dds.fold_set(&key("util_rs"), &crate_info, &rlibs), want);
         assert_eq!(

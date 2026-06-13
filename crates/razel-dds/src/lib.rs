@@ -14,8 +14,8 @@
 //! as additive enum variants, so nothing here is a migration. Providers are **atomic facts**:
 //! one per `(TargetKey, ProviderTypeId)`, merged field-by-field on re-assert.
 
-use razel_core::Label;
-use std::collections::{BTreeMap, BTreeSet};
+use razel_core::{Istr, Label};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 // ── Identity (§1) ────────────────────────────────────────────────────────────────
 
@@ -67,10 +67,12 @@ impl FieldId {
 
 // ── Value algebra (§2/§3) ──────────────────────────────────────────────────────────
 
-/// A scalar leaf — the confluent arm of the closed `FieldType` (§2).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+/// A scalar leaf — the confluent arm of the closed `FieldType` (§2). `Str` is an [`Istr`]
+/// (hash-consed) so the dep-folds clone and dedup it for a refcount bump + pointer compare,
+/// not a heap alloc + memcmp. `Hash` (added with `Istr`) lets the folds dedup via `HashSet`.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Scalar {
-    Str(String),
+    Str(Istr),
     Int(i64),
     Bool(bool),
 }
@@ -221,8 +223,11 @@ pub trait DdsRead {
     /// propagation **query** — declared once here, ON THE READ INTERFACE, so every consumer (and
     /// any `&dyn DdsRead`) gets it; never re-implemented per rule.
     fn fold_set(&self, root: &TargetKey, ty: &ProviderTypeId, field: &FieldId) -> BTreeSet<Scalar> {
+        // acc stays a BTreeSet: fold_set's contract is the sorted union (Istr Ord is value-based,
+        // so order is deterministic). visited is membership-only → HashSet (Istr/TargetKey Eq+Hash
+        // are O(1) pointer ops now, so no memcmp on the cycle guard).
         let mut acc = BTreeSet::new();
-        let mut visited = BTreeSet::new();
+        let mut visited = HashSet::new();
         let mut stack = vec![root.clone()];
         while let Some(t) = stack.pop() {
             if !visited.insert(t.clone()) {
@@ -243,8 +248,8 @@ pub trait DdsRead {
     /// interface so every consumer gets it; never re-implemented per rule.
     fn fold_depset(&self, root: &TargetKey, ty: &ProviderTypeId, field: &FieldId) -> Vec<Scalar> {
         let mut acc = Vec::new();
-        let mut seen = BTreeSet::new(); // element dedup (first occurrence wins)
-        let mut visited = BTreeSet::new(); // node dedup + cycle guard
+        let mut seen = HashSet::new(); // element dedup (first occurrence wins) — O(1) pointer ops
+        let mut visited = HashSet::new(); // node dedup + cycle guard
         let mut stack = vec![root.clone()];
         while let Some(t) = stack.pop() {
             if !visited.insert(t.clone()) {
@@ -280,8 +285,8 @@ pub trait DdsRead {
         prune: &FieldId,
     ) -> Vec<Scalar> {
         let mut acc = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut visited = BTreeSet::new();
+        let mut seen = HashSet::new();
+        let mut visited = HashSet::new();
         let mut stack = vec![root.clone()];
         while let Some(t) = stack.pop() {
             if !visited.insert(t.clone()) {
@@ -407,7 +412,7 @@ mod tests {
         ProviderTypeId::new("CcInfo")
     }
     fn set(xs: &[&str]) -> FieldValue {
-        FieldValue::Set(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+        FieldValue::Set(xs.iter().map(|s| Scalar::Str((*s).into())).collect())
     }
     /// A `Dds` with a `CcInfo` schema registered for the fields the tests assert.
     fn dds() -> Dds {
@@ -557,7 +562,7 @@ mod tests {
         ProviderTypeId::new("JavaInfo")
     }
     fn odep(xs: &[&str]) -> FieldValue {
-        FieldValue::OrderedDepset(xs.iter().map(|s| Scalar::Str(s.to_string())).collect())
+        FieldValue::OrderedDepset(xs.iter().map(|s| Scalar::Str((*s).into())).collect())
     }
     /// A `Dds` with a `JavaInfo.compile_jars` OrderedDepset field.
     fn java_dds() -> Dds {
@@ -573,7 +578,7 @@ mod tests {
         d.fold_depset(&tk(root), &java(), &FieldId::new("compile_jars"))
             .iter()
             .map(|s| match s {
-                Scalar::Str(x) => x.clone(),
+                Scalar::Str(x) => x.to_string(),
                 _ => String::new(),
             })
             .collect()
@@ -618,7 +623,7 @@ mod tests {
         let got: Vec<String> = d
             .fold_depset_pruned(&tk("//:app"), &java(), &rj, &nl)
             .iter()
-            .map(|s| if let Scalar::Str(x) = s { x.clone() } else { String::new() })
+            .map(|s| if let Scalar::Str(x) = s { x.to_string() } else { String::new() })
             .collect();
         assert_eq!(got, ["app.jar"], "neverlink api + its hidden subtree pruned from runtime");
     }
