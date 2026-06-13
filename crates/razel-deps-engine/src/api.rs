@@ -173,6 +173,9 @@ pub struct SnapshotCommitted {
     /// (`facts::snapshot_fingerprint`). The `SnapshotId` is the in-run handle; this `Digest` is
     /// the cross-run / cross-worker cache key (REQ-DEPSV2-012/013).
     pub content: Digest,
+    /// True when this snapshot was served from the content-addressed cache (taut bytes decoded)
+    /// rather than freshly analyzed — the early-cutoff / incremental win (REQ-DEPSV2-027).
+    pub from_cache: bool,
 }
 
 #[derive(Debug, Clone)]

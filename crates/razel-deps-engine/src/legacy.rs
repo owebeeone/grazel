@@ -9,6 +9,7 @@
 //! intentionally one-way-degradable adapter of §6).
 
 use crate::api::*;
+use razel_core::Digest;
 use razel_loading::{AnalyzedTarget, GlobalFlags, SchedHook};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +23,10 @@ struct EngineState {
     next_snapshot: u64,
     subscribers: Vec<EventSink>,
     snapshots: HashMap<u64, Arc<Vec<AnalyzedTarget>>>,
+    /// Content-addressed cache: input `Digest` → the committed snapshot's taut bytes. A hit serves
+    /// the result by decoding (no Starlark, no re-analysis) — the in-process embryo of the
+    /// persistent cross-invocation cache.
+    cache: HashMap<Digest, Vec<u8>>,
 }
 
 /// The legacy loader behind the message API. `Send + Sync` so a daemon edge can share it.
@@ -41,6 +46,17 @@ impl LegacyDepsEngine {
         self.state.lock().expect("engine state").snapshots.get(&id.0).cloned()
     }
 
+    /// Commit a fact set as an immutable, content-addressed snapshot; return its in-run handle and
+    /// content `Digest`.
+    fn commit(&self, targets: Vec<AnalyzedTarget>) -> (SnapshotId, Digest) {
+        let content = crate::facts::snapshot_fingerprint(&targets);
+        let mut st = self.state.lock().expect("engine state");
+        let id = st.next_snapshot;
+        st.next_snapshot += 1;
+        st.snapshots.insert(id, Arc::new(targets));
+        (SnapshotId(id), content)
+    }
+
     fn evaluate(&self, req: EvaluateRequest) -> Result<CommandToken, EngineSendError> {
         let command_id = req.command_id;
         // Take the epoch and a snapshot of current subscribers, then release the lock so the
@@ -58,8 +74,54 @@ impl LegacyDepsEngine {
             EngineEvent::CommandAccepted(header(&seq, command_id, epoch, None)),
         );
 
-        // Install a translating SchedHook: every loader (point, key) becomes a typed Diagnostic.
-        // The closure is Send + Sync — it captures only Arc/Copy state, never the engine lock.
+        let (root_name, src) = match &req.root {
+            EvalRoot::BuildSource { name, src } => (name.clone(), src.clone()),
+        };
+        let _ = root_name; // reserved: multi-root snapshots name their root (migration §5)
+
+        // Cache key = the inputs that determine the result: the source + the SEMANTIC options
+        // digest (scheduling/observability options excluded — REQ-DEPSV2-023, so a thread-count
+        // change still hits the cache).
+        let cache_key = {
+            let mut input = src.clone().into_bytes();
+            input.extend_from_slice(&options_digest.0.to_le_bytes());
+            Digest::of(&input)
+        };
+
+        let emit_ok = |snapshot: SnapshotId, content: Digest, from_cache: bool| {
+            emit(
+                &sinks,
+                EngineEvent::SnapshotCommitted(SnapshotCommitted {
+                    header: header(&seq, command_id, epoch, Some(snapshot)),
+                    snapshot,
+                    options_digest,
+                    content,
+                    from_cache,
+                }),
+            );
+            emit(
+                &sinks,
+                EngineEvent::CommandFinished(CommandFinished {
+                    header: header(&seq, command_id, epoch, Some(snapshot)),
+                    outcome: CommandOutcome::Ok { snapshot },
+                }),
+            );
+        };
+
+        // Cache HIT: decode the stored taut bytes — no Starlark, no re-analysis, no SchedHook.
+        let cached = self.state.lock().expect("engine state").cache.get(&cache_key).cloned();
+        if let Some(bytes) = cached {
+            if let Ok(targets) = crate::facts::decode_snapshot(&bytes) {
+                let (snapshot, content) = self.commit(targets);
+                emit_ok(snapshot, content, true);
+                return Ok(CommandToken { command_id, epoch });
+            }
+            // A corrupt entry falls through to a fresh analysis.
+        }
+
+        // MISS: analyze with the translating SchedHook (every loader (point, key) → typed
+        // Diagnostic; the closure is Send + Sync, capturing only Arc/Copy state), then cache the
+        // serialized snapshot.
         let mut flags: GlobalFlags = req.options.semantic.clone();
         {
             let sinks = sinks.clone();
@@ -77,38 +139,15 @@ impl LegacyDepsEngine {
             })));
         }
 
-        let (root_name, src) = match &req.root {
-            EvalRoot::BuildSource { name, src } => (name.clone(), src.clone()),
-        };
-        let _ = root_name; // reserved: multi-root snapshots name their root (migration §5)
-
         match razel_loading::analyze_bazel_with(&src, flags) {
             Ok(targets) => {
-                // Content-address the committed facts via taut (the cache/cross-worker key).
-                let content = crate::facts::snapshot_fingerprint(&targets);
-                let snapshot = {
-                    let mut st = self.state.lock().expect("engine state");
-                    let id = st.next_snapshot;
-                    st.next_snapshot += 1;
-                    st.snapshots.insert(id, Arc::new(targets));
-                    SnapshotId(id)
-                };
-                emit(
-                    &sinks,
-                    EngineEvent::SnapshotCommitted(SnapshotCommitted {
-                        header: header(&seq, command_id, epoch, Some(snapshot)),
-                        snapshot,
-                        options_digest,
-                        content,
-                    }),
-                );
-                emit(
-                    &sinks,
-                    EngineEvent::CommandFinished(CommandFinished {
-                        header: header(&seq, command_id, epoch, Some(snapshot)),
-                        outcome: CommandOutcome::Ok { snapshot },
-                    }),
-                );
+                self.state
+                    .lock()
+                    .expect("engine state")
+                    .cache
+                    .insert(cache_key, crate::facts::encode_snapshot(&targets));
+                let (snapshot, content) = self.commit(targets);
+                emit_ok(snapshot, content, false);
             }
             Err(message) => {
                 emit(

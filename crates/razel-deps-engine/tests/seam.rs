@@ -156,3 +156,53 @@ fn options_digest_tracks_semantic_options_not_scheduling() {
         "threads + event profile are scheduling-only — they must NOT change the digest"
     );
 }
+
+/// REQ-DEPSV2-027 (early cutoff / incremental): identical inputs serve from the content-addressed
+/// cache — the second evaluation DECODES the taut snapshot instead of re-running Starlark. The
+/// "second run is fast" win, in miniature: same facts, same content digest, and the loader's
+/// analysis diagnostics appear only on the first (miss), never the cache hit.
+#[test]
+fn identical_inputs_serve_from_the_taut_cache() {
+    let engine = LegacyDepsEngine::new();
+
+    let sub1 = engine.subscribe();
+    evaluate(&engine, 1);
+    let first = sub1.drain();
+
+    let sub2 = engine.subscribe();
+    evaluate(&engine, 2);
+    let second = sub2.drain();
+
+    let committed = |events: &[EngineEvent]| {
+        events
+            .iter()
+            .find_map(|e| match e {
+                EngineEvent::SnapshotCommitted(s) => Some((s.from_cache, s.snapshot, s.content)),
+                _ => None,
+            })
+            .expect("a snapshot was committed")
+    };
+    let (miss_cached, miss_snap, miss_content) = committed(&first);
+    let (hit_cached, hit_snap, hit_content) = committed(&second);
+
+    assert!(!miss_cached, "first eval is a cache MISS — freshly analyzed");
+    assert!(hit_cached, "second eval is a cache HIT — served from taut bytes");
+    assert_eq!(miss_content, hit_content, "the cached snapshot is byte-identical (same digest)");
+
+    // A cache hit ran no analysis → no loader SchedHook diagnostics on the second eval.
+    assert!(
+        first.iter().any(|e| matches!(e, EngineEvent::Diagnostic(_))),
+        "the miss analyzes (emits the depset diagnostic)"
+    );
+    assert!(
+        !second.iter().any(|e| matches!(e, EngineEvent::Diagnostic(_))),
+        "the hit decodes — no analysis, no diagnostics"
+    );
+
+    // …and the decoded facts equal the freshly-analyzed ones.
+    assert_eq!(
+        engine.snapshot(miss_snap).unwrap(),
+        engine.snapshot(hit_snap).unwrap(),
+        "cache-hit facts round-trip equal to the analyzed facts"
+    );
+}

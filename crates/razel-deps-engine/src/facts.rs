@@ -86,17 +86,38 @@ pub fn target_fingerprint(t: &AnalyzedTarget) -> Digest {
     Digest::of(&encode_target(t))
 }
 
-/// Content fingerprint of a committed snapshot (the ordered fact set) — the basis for a
-/// content-addressed `SnapshotId` and the persistent-cache key. Length-prefixed so distinct fact
-/// boundaries cannot alias.
-pub fn snapshot_fingerprint(targets: &[AnalyzedTarget]) -> Digest {
+/// Canonical taut bytes for a whole committed snapshot (the ordered fact set) — the stored form
+/// of the content-addressed cache. Length-prefixed so distinct fact boundaries cannot alias.
+pub fn encode_snapshot(targets: &[AnalyzedTarget]) -> Vec<u8> {
     let mut buf = Vec::new();
     for t in targets {
         let bytes = encode_target(t);
         buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
         buf.extend_from_slice(&bytes);
     }
-    Digest::of(&buf)
+    buf
+}
+
+/// Content fingerprint of a committed snapshot — the basis for a content-addressed `SnapshotId`
+/// and the cache key.
+pub fn snapshot_fingerprint(targets: &[AnalyzedTarget]) -> Digest {
+    Digest::of(&encode_snapshot(targets))
+}
+
+/// Reconstruct a whole snapshot from its taut bytes (the cache-hit / cross-worker-load path).
+pub fn decode_snapshot(bytes: &[u8]) -> R<Vec<AnalyzedTarget>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let len_end = i + 8;
+        let len_bytes = bytes.get(i..len_end).ok_or("snapshot: truncated length")?;
+        let len = u64::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+        let fact_end = len_end + len;
+        let fact = bytes.get(len_end..fact_end).ok_or("snapshot: truncated fact")?;
+        out.push(decode_target(fact)?);
+        i = fact_end;
+    }
+    Ok(out)
 }
 
 // ---- decode (the round-trip inverse) --------------------------------------------

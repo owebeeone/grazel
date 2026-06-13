@@ -639,8 +639,23 @@ own source: `ObjectCodec.serialize(.., CodedOutputStream)` → `PackedFingerprin
 scheduler: (a) serialized facts are `Send` bytes → a worker reads another's frozen result instead
 of re-analyzing the shared spine (the measured ~5000 6-thread re-analysis fallbacks); (b) the
 `Digest` keys a persistent cross-invocation cache → the second run is near-instant (why Bazel is
-fast incrementally). Next: route depset construction through interned fact ids; then the
-fingerprint store + cross-worker fact transfer.*
+fast incrementally).*
+
+*Status (2026-06-13): content-addressed CACHE mechanism LANDED in `LegacyDepsEngine` — an
+`Evaluate` whose (source + semantic-options) `Digest` is already cached DECODES the taut snapshot
+instead of re-running Starlark (`from_cache` on `SnapshotCommitted`; tested: the hit emits no
+analysis diagnostics and yields byte-identical facts). This is the "second run is fast" win in
+miniature. HONEST SCOPE: it's the single-`BUILD`-source engine path — it does NOT yet speed up
+`tfload` (which rides the multi-package loader, not this engine). The `tfload` number needs the
+cache hooked into `load_tree_report` with input-file fingerprinting (next slice).*
+
+*Correction (2026-06-13): the cross-WORKER (cross-thread) fallback is NOT a clean taut slice. Read
+the path (`decls.rs` ~1083–1111): the 6-thread fallback re-analyzes because a dep's LIVE Starlark
+provider instances (for `dep[Provider]`) are harvested into the shared Session only at the
+producing worker's whole-package freeze. The taut fact codec serializes the DDS PROJECTION
+(scalars/sets/depsets) — lossy for arbitrary provider fields — so it cannot reconstruct those live
+instances. That fix is a threading/freeze-timing change (per-target freeze-and-publish) or a full
+Starlark-value serializer, NOT this codec. Taut's clean, codec-sufficient win is the cache.*
 
 1. Add the message API types and `LegacyDepsEngine`.
 2. Convert `SchedHook` tests to assert typed events via the adapter, keeping the

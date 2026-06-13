@@ -12,7 +12,10 @@ pub mod api;
 pub mod facts;
 pub mod legacy;
 
-pub use facts::{decode_target, encode_target, snapshot_fingerprint, target_fingerprint};
+pub use facts::{
+    decode_snapshot, decode_target, encode_snapshot, encode_target, snapshot_fingerprint,
+    target_fingerprint,
+};
 
 pub use api::{
     ApiVersion, CommandFinished, CommandId, CommandOutcome, CommandToken, DiagnosticCode,
