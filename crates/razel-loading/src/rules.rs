@@ -991,6 +991,31 @@ pub fn load_tree_report_with_threads(
     asts: Vec<(String, starlark::syntax::AstModule)>,
     threads: usize,
 ) -> (Vec<(String, Result<(), String>)>, Vec<String>) {
+    let (_session, report, loaded) = drive_tree(root, flags, packages, asts, threads);
+    (report, loaded)
+}
+
+/// Like [`load_tree_report_with_threads`], plus every analyzed target (the Session `results`
+/// values) — the input to taut fact serialization and the content-addressed cache.
+pub fn load_tree_report_with_targets(
+    root: &Path,
+    flags: GlobalFlags,
+    packages: &[String],
+    asts: Vec<(String, starlark::syntax::AstModule)>,
+    threads: usize,
+) -> (Vec<(String, Result<(), String>)>, Vec<String>, Vec<AnalyzedTarget>) {
+    let (session, report, loaded) = drive_tree(root, flags, packages, asts, threads);
+    let targets = session.results.borrow().values().cloned().collect();
+    (report, loaded, targets)
+}
+
+fn drive_tree(
+    root: &Path,
+    flags: GlobalFlags,
+    packages: &[String],
+    asts: Vec<(String, starlark::syntax::AstModule)>,
+    threads: usize,
+) -> (Session, Vec<(String, Result<(), String>)>, Vec<String>) {
     let session = Session::new(Some(root.to_path_buf()), flags);
     session.ast_cache.borrow_mut().extend(asts);
     if threads <= 1 {
@@ -999,7 +1024,7 @@ pub fn load_tree_report_with_threads(
             .map(|pkg| (pkg.clone(), load_package_entry(&session, pkg)))
             .collect();
         let loaded = loaded_done(&session);
-        return (report, loaded);
+        return (session, report, loaded);
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(vec![None; packages.len()]);
@@ -1060,7 +1085,7 @@ pub fn load_tree_report_with_threads(
         .zip(results.into_iter().map(|r| r.unwrap_or(Ok(()))))
         .collect();
     let loaded = loaded_done(&session);
-    (report, loaded)
+    (session, report, loaded)
 }
 
 /// All packages the session finished loading (deps included) — the spine list. The wait

@@ -2238,6 +2238,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "razel-build",
+ "razel-core",
+ "razel-deps-engine",
  "razel-exec",
  "razel-loading",
  "razel-parity",

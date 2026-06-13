@@ -645,9 +645,17 @@ fast incrementally).*
 `Evaluate` whose (source + semantic-options) `Digest` is already cached DECODES the taut snapshot
 instead of re-running Starlark (`from_cache` on `SnapshotCommitted`; tested: the hit emits no
 analysis diagnostics and yields byte-identical facts). This is the "second run is fast" win in
-miniature. HONEST SCOPE: it's the single-`BUILD`-source engine path — it does NOT yet speed up
-`tfload` (which rides the multi-package loader, not this engine). The `tfload` number needs the
-cache hooked into `load_tree_report` with input-file fingerprinting (next slice).*
+miniature.*
+
+*Status (2026-06-13): WHOLE-CORPUS loader cache LANDED — the real `tfload` number. `razel-loading`
+gained `load_tree_report_with_targets` (the analyzed facts out of a tree load, via a `drive_tree`
+refactor; existing signatures intact). `tfload` got an opt-in `RAZEL_TFLOAD_CACHE=<dir>` path:
+miss → analyze + serialize all facts to a content-addressed file; hit → decode, skipping analysis.
+MEASURED (sample-256, 1 thread): cold **198907ms** → warm **465ms** ≈ **428×**, identical load
+verdict. Caveats (honest): the input fingerprint is coarse (BUILD size+mtime, not the `.bzl`
+closure — a stale-after-`.bzl`-edit miss is possible); and the cache is large (178 MB / 3459 facts,
+uncompressed taut) → compression / finer grain is a follow-up. But the incremental win — the whole
+reason "make it taut" mattered — is real and demonstrated end-to-end on the TF corpus.*
 
 *Correction (2026-06-13): the cross-WORKER (cross-thread) fallback is NOT a clean taut slice. Read
 the path (`decls.rs` ~1083–1111): the 6-thread fallback re-analyzes because a dep's LIVE Starlark

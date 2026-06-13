@@ -40,7 +40,7 @@ pub use fetch::{AttrV, RepoSpec, extract_workspace_repos};
 pub use rules::{
     analyze_bazel, analyze_bazel_with, analyze_starlark, analyze_workspace, analyze_workspace_with,
     load_tree_report, load_tree_report_prepared, load_tree_report_seeded,
-    load_tree_report_with_threads, prepare_build_asts,
+    load_tree_report_with_targets, load_tree_report_with_threads, prepare_build_asts,
 };
 pub use state::{AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags, SchedHook};
 pub use workspace::{e_mode_guard, find_workspace_root, resolve_build_file};

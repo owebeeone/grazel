@@ -2,11 +2,13 @@
 //! one shared session, and report the coverage curve + the top failure classes — the
 //! checkpoint-3 yardstick. A package = a directory with a BUILD file.
 
+use razel_core::Digest;
 use razel_loading::{
-    GlobalFlags, SchedHook, load_tree_report, load_tree_report_seeded, prepare_build_asts,
+    AnalyzedTarget, GlobalFlags, SchedHook, load_tree_report, load_tree_report_seeded,
+    load_tree_report_with_targets, prepare_build_asts,
 };
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 type ProviderReanalyzeDiag = Arc<Mutex<BTreeMap<String, usize>>>;
@@ -166,6 +168,53 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
         print_depset_diag(&depset_diag);
         return summarize(report, packages.len());
     }
+    // RAZEL_TFLOAD_CACHE=<dir>: the whole-corpus content-addressed taut cache. A second run over an
+    // unchanged corpus DECODES the serialized facts instead of re-analyzing — the incremental win.
+    // Opt-in; the default sweep below is unchanged.
+    if let Some(cache_dir) = std::env::var_os("RAZEL_TFLOAD_CACHE") {
+        let cache_dir = PathBuf::from(cache_dir);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let cache_file = cache_dir.join(format!("{}.taut", tfcache_fingerprint(&ws, &packages).to_hex()));
+        // HIT: decode the serialized facts — no analysis, no Starlark.
+        if let Ok(bytes) = std::fs::read(&cache_file) {
+            let t = std::time::Instant::now();
+            if let Some((ok_count, targets)) = decode_tfcache(&bytes) {
+                println!(
+                    "phases: parallel read+parse {parse_ms}ms, eval {}ms (FROM CACHE: {} facts decoded)",
+                    t.elapsed().as_millis(),
+                    targets.len()
+                );
+                println!(
+                    "tfload: {ok_count}/{total} packages load ({:.1}%) [cached]",
+                    100.0 * ok_count as f64 / total.max(1) as f64
+                );
+                return Ok(());
+            }
+            // corrupt entry → fall through and re-analyze
+        }
+        // MISS: analyze, then serialize the facts to the cache.
+        let load_threads = std::env::var("RAZEL_LOAD_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(6)
+            });
+        let t1 = std::time::Instant::now();
+        let (report, _loaded, targets) =
+            load_tree_report_with_targets(&ws, flags, &packages, asts, load_threads);
+        let eval_ms = t1.elapsed().as_millis();
+        let ok_count = report.iter().filter(|(_, r)| r.is_ok()).count();
+        let bytes = encode_tfcache(ok_count, &targets);
+        let wrote = bytes.len();
+        let _ = std::fs::write(&cache_file, bytes);
+        println!(
+            "phases: parallel read+parse {parse_ms}ms, eval {eval_ms}ms (cache MISS → wrote {} facts, {wrote} bytes)",
+            targets.len()
+        );
+        print_provider_reanalyze_diag(&provider_reanalyze_diag);
+        print_depset_diag(&depset_diag);
+        return summarize(report, total);
+    }
     let t1 = std::time::Instant::now();
     let (report, loaded) = load_tree_report_seeded(&ws, flags, &packages, asts);
     let _ = std::fs::write(&spine_path, loaded.join("\n"));
@@ -176,6 +225,47 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     print_provider_reanalyze_diag(&provider_reanalyze_diag);
     print_depset_diag(&depset_diag);
     summarize(report, total)
+}
+
+/// Coarse whole-corpus input fingerprint: the sorted package list + each package's BUILD file
+/// (size, mtime). NOTE: this does NOT yet track the `.bzl` closure a package loads — a real
+/// read-set fingerprint would. For a read-only corpus between runs it is sufficient; a
+/// stale-after-`.bzl`-edit miss is a known limitation of this first cut.
+fn tfcache_fingerprint(ws: &Path, packages: &[String]) -> Digest {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"tfload-cache-v1\0");
+    for pkg in packages {
+        buf.extend_from_slice(pkg.as_bytes());
+        buf.push(0);
+        for name in ["BUILD", "BUILD.bazel"] {
+            if let Ok(md) = std::fs::metadata(ws.join(pkg).join(name)) {
+                buf.extend_from_slice(&md.len().to_le_bytes());
+                if let Ok(m) = md.modified() {
+                    if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+                        buf.extend_from_slice(&d.as_nanos().to_le_bytes());
+                    }
+                }
+                break;
+            }
+        }
+    }
+    Digest::of(&buf)
+}
+
+/// Cache file = `[ok_count: u64-le][taut snapshot bytes]`.
+fn encode_tfcache(ok_count: usize, targets: &[AnalyzedTarget]) -> Vec<u8> {
+    let mut buf = (ok_count as u64).to_le_bytes().to_vec();
+    buf.extend_from_slice(&razel_deps_engine::encode_snapshot(targets));
+    buf
+}
+
+fn decode_tfcache(bytes: &[u8]) -> Option<(usize, Vec<AnalyzedTarget>)> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let ok = u64::from_le_bytes(bytes[..8].try_into().ok()?) as usize;
+    let targets = razel_deps_engine::decode_snapshot(&bytes[8..]).ok()?;
+    Some((ok, targets))
 }
 
 fn install_provider_reanalyze_diag(flags: &mut GlobalFlags) -> Option<ProviderReanalyzeDiag> {
