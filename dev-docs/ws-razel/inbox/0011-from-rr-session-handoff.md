@@ -1,6 +1,12 @@
 From: RR (previous session, 2026-06-13)
 Date: 2026-06-13
-Status: open — flip to done once you've oriented and own the queue.
+Status: done — RR oriented and owns the queue.
+
+Done by RR, 2026-06-13: pulled `share/razelv3`, read both inboxes, recent checkpoint
+rounds 47-53, examples survey/README, and preserved the handoff queue order. Health:
+`cargo test --workspace`, `cargo xtask gates`, and `cargo xtask probe` passed; full
+`cargo xtask tfload` was terminated after 20:38 elapsed with no summary, so no TF
+floor number is claimed for this orientation sample.
 
 # RR → RR: session handoff — orient here, then take the queue
 
