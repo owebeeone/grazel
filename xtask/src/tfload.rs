@@ -89,6 +89,7 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     flags.fetched_external_base = crate::fetchcmd::fetched_external_dir(&ws);
     let provider_reanalyze_diag = install_provider_reanalyze_diag(&mut flags);
     let depset_diag = install_depset_diag(&mut flags);
+    let provider_field_diag = install_provider_field_diag(&mut flags);
     // RAZEL_TFLOAD_ONE=<pkg>[,<pkg>…]: print FULL errors (debugging a failure class). A comma
     // list loads in order in ONE session — replicates sweep context (earlier packages paving
     // aliases/config_settings) for order-dependent classes.
@@ -224,6 +225,7 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     );
     print_provider_reanalyze_diag(&provider_reanalyze_diag);
     print_depset_diag(&depset_diag);
+    print_provider_field_diag(&provider_field_diag);
     summarize(report, total)
 }
 
@@ -347,6 +349,66 @@ fn print_provider_reanalyze_diag(diag: &Option<ProviderReanalyzeDiag>) {
     sorted.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
     for (label, n) in sorted.into_iter().take(15) {
         println!("  {n:4}  {label}");
+    }
+}
+
+#[derive(Default)]
+struct ProviderFields {
+    projectable: usize,
+    nonproj: usize,
+    nonproj_types: BTreeMap<String, usize>,
+}
+type ProviderFieldDiag = Arc<Mutex<ProviderFields>>;
+
+/// RAZEL_TFLOAD_DIAG_PROVIDER_FIELDS: count captured provider FIELDS that are DDS-projectable vs
+/// not — the signal for whether cross-thread consumers can be served from DDS facts (option 1) or
+/// need the faithful fix (option 2/3). NOTE: counts ALL captured fields (an upper bound on the
+/// loss — a non-projectable field that no consumer reads is still counted).
+fn install_provider_field_diag(flags: &mut GlobalFlags) -> Option<ProviderFieldDiag> {
+    if std::env::var_os("RAZEL_TFLOAD_DIAG_PROVIDER_FIELDS").is_none() {
+        return None;
+    }
+    let counts: ProviderFieldDiag = Arc::new(Mutex::new(ProviderFields::default()));
+    let hook = Arc::clone(&counts);
+    let previous = flags.sched_hook.clone();
+    flags.sched_hook = Some(SchedHook(Arc::new(move |point, key| {
+        if let Some(h) = &previous {
+            (h.0)(point, key);
+        }
+        if point == "provider-field" {
+            if let Some((proj, ty)) = key.split_once(':') {
+                let mut c = hook.lock().expect("provider field diag");
+                if proj == "1" {
+                    c.projectable += 1;
+                } else {
+                    c.nonproj += 1;
+                    *c.nonproj_types.entry(ty.to_string()).or_default() += 1;
+                }
+            }
+        }
+    })));
+    Some(counts)
+}
+
+fn print_provider_field_diag(diag: &Option<ProviderFieldDiag>) {
+    let Some(counts) = diag else { return };
+    let c = counts.lock().expect("provider field diag");
+    let total = c.projectable + c.nonproj;
+    if total == 0 {
+        println!("provider-fields: (none captured)");
+        return;
+    }
+    println!(
+        "provider-fields: {}/{} DDS-projectable ({:.1}%); {} non-projectable",
+        c.projectable,
+        total,
+        100.0 * c.projectable as f64 / total as f64,
+        c.nonproj
+    );
+    let mut sorted: Vec<_> = c.nonproj_types.iter().collect();
+    sorted.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    for (ty, n) in sorted.into_iter().take(10) {
+        println!("  {n:8}  non-projectable field type `{ty}`");
     }
 }
 

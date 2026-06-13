@@ -199,6 +199,37 @@ pub(crate) fn instance_callable<'v>(item: Value<'v>) -> Option<Value<'v>> {
     }
 }
 
+/// Is a provider-field VALUE representable in the DDS projection (`Scalar`/`Set`/`OrderedDepset`)?
+/// Scalars (str/int/bool), Files (→ path), depsets, and lists of those are — structs, dicts,
+/// functions, tuples, nested provider instances are NOT. Used by the cross-thread projectability
+/// measurement: a dep can be served from DDS facts (no re-analysis) only if everything a consumer
+/// reads is projectable.
+pub(crate) fn field_projectable(v: Value) -> bool {
+    match v.get_type() {
+        "string" | "int" | "bool" => true,
+        "File" | "depset" => true,
+        "list" => starlark::values::list::ListRef::from_value(v)
+            .is_some_and(|l| l.iter().all(field_projectable)),
+        _ => false,
+    }
+}
+
+/// Per-field projectability of a captured provider instance: `(projectable, value_type)` for each
+/// field. Empty if `inst` is not a provider instance.
+pub(crate) fn classify_provider_fields(inst: Value) -> Vec<(bool, String)> {
+    let fields: Vec<Value> = if let Some(p) = inst.downcast_ref::<ProviderInstance>() {
+        p.fields.iter().map(|(_, v)| *v).collect()
+    } else if let Some(p) = inst.downcast_ref::<FrozenProviderInstance>() {
+        p.fields.iter().map(|(_, v)| v.to_value()).collect()
+    } else {
+        return Vec::new();
+    };
+    fields
+        .into_iter()
+        .map(|v| (field_projectable(v), v.get_type().to_string()))
+        .collect()
+}
+
 /// A resolved dependency as seen by a rule impl (L2a): the plain projected fields (`files`,
 /// `headers`, …) via `get_attr`, plus `dep[MyInfo]` indexing into the dep's captured provider
 /// instances (constructor identity — `Value::ptr_eq`).

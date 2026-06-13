@@ -677,6 +677,20 @@ producing worker's whole-package freeze. The taut fact codec serializes the DDS 
 instances. That fix is a threading/freeze-timing change (per-target freeze-and-publish) or a full
 Starlark-value serializer, NOT this codec. Taut's clean, codec-sufficient win is the cache.*
 
+*Finding (2026-06-14) — the correction above was too pessimistic; MEASURED it. New diag
+`RAZEL_TFLOAD_DIAG_PROVIDER_FIELDS` classifies every captured provider field as DDS-projectable or
+not. TF sweep (sample-256): **587/819 (71.7%) projectable, 232 non-projectable — ALL of type
+`host_absorbed` (the `Absorb` placeholder, which carries NO data), and ZERO rich fields (no
+struct/dict/function).** So a re-analyzed live instance holds nothing a consumer couldn't get from
+(the dep's DDS facts in shared `results`) + (a synthesized `Absorb` for the unmodeled slots) — the
+loader ALREADY does exactly that synthesis for native-rule deps (`provider_values.rs`
+`self.providers.is_empty()`). Therefore the ~5000 cross-thread fallbacks are PURE WASTE, and the
+fix is the CHEAP option: extend that DDS-synthesis to the cross-thread Starlark-dep case (serve
+`dep[Provider]` from DDS facts instead of re-analyzing) — days, not the per-target-freeze /
+serializer (weeks). It kills the fallbacks (real parallelism past 1.6×) AND unblocks incremental
+caching (DDS facts are `Send`). Caveat: TF sample only; a struct-valued provider in another corpus
+would be the one lossy case — re-run the diag there. This is the keystone, and it's small.*
+
 1. Add the message API types and `LegacyDepsEngine`.
 2. Convert `SchedHook` tests to assert typed events via the adapter, keeping the
    old hook as compatibility.

@@ -887,6 +887,17 @@ fn apply_aspect_uncached<'v>(
             .captured
             .borrow_mut()
             .insert(memo_key.to_string(), pairs.clone());
+        // Projectability measurement (gated on the diag hook): classify each captured provider's
+        // fields against the DDS-projectable set — the signal for whether a cross-thread consumer
+        // could be served from DDS facts (option 1) instead of re-analyzing.
+        let sess = session(eval);
+        if sess.global.sched_hook.is_some() {
+            for (_, inst) in &pairs {
+                for (proj, ty) in crate::provider_values::classify_provider_fields(*inst) {
+                    crate::state::load_event(sess, "provider-field", &format!("{}:{ty}", proj as u8));
+                }
+            }
+        }
         providers.extend(pairs);
         Ok(())
     })();
