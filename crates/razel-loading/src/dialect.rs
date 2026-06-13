@@ -3,7 +3,7 @@
 use crate::deps::record_target;
 use crate::glob::do_glob;
 use crate::state::{AnalyzedTarget, canon_label, qualify, session, with_current};
-use crate::values::{Depset, extract_files, file_path};
+use crate::values::{Depset, extract_files, file_path, is_depset};
 use starlark::collections::SmallMap;
 use starlark::environment::GlobalsBuilder;
 use starlark::eval::Evaluator;
@@ -806,44 +806,30 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                  default (F36; RazelGaps; warned once per session)"
             );
         }
-        // Dedup by string path; store the live Value so map_each sees File attributes.
+        // DAG (Bazel NestedSet): store `direct` members (deduped within direct by path) and the
+        // `transitive` child depsets BY REFERENCE — do NOT flatten. Global dedup across direct +
+        // transitive is deferred to consumption (`depset_items`). This is the O(direct + #transitive)
+        // construction that replaces the prior O(N×M) eager fold of every transitive closure.
         let mut seen = std::collections::BTreeSet::<String>::new();
-        let mut items: Vec<Value<'v>> = Vec::new();
-        let mut direct_count = 0usize;
-        let mut transitive_count = 0usize;
-        let mut input_count = 0usize;
-        let mut duplicate_count = 0usize;
-        let mut max_seen = 0usize;
-        let mut push = |v: Value<'v>,
-                        seen: &mut std::collections::BTreeSet<String>,
-                        items: &mut Vec<Value<'v>>| {
-            let key = file_path(v);
-            input_count += 1;
-            if seen.insert(key) {
-                items.push(v);
-                max_seen = max_seen.max(seen.len());
-            } else {
-                duplicate_count += 1;
-            }
-        };
+        let mut direct_items: Vec<Value<'v>> = Vec::new();
         if let Some(d) = direct
             && let Some(list) = ListRef::from_value(d)
         {
             for it in list.iter() {
-                direct_count += 1;
-                push(it, &mut seen, &mut items);
+                if seen.insert(file_path(it)) {
+                    direct_items.push(it);
+                }
             }
         }
+        let mut transitive_items: Vec<Value<'v>> = Vec::new();
         if let Some(t) = transitive
             && let Some(list) = ListRef::from_value(t)
         {
             for dep in list.iter() {
-                // LIVE or FROZEN member depsets (round 30 — frozen ones were silently skipped).
-                if let Some(members) = crate::values::depset_items(dep) {
-                    transitive_count += 1;
-                    for v in members {
-                        push(v, &mut seen, &mut items);
-                    }
+                // Only actual depsets (live or frozen) are valid transitive members; non-depsets
+                // are ignored, as before. Stored by reference — not walked here.
+                if is_depset(dep) {
+                    transitive_items.push(dep);
                 }
             }
         }
@@ -853,13 +839,16 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                 sess,
                 "depset",
                 &format!(
-                    "direct={direct_count} transitive={transitive_count} input={input_count} \
-                     unique={} dup={duplicate_count} max_seen={max_seen}",
-                    items.len()
+                    "direct={} transitive={}",
+                    direct_items.len(),
+                    transitive_items.len()
                 ),
             );
         }
-        Ok(eval.heap().alloc(Depset { items }))
+        Ok(eval.heap().alloc(Depset {
+            direct: direct_items,
+            transitive: transitive_items,
+        }))
     }
 
     /// `select({condition: value, …})` — Bazel semantics (razelV3): HYBRID resolution. If every

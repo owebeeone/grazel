@@ -12,35 +12,28 @@ use std::sync::{Arc, Mutex};
 type ProviderReanalyzeDiag = Arc<Mutex<BTreeMap<String, usize>>>;
 type DepsetDiagHandle = Arc<Mutex<DepsetDiag>>;
 
+// Depsets are now a DAG (NestedSet): construction stores `direct` members + `transitive` child
+// refs WITHOUT flattening, so the diagnostic reports DAG shape (width), not a flattened element
+// census. Flatten cost moved to consumption; the headline metric is the eval-phase wall-clock.
 #[derive(Debug, Default)]
 struct DepsetDiag {
     calls: usize,
     direct: usize,
     transitive: usize,
-    input: usize,
-    unique: usize,
-    duplicates: usize,
-    max_input: usize,
-    max_seen: usize,
+    max_direct: usize,
+    max_transitive: usize,
 }
 
 impl DepsetDiag {
     fn record(&mut self, key: &str) {
         let direct = depset_stat(key, "direct").unwrap_or(0);
         let transitive = depset_stat(key, "transitive").unwrap_or(0);
-        let input = depset_stat(key, "input").unwrap_or(0);
-        let unique = depset_stat(key, "unique").unwrap_or(0);
-        let dup = depset_stat(key, "dup").unwrap_or(0);
-        let max_seen = depset_stat(key, "max_seen").unwrap_or(0);
 
         self.calls += 1;
         self.direct += direct;
         self.transitive += transitive;
-        self.input += input;
-        self.unique += unique;
-        self.duplicates += dup;
-        self.max_input = self.max_input.max(input);
-        self.max_seen = self.max_seen.max(max_seen);
+        self.max_direct = self.max_direct.max(direct);
+        self.max_transitive = self.max_transitive.max(transitive);
     }
 }
 
@@ -244,16 +237,9 @@ fn print_depset_diag(diag: &Option<DepsetDiagHandle>) {
     let Some(counts) = diag else { return };
     let counts = counts.lock().expect("depset diag");
     println!(
-        "depset: {} call(s), input {} item(s), unique {} item(s), duplicate {} item(s), \
-         direct {} item(s), transitive {} depset(s), max input {}, max seen {}",
-        counts.calls,
-        counts.input,
-        counts.unique,
-        counts.duplicates,
-        counts.direct,
-        counts.transitive,
-        counts.max_input,
-        counts.max_seen
+        "depset: {} construction(s), direct {} member(s), transitive {} child-depset(s), \
+         max direct {}, max transitive {}",
+        counts.calls, counts.direct, counts.transitive, counts.max_direct, counts.max_transitive
     );
 }
 
@@ -305,14 +291,13 @@ mod tests {
     #[test]
     fn depset_diag_aggregates_shape_events() {
         let mut diag = DepsetDiag::default();
-        diag.record("direct=2 transitive=0 input=2 unique=2 dup=0 max_seen=2");
-        diag.record("direct=2 transitive=1 input=4 unique=3 dup=1 max_seen=3");
+        diag.record("direct=2 transitive=0");
+        diag.record("direct=5 transitive=1");
 
         assert_eq!(diag.calls, 2);
-        assert_eq!(diag.input, 6);
-        assert_eq!(diag.unique, 5);
-        assert_eq!(diag.duplicates, 1);
-        assert_eq!(diag.max_input, 4);
-        assert_eq!(diag.max_seen, 3);
+        assert_eq!(diag.direct, 7);
+        assert_eq!(diag.transitive, 1);
+        assert_eq!(diag.max_direct, 5);
+        assert_eq!(diag.max_transitive, 1);
     }
 }

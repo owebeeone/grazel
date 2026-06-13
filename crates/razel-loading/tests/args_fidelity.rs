@@ -107,6 +107,37 @@ r(name = "t")
     );
 }
 
+/// Depset is a DAG (Bazel NestedSet): a 3-level chain plus a shared child on two paths
+/// (diamond) flattens to ONE ordered, deduped sequence — direct-first, then each transitive,
+/// global first-occurrence dedup by path. Pins the lazy flatten against the prior eager
+/// construction (must be identical).
+#[test]
+fn depset_dag_flattens_deduped_in_order() {
+    let src = r#"
+def _impl(ctx):
+    base = depset(["a", "b"])
+    mid = depset(["b", "c"], transitive = [base])
+    top = depset(["c", "d"], transitive = [mid, base])
+    args = ctx.actions.args()
+    args.add_all(top)
+    ctx.actions.run(
+        executable = "tool",
+        outputs = [],
+        inputs = [],
+        arguments = [args, str(len(top.to_list()))],
+    )
+
+r = rule(implementation = _impl, attrs = {})
+r(name = "t")
+"#;
+    let targets = razel_loading::analyze_starlark("BUILD", src).unwrap();
+    assert_eq!(
+        targets[0].actions[0].argv,
+        ["tool", "c", "d", "b", "a", "4"],
+        "DAG flatten: direct-first, then transitive, global first-wins dedup by path"
+    );
+}
+
 #[test]
 fn depset_diagnostic_reports_dedupe_shape() {
     let root = std::env::temp_dir().join(format!("razel-depset-diag-{}", std::process::id()));
@@ -140,11 +171,11 @@ r(name = "t")
     res.unwrap();
 
     let events = events.lock().unwrap();
+    // DAG shape, reported cheaply at construction (no flatten): `merged` has 2 direct members
+    // (deduped within direct) and 1 transitive child depset. Global dedup is deferred to flatten.
     assert!(
-        events
-            .iter()
-            .any(|e| e == "direct=2 transitive=1 input=4 unique=3 dup=1 max_seen=3"),
-        "expected merged depset diagnostic, got {events:?}"
+        events.iter().any(|e| e == "direct=2 transitive=1"),
+        "expected merged depset DAG-shape diagnostic, got {events:?}"
     );
 }
 

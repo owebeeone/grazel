@@ -402,13 +402,89 @@ pub(crate) fn args_methods(b: &mut MethodsBuilder) {
 /// depset to the mapper — TF's 70-pkg `.count` class; `.to_list()` returned `[]`;
 /// `depset(transitive=)` skipped members).
 pub(crate) fn depset_items<'v>(v: Value<'v>) -> Option<Vec<Value<'v>>> {
-    if let Some(d) = v.downcast_ref::<Depset>() {
-        return Some(d.items.clone());
+    if !is_depset(v) {
+        return None;
     }
-    if let Some(d) = v.downcast_ref::<FrozenDepset>() {
-        return Some(d.items.iter().map(|x| x.to_value()).collect());
+    // Flatten the DAG lazily (Bazel `to_list`): direct-first, then each transitive child, global
+    // first-occurrence dedup by path. An ephemeral node-visited set walks a shared sub-depset
+    // (diamond) once.
+    let mut seen_elems = std::collections::BTreeSet::<String>::new();
+    let mut seen_nodes = std::collections::HashSet::<usize>::new();
+    let mut out = Vec::new();
+    flatten_depset(v, &mut seen_elems, &mut seen_nodes, &mut out);
+    Some(out)
+}
+
+/// True iff `v` is a depset (live or frozen). Cheap downcast — does NOT flatten.
+pub(crate) fn is_depset(v: Value) -> bool {
+    v.downcast_ref::<Depset>().is_some() || v.downcast_ref::<FrozenDepset>().is_some()
+}
+
+fn flatten_depset<'v>(
+    root: Value<'v>,
+    seen_elems: &mut std::collections::BTreeSet<String>,
+    seen_nodes: &mut std::collections::HashSet<usize>,
+    out: &mut Vec<Value<'v>>,
+) {
+    // Explicit work-stack, NOT recursion: TF depsets nest deeply and a recursive flatten would
+    // risk a stack overflow. Pre-order — a node's `direct` members first, then its transitive
+    // children in order (push reversed so they pop forward) — matching the prior eager order.
+    // `seen_nodes` walks a shared child (diamond) once; depsets are acyclic by construction.
+    let mut stack: Vec<Value<'v>> = vec![root];
+    while let Some(v) = stack.pop() {
+        let (direct, transitive): (Vec<Value<'v>>, Vec<Value<'v>>) =
+            if let Some(d) = v.downcast_ref::<Depset>() {
+                if !seen_nodes.insert(d as *const _ as usize) {
+                    continue;
+                }
+                (d.direct.clone(), d.transitive.clone())
+            } else if let Some(d) = v.downcast_ref::<FrozenDepset>() {
+                if !seen_nodes.insert(d as *const _ as usize) {
+                    continue;
+                }
+                (
+                    d.direct.iter().map(|x| x.to_value()).collect(),
+                    d.transitive.iter().map(|x| x.to_value()).collect(),
+                )
+            } else {
+                continue;
+            };
+        for it in direct {
+            if seen_elems.insert(file_path(it)) {
+                out.push(it);
+            }
+        }
+        for t in transitive.into_iter().rev() {
+            stack.push(t);
+        }
     }
-    None
+}
+
+/// Non-emptiness of a depset DAG without a full flatten: short-circuits at the first direct
+/// member found. Iterative (work-stack) for the same deep-nesting safety as the flatten.
+fn depset_nonempty(v: Value) -> bool {
+    let mut stack = vec![v];
+    let mut seen = std::collections::HashSet::<usize>::new();
+    while let Some(v) = stack.pop() {
+        if let Some(d) = v.downcast_ref::<Depset>() {
+            if !seen.insert(d as *const _ as usize) {
+                continue;
+            }
+            if !d.direct.is_empty() {
+                return true;
+            }
+            stack.extend(d.transitive.iter().copied());
+        } else if let Some(d) = v.downcast_ref::<FrozenDepset>() {
+            if !seen.insert(d as *const _ as usize) {
+                continue;
+            }
+            if !d.direct.is_empty() {
+                return true;
+            }
+            stack.extend(d.transitive.iter().map(|t| t.to_value()));
+        }
+    }
+    false
 }
 
 fn flatten_values<'v>(v: Value<'v>) -> Vec<Value<'v>> {
@@ -565,24 +641,31 @@ pub(crate) fn file_path(v: Value) -> String {
 // ---- depset ----------------------------------------------------------------------
 
 
-/// A `depset` — Bazel's deduplicated transitive set. Elements are kept as live
-/// heap Values so `map_each` lambdas can access fields like `.path` on File values.
-/// Construction folds in `direct` members and the elements of each `transitive`
-/// depset, de-duplicated by their string path. Stringification happens at use
-/// (`to_list`, `extract_files`, `Display`), not at construction.
+/// A `depset` — Bazel's deduplicated transitive set, stored as a **DAG (NestedSet)**: `direct`
+/// members plus references to `transitive` child depsets. Elements are kept as live heap Values
+/// so `map_each` lambdas can access fields like `.path` on File values. Construction does NOT
+/// flatten — it stores transitive children by reference; flattening (with global first-occurrence
+/// dedup by path) happens lazily at use (`to_list`, `extract_files`, argv) via [`depset_items`].
 #[derive(Debug, Trace, Coerce, ProvidesStaticType, NoSerialize, Allocative, Freeze)]
 #[repr(C)]
 pub(crate) struct DepsetGen<V: starlark::values::ValueLifetimeless> {
-    // items holds live GC-visible Values — Trace must NOT be skipped. Freeze-generic: real .bzl
-    // build module-level depsets (protobuf), which freeze with their module.
-    pub(crate) items: Vec<V>,
+    // Direct members, deduped within `direct` by path. Live GC-visible Values — Trace must NOT be
+    // skipped. Freeze-generic: real .bzl module-level depsets (protobuf) freeze with their module.
+    pub(crate) direct: Vec<V>,
+    // Transitive child depsets, held BY REFERENCE as Depset/FrozenDepset Values — not flattened.
+    pub(crate) transitive: Vec<V>,
 }
 starlark_complex_value!(pub(crate) Depset);
 
 
 impl<V: starlark::values::ValueLifetimeless> fmt::Display for DepsetGen<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "depset({} items)", self.items.len())
+        write!(
+            f,
+            "depset(direct={}, transitive={})",
+            self.direct.len(),
+            self.transitive.len()
+        )
     }
 }
 
@@ -595,9 +678,10 @@ where
     fn get_methods() -> Option<&'static Methods> {
         Some(DEPSET_METHODS.methods())
     }
-    /// Bazel: an empty depset is falsy.
+    /// Bazel: an empty depset is falsy. Short-circuits without flattening — non-empty at the
+    /// first direct member or non-empty transitive child.
     fn to_bool(&self) -> bool {
-        !self.items.is_empty()
+        !self.direct.is_empty() || self.transitive.iter().any(|t| depset_nonempty(t.to_value()))
     }
 }
 

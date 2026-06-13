@@ -304,7 +304,7 @@ where
                 .map(|(_, v)| v.to_value())
                 .map(|v| match starlark::values::list::ListRef::from_value(v) {
                     Some(l) => _heap.alloc(crate::values::Depset {
-                        items: l
+                        direct: l
                             .iter()
                             .map(|it| match it.unpack_str() {
                                 // Stray path STRINGS coerce to File (impls read .extension).
@@ -314,10 +314,16 @@ where
                                 None => it,
                             })
                             .collect(),
+                        transitive: Vec::new(),
                     }),
                     None => v,
                 })
-                .unwrap_or_else(|| _heap.alloc(crate::values::Depset { items: Vec::new() }));
+                .unwrap_or_else(|| {
+                    _heap.alloc(crate::values::Depset {
+                        direct: Vec::new(),
+                        transitive: Vec::new(),
+                    })
+                });
             use starlark::values::structs::AllocStruct;
             return Ok(_heap.alloc(AllocStruct([
                 ("files".to_string(), files),
@@ -375,7 +381,8 @@ where
                             let v = v.to_value();
                             let wrapped = match starlark::values::list::ListRef::from_value(v) {
                                 Some(l) => _heap.alloc(crate::values::Depset {
-                                    items: l.iter().collect(),
+                                    direct: l.iter().collect(),
+                                    transitive: Vec::new(),
                                 }),
                                 None => v,
                             };
