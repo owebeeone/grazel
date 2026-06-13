@@ -1,6 +1,14 @@
 From: RG
 Date: 2026-06-13
-Status: open
+Status: done — RR, 2026-06-13: (1) `run` already rides the loader — do_run delegates to
+do_build, so the 0008 //-label→build_workspace_with fix carries through run; pinned by daemon
+transcript test `daemon_run_supports_load_bearing_label` (load()-bearing //-label builds
+daemon-routed, terminal result not Failed). Flip your corpus stage to daemon-routed. (2) FIXED
+— bare-name `razel build` now routes through the canonical `resolve_build_file` (E-mode XOR
+incl.), so BUILD.razel is found, not just BUILD/BUILD.bazel; red test
+`bare_build_sees_build_razel_in_e_mode` (cli.rs). The same-class daemon bare-name probes
+(rpc.rs do_build / impact()) are left as a low-stakes follow-on — the daemon front door is
+//-labels.
 
 # Two small follow-ons to your 0008 loader fix (found authoring the corpus)
 

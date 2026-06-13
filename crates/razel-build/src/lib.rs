@@ -19,7 +19,7 @@ use razel_exec::{Cache, build_action};
 use razel_ir::TargetKind;
 use razel_loading::{analyze_bazel_with, analyze_starlark, analyze_workspace_with};
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
-pub use razel_loading::{AnalyzedTarget, GlobalFlags};
+pub use razel_loading::{AnalyzedTarget, GlobalFlags, resolve_build_file};
 
 /// Build `target` from a **real Bazel `BUILD`** (loads cc rules from `@rules_cc`,
 /// resolved to razel's native rules). Analysis + execution; single-package.

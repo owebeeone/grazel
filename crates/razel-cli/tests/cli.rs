@@ -78,6 +78,34 @@ fn build_compiles_a_real_object_end_to_end() {
     assert!(ws.path().join("widget.o").exists(), "object not produced");
 }
 
+/// RG 0011 (2): a BARE-name build must also see `BUILD.razel` (E-mode's sole grammar),
+/// not only the bazel filenames. The bare-name path predated E-mode and probed only
+/// BUILD/BUILD.bazel; it now routes through the canonical resolver (E-mode XOR incl.).
+#[test]
+fn bare_build_sees_build_razel_in_e_mode() {
+    if !std::path::Path::new("/usr/bin/cc").exists() {
+        return; // skip where no cc
+    }
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD.razel"), BUILD).unwrap();
+    std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+
+    let out = razel()
+        .args(["build", "widget", "-C"])
+        .arg(ws.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "bare-name build must find BUILD.razel; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        ws.path().join("widget.o").exists(),
+        "object not produced from BUILD.razel"
+    );
+}
+
 #[test]
 fn build_result_cbor_carries_outputs() {
     if !std::path::Path::new("/usr/bin/cc").exists() {

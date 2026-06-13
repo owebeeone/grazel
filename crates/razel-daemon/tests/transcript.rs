@@ -99,6 +99,65 @@ fn daemon_build_supports_load() {
     assert!(r.outputs.iter().any(|o| o.path.ends_with("app/go")), "{:?}", r.outputs);
 }
 
+/// RG 0011 (user-hit): daemon-routed `run` of a load()-bearing //-label must ride the SAME
+/// loader-capable pipeline as `build`. `do_run` delegates its build to `do_build`, so the
+/// 0008 //-label→`build_workspace_with` fix carries through `run` — this pins that the build
+/// half of `run` succeeds through the socket, not just `build`.
+#[test]
+fn daemon_run_supports_load_bearing_label() {
+    let root = std::env::temp_dir().join(format!("razel-t1-runload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ws = root.join("ws");
+    std::fs::create_dir_all(ws.join("app")).unwrap();
+    std::fs::write(
+        ws.join("app/BUILD"),
+        "load(\"@rules_shell//shell:sh_binary.bzl\", \"sh_binary\")\n\
+         sh_binary(name = \"go\", srcs = [\"go.sh\"])\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("app/go.sh"), "#!/bin/sh\necho ok\n").unwrap();
+    let socket = root.join("d.sock");
+    let server = Server::new(ws, root.join("cache"));
+    let s2 = socket.clone();
+    std::thread::spawn(move || {
+        let _ = server.serve(&s2);
+    });
+    for _ in 0..100 {
+        if rpc::call(&socket, &rpc::req_version()).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Subscribe before running so the invocation log is read from seq 1.
+    let mut stream = rpc::invocation_events(&socket).expect("events stream");
+    let resp = rpc::call(&socket, &rpc::req_run("//app:go", &[])).unwrap();
+    let started = InvocationStarted::from_cbor(&rpc::payload(&resp).expect("run accepted"));
+    // Drain this invocation's events to the terminal result.
+    let mut result = None;
+    while result.is_none() {
+        let ev = InvocationEvent::from_cbor(
+            &rpc::payload(&rpc::next_frame(&mut stream).expect("frame")).expect("event"),
+        );
+        if ev.invocation_id != started.invocation_id {
+            continue;
+        }
+        if ev.result.is_some() {
+            result = ev.result;
+        }
+    }
+    let r = result.unwrap();
+    assert!(
+        !matches!(r.status, razel_wire::BuildStatus::Failed),
+        "load()-bearing `run` must build through the daemon loader path: {:?}",
+        r.message
+    );
+    assert!(
+        r.outputs.iter().any(|o| o.path.ends_with("app/go")),
+        "run reports the built binary as output: {:?}",
+        r.outputs
+    );
+}
+
 #[test]
 fn hello_handshake_accepts_and_rejects() {
     let (ws, socket) = start_daemon("hello");

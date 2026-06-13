@@ -21,7 +21,7 @@
 //! workspace's own `BUILD` single-package. exec_root = the workspace dir. The daemon
 //! does **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
-use razel_build::{GlobalFlags, build_bazel_with, build_workspace_with};
+use razel_build::{GlobalFlags, build_bazel_with, build_workspace_with, resolve_build_file};
 use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
@@ -704,24 +704,30 @@ fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
         // Workspace label → load packages on demand from the workspace root.
         build_workspace_with(&o.workspace, target_arg, &cache, o.global_flags())
     } else {
-        // Bare name / :name → single-package build from the workspace's BUILD.
+        // Bare name / :name → single-package build from the workspace's root package.
+        // Route through the canonical resolver so E-mode's `BUILD.razel` is found (and its
+        // XOR with bazel grammar enforced), not just BUILD/BUILD.bazel (RG 0011).
         let name = target_arg.rsplit(':').next().unwrap_or(target_arg);
-        let Some(build_path) = ["BUILD", "BUILD.bazel"]
-            .iter()
-            .map(|f| o.workspace.join(f))
-            .find(|p| p.exists())
-        else {
-            eprintln!(
-                "razel build: no BUILD or BUILD.bazel in {}",
-                o.workspace.display()
-            );
-            return Err(ExitCode::FAILURE);
+        let flags = o.global_flags();
+        let build_path = match resolve_build_file(&o.workspace, flags.strict_bazel) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                eprintln!(
+                    "razel build: no BUILD, BUILD.bazel, or BUILD.razel in {}",
+                    o.workspace.display()
+                );
+                return Err(ExitCode::FAILURE);
+            }
+            Err(e) => {
+                eprintln!("razel build: {e}");
+                return Err(ExitCode::FAILURE);
+            }
         };
         let build_src = std::fs::read_to_string(&build_path).map_err(|e| {
             eprintln!("razel build: cannot read {}: {e}", build_path.display());
             ExitCode::FAILURE
         })?;
-        build_bazel_with(&build_src, name, &o.workspace, &cache, o.global_flags())
+        build_bazel_with(&build_src, name, &o.workspace, &cache, flags)
     };
 
     Ok(match report {

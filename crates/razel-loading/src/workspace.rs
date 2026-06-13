@@ -36,7 +36,7 @@ pub(crate) fn root_is_dual(root: &Path) -> bool {
 ///   (no package, no error — bazel's view).
 ///
 /// `Ok(None)` = not a package (no build file at all, from this mode's viewpoint).
-pub(crate) fn resolve_build_file(
+pub fn resolve_build_file(
     pkg_dir: &Path,
     strict_bazel: bool,
 ) -> Result<Option<PathBuf>, String> {
