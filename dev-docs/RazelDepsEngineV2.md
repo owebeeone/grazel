@@ -691,6 +691,38 @@ serializer (weeks). It kills the fallbacks (real parallelism past 1.6×) AND unb
 caching (DDS facts are `Send`). Caveat: TF sample only; a struct-valued provider in another corpus
 would be the one lossy case — re-run the diag there. This is the keystone, and it's small.*
 
+*Correction + Finding (2026-06-14, later) — the projectability Finding above was WRONG, and wave
+scheduling (the next thing tried) is a dead end. Bazel's source says why.*
+
+- *(a) **serve-from-DDS does not work.** 71.7%-projectable was the wrong proxy: `DepTarget::at`
+  synthesis (`provider_values.rs` ~398) requires the REQUESTED provider's constructor be a
+  `ProviderCallable` (to read declared fields). TF consumers read many BUILTIN providers (CcInfo,
+  native PyInfo, …) which are not `ProviderCallable` → synthesis hits the loud error. Serving
+  Starlark-dep providers from DDS makes them empty-`providers` DepTargets, so builtin reads fail.
+  MEASURED (sample-32, 6t): serve-only ~11× faster but **5/27** (regressed, silently wrong);
+  +`note_partial_read` retry **8/27** (correct) but **281s** (re-analyzes anyway). Reverted.*
+- *(b) **Wave scheduling is net-negative.** Prototype at tag `razelV3/wave-sched-prototype`
+  (commit `660ae26`, reverted): topological waves over the load queue (static label-scan graph +
+  Kahn layering). MEASURED (sample-32, 6t, 487-pkg seeded spine): FLAT eval **83.3s** / 5123
+  reanalyze; ORDER (topological, no barrier) **91.3s (+10%)** / 3062 (−40%); WAVES (barriered)
+  **95.0s (+14%)** / 2773 (−46%). Fallbacks drop 40–46% but eval gets WORSE → the ~5000 reanalyze
+  fallbacks are CHEAP (memoized), a symptom not the cost. (This corrects "PURE WASTE … keystone"
+  above: the waste is real but small, and eliminating it does not move the wall.)*
+- *(c) **Bazel confirms the frame was wrong** (`bazel-dev/bazel`). Skyframe does NOT wave-schedule:
+  `SkyFunction.compute` requests deps via `env.getValue`; a not-ready dep returns null and the
+  function is RESTARTED once deps finish (`skyframe/SkyFunction.java:38-55`), scheduling
+  `signalDep`-driven (`skyframe/NodeEntry.java:394`), the graph discovered dynamically. It has no
+  frozen/unfrozen problem because freeze granularity is the **target**:
+  `Mutability.create("configured target")` per CT (`analysis/ConfiguredTargetFactory.java:387`),
+  frozen at `RuleContext.close()` "for use by others" (`analysis/RuleContext.java:1074`). razel's
+  per-PACKAGE freeze + re-analyze-the-dep is the mismatch — Bazel computes each dep ONCE and
+  re-runs the cheap CONSUMER.*
+- *(d) **The real eval lever is the provider LOOKUP.** Bazel resolves `dep[Provider]` by interned
+  key: `ProviderCollection.get(Provider.Key)` (`analysis/ProviderCollection.java:50`) — a hashmap
+  on a stable `Provider.Key`. razel's `DepTarget::at` does a linear `ptr_eq` scan + string compares
+  (the downcast-33% / string-compare-14% hot path from the profiling). NEXT: prototype interned
+  provider-key lookup. Cold/CI win only — the content cache (above) owns the inner loop.*
+
 1. Add the message API types and `LegacyDepsEngine`.
 2. Convert `SchedHook` tests to assert typed events via the adapter, keeping the
    old hook as compatibility.

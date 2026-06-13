@@ -1009,128 +1009,6 @@ pub fn load_tree_report_with_targets(
     (report, loaded, targets)
 }
 
-/// Scan BUILD source for main-workspace label package paths: `//pkg/sub:name` → `pkg/sub`,
-/// `//pkg/sub` → `pkg/sub`. External (`@repo//…`), scheme (`https://`), and `///` forms are
-/// dropped by the preceding-char guard. Returns packages in first-seen order (caller dedups).
-/// APPROXIMATE BY DESIGN — it feeds SCHEDULING (wave order) only, never correctness; the
-/// restart backstop covers any edge it misses or invents. A crude byte scan beats walking the
-/// typed AST here: it catches `load()` paths and `deps`/`data` labels alike, and a spurious
-/// edge only over-constrains the order (the safe direction).
-pub(crate) fn scan_label_pkgs(src: &str) -> Vec<String> {
-    let b = src.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i + 1 < b.len() {
-        if !(b[i] == b'/' && b[i + 1] == b'/') {
-            i += 1;
-            continue;
-        }
-        let prev = if i == 0 { 0u8 } else { b[i - 1] };
-        // `xla//`, `@repo//`, `https://`, `///` are not main-workspace package refs.
-        if prev.is_ascii_alphanumeric() || prev == b'@' || prev == b':' || prev == b'/' {
-            i += 2;
-            continue;
-        }
-        let start = i + 2;
-        let mut j = start;
-        while j < b.len()
-            && (b[j].is_ascii_alphanumeric() || matches!(b[j], b'_' | b'.' | b'-' | b'/'))
-        {
-            j += 1;
-        }
-        // The path up to the `:` (or its end) IS the package: `//foo/bar:baz` → `foo/bar`.
-        if j > start {
-            out.push(src[start..j].to_string());
-        }
-        i = j.max(i + 2);
-    }
-    out
-}
-
-/// Per-package in-corpus dependency edges (`edges[i]` = indices `i` references and must run
-/// AFTER). Parallel read of each package's BUILD source + [`scan_label_pkgs`], mapped to the
-/// corpus index. Self-edges and out-of-corpus labels are dropped; each list is sorted+deduped
-/// for determinism.
-fn package_dep_edges(
-    root: &Path,
-    packages: &[String],
-    threads: usize,
-    strict_bazel: bool,
-) -> Vec<Vec<usize>> {
-    let n = packages.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let index: std::collections::HashMap<&str, usize> =
-        packages.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
-    let idxs: Vec<usize> = (0..n).collect();
-    let chunks: Vec<&[usize]> = idxs.chunks(n.div_ceil(threads.max(1))).collect();
-    let parts: Vec<Vec<(usize, Vec<usize>)>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = chunks
-            .into_iter()
-            .map(|chunk| {
-                let index = &index;
-                scope.spawn(move || {
-                    let mut out = Vec::with_capacity(chunk.len());
-                    for &i in chunk {
-                        let mut deps = Vec::new();
-                        if let Ok(Some(path)) =
-                            crate::workspace::resolve_build_file(&root.join(&packages[i]), strict_bazel)
-                            && let Ok(src) = std::fs::read_to_string(&path)
-                        {
-                            deps = scan_label_pkgs(&src)
-                                .into_iter()
-                                .filter_map(|p| index.get(p.as_str()).copied())
-                                .filter(|&d| d != i)
-                                .collect();
-                            deps.sort_unstable();
-                            deps.dedup();
-                        }
-                        out.push((i, deps));
-                    }
-                    out
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
-    });
-    let mut edges = vec![Vec::new(); n];
-    for part in parts {
-        for (i, ds) in part {
-            edges[i] = ds;
-        }
-    }
-    edges
-}
-
-/// Topological wave layering (Kahn by layer): wave 0 = packages with no in-corpus deps; wave
-/// k = packages all of whose deps sit in waves `< k`. Cycle / leftover members (mutual deps an
-/// approximate graph can invent) collapse into one final wave — the restart backstop covers
-/// their ordering. Deterministic: indices stay ascending within a wave. O(depth · n).
-fn compute_waves(n: usize, edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    let mut placed = vec![false; n];
-    let mut waves: Vec<Vec<usize>> = Vec::new();
-    let mut remaining = n;
-    while remaining > 0 {
-        let wave: Vec<usize> = (0..n)
-            .filter(|&i| !placed[i])
-            .filter(|&i| edges.get(i).is_none_or(|ds| ds.iter().all(|&d| placed[d])))
-            .collect();
-        if wave.is_empty() {
-            // A cycle (or invented mutual edge): nothing else can become ready. Emit the
-            // leftover as a final wave and stop — the backstop handles their order.
-            waves.push((0..n).filter(|&i| !placed[i]).collect());
-            break;
-        }
-        for &i in &wave {
-            placed[i] = true;
-        }
-        remaining -= wave.len();
-        waves.push(wave);
-    }
-    waves
-}
-
 fn drive_tree(
     root: &Path,
     flags: GlobalFlags,
@@ -1148,62 +1026,32 @@ fn drive_tree(
         let loaded = loaded_done(&session);
         return (session, report, loaded);
     }
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(vec![None; packages.len()]);
     let retry = std::sync::Mutex::new(Vec::new());
-    // Pull order. Default: ONE flat wave (atomic cursor over all packages — behavior
-    // unchanged from the prior shared-queue driver). RAZEL_LOAD_WAVES=1: topological waves
-    // with a BARRIER between layers, so a package's in-corpus deps FREEZE (publish their
-    // captured provider instances cross-thread) before it runs — eliminating the
-    // provider-reanalyze fallbacks that cap multithread scaling (RazelDepsEngineV2). The
-    // graph is approximate; the restart rounds below stay as the correctness backstop.
-    let wave_mode = std::env::var("RAZEL_LOAD_WAVES").unwrap_or_default();
-    let waves: Vec<Vec<usize>> = if wave_mode == "1" || wave_mode == "order" {
-        let edges = package_dep_edges(root, packages, threads, session.global.strict_bazel);
-        let mut waves = compute_waves(packages.len(), &edges);
-        if std::env::var("RAZEL_LOAD_WAVES_DIAG").is_ok() {
-            let sizes: Vec<usize> = waves.iter().map(|w| w.len()).collect();
-            eprintln!(
-                "razel: {} waves over {} packages, sizes {sizes:?}",
-                waves.len(),
-                packages.len()
-            );
-        }
-        // "order": collapse the layers into ONE barrier-free queue — deps still pulled earlier
-        // (bias), but workers never idle at a wave boundary. "1": true barriered waves.
-        if wave_mode == "order" {
-            waves = vec![waves.into_iter().flatten().collect()];
-        }
-        waves
-    } else {
-        vec![(0..packages.len()).collect()]
-    };
-    for wave in &waves {
-        let cursor = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..threads {
-                scope.spawn(|| {
-                    loop {
-                        let k = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(&i) = wave.get(k) else { break };
-                        let pkg = &packages[i];
-                        let before = session.partial_reads();
-                        let r = load_package_entry(&session, pkg);
-                        // F4 (restart): an entry that FAILED after consuming cross-thread
-                        // partial state (CycleProceed grants, dead declaration waits) is not
-                        // a sequential verdict — queue it for the post-drain restart rounds.
-                        if r.is_err() && session.partial_reads() > before {
-                            retry.lock().expect("retry").push(i);
-                        }
-                        results
-                            .lock()
-                            .expect("results")
-                            .get_mut(i)
-                            .map(|slot| *slot = Some(r));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(pkg) = packages.get(i) else { break };
+                    let before = session.partial_reads();
+                    let r = load_package_entry(&session, pkg);
+                    // F4 (restart): an entry that FAILED after consuming cross-thread
+                    // partial state (CycleProceed grants, dead declaration waits) is not a
+                    // sequential verdict — queue it for the post-drain restart rounds.
+                    if r.is_err() && session.partial_reads() > before {
+                        retry.lock().expect("retry").push(i);
                     }
-                });
-            }
-        });
-    }
+                    results
+                        .lock()
+                        .expect("results")
+                        .get_mut(i)
+                        .map(|slot| *slot = Some(r));
+                }
+            });
+        }
+    });
     let mut results = results.into_inner().expect("results");
     // Restart rounds, SINGLE-threaded (Skyframe's answer, RazelDemandFutures.md §5): by
     // now the cycle partners are terminal, so each retry sees what a sequential entry
@@ -1341,51 +1189,6 @@ pub fn analyze_starlark(name: &str, src: &str) -> Result<Vec<AnalyzedTarget>, St
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── wave scheduling: the static dep-edge scan + topological layering (pure halves). ──
-
-    #[test]
-    fn scan_label_pkgs_extracts_main_workspace_packages_only() {
-        let src = r#"
-load("//tools/build:defs.bzl", "my_rule")
-my_rule(
-    name = "x",
-    deps = ["//foo/bar:baz", "//foo/bar:qux", ":local", "@xla//ext:lib"],
-    data = "//data/pkg",
-)
-# see https://example.com//not-a-label
-"#;
-        let pkgs = scan_label_pkgs(src);
-        // `//foo/bar` (twice), `//tools/build`, `//data/pkg` — NOT `:local` (no `//`),
-        // NOT `@xla//ext` (external, `@`-guarded), NOT `https://…` (`:`-guarded).
-        assert!(pkgs.contains(&"foo/bar".to_string()), "deps label pkg, got {pkgs:?}");
-        assert!(pkgs.contains(&"tools/build".to_string()), "load() pkg, got {pkgs:?}");
-        assert!(pkgs.contains(&"data/pkg".to_string()), "bare //pkg, got {pkgs:?}");
-        assert!(!pkgs.iter().any(|p| p.contains("ext")), "external excluded, got {pkgs:?}");
-        assert!(!pkgs.iter().any(|p| p.contains("example")), "scheme excluded, got {pkgs:?}");
-    }
-
-    #[test]
-    fn compute_waves_layers_a_chain_diamond_and_breaks_cycles() {
-        // Chain 0←1←2 (edges[i] = deps that must PRECEDE i): waves peel one per layer.
-        let chain = vec![vec![], vec![0], vec![1]];
-        assert_eq!(compute_waves(3, &chain), vec![vec![0], vec![1], vec![2]]);
-
-        // Diamond: 0 root; 1,2 depend on 0; 3 depends on 1,2.
-        let diamond = vec![vec![], vec![0], vec![0], vec![1, 2]];
-        assert_eq!(compute_waves(4, &diamond), vec![vec![0], vec![1, 2], vec![3]]);
-
-        // A 2-cycle (0↔1) plus a clean leaf 2: leaf lands wave 0, the cycle collapses into a
-        // single trailing wave rather than spinning forever.
-        let cyclic = vec![vec![1], vec![0], vec![]];
-        let waves = compute_waves(3, &cyclic);
-        assert_eq!(waves.first(), Some(&vec![2]), "leaf first, got {waves:?}");
-        assert_eq!(waves.last(), Some(&vec![0, 1]), "cycle collapsed last, got {waves:?}");
-        // Every index is placed exactly once (partition invariant).
-        let mut all: Vec<usize> = waves.iter().flatten().copied().collect();
-        all.sort_unstable();
-        assert_eq!(all, vec![0, 1, 2]);
-    }
 
     // ── fold_field (F3/F24): the LIVE transitive fold, tested directly (not only via the .bzl). ──
 
