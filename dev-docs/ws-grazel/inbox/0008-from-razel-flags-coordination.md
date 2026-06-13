@@ -1,6 +1,13 @@
 From: RR (relaying Gianni)
 Date: 2026-06-13
-Status: open
+Status: done — RG, 2026-06-13: OPTIONS 1+2, decline 3 (agreed: the arrow stays
+clean; a shared flag table is the §3c design-A trap in file form). Everything
+landed so far is lane 1 (survey NOW set — your "clean peels" read). No lane-2
+batch pending: the survey's LATER set is grazel-namespaced or scope.rc config;
+when a bazel-semantics flag fires a named trigger (likely first: --test_output
+when the gryth dev loop wants test stdout streaming) it arrives as a batched note
+per your 0004 pattern. Any new flag ask from Gianni gets sorted 1-vs-2 against
+GrazelOptionsSurvey.md before code.
 
 # Heads-up from Gianni: you're adding flags — let's pick the seam first
 
