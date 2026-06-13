@@ -622,6 +622,15 @@ MUST be lossless. For daemon UI clients, debug event loss MAY be acceptable if a
 
 ## 19. Migration plan
 
+*Status (2026-06-13): step 1 LANDED — `razel-deps-engine` crate (`api.rs` + `legacy.rs`): the
+message API (`RazelDepsEngine` submit/subscribe, `EngineCommand`/`EngineEvent`, `SnapshotId`,
+`OptionsDigest`) and a behavior-preserving `LegacyDepsEngine` over `analyze_bazel_with`. Slice-1
+seam tests green: `Evaluate(BuildSource)` lifecycle, `SchedHook`→typed-event round-trip, and the
+semantic-vs-scheduling options digest. This seam is evidence-justified — the 1-thread and 6-thread
+profiles proved the eval wall is the inline single-heap demand recursion (not depsets, not a
+single O(N²), not lock contention), which only a deps-as-data scheduler behind this seam can
+parallelize. Steps 2+ next.*
+
 1. Add the message API types and `LegacyDepsEngine`.
 2. Convert `SchedHook` tests to assert typed events via the adapter, keeping the
    old hook as compatibility.
