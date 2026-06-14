@@ -21,7 +21,10 @@
 //! workspace's own `BUILD` single-package. exec_root = the workspace dir. The daemon
 //! does **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
-use razel_build::{GlobalFlags, build_bazel_with, build_workspace_with, resolve_build_file};
+use razel_build::{
+    GlobalFlags, build_bazel_with, build_workspace_with, config_segment, convenience_symlinks,
+    resolve_build_file,
+};
 use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
@@ -237,6 +240,9 @@ impl Opts {
             jobs: self.jobs,
             // CLI/.razelrc flag OR the env var (the env is the primary trigger per the spec).
             bazel_build_compat: self.bazel_build_compat || bazel_build_compat_env(),
+            // The CLI always materializes under the output tree (razel-out/, or bazel-out/
+            // under compat) — never in-tree — so a user's source tree stays clean.
+            bin_tree_layout: true,
             ..Default::default()
         }
     }
@@ -542,8 +548,14 @@ fn cmd_build(args: &[String]) -> ExitCode {
         Err(c) => return c,
     };
     if o.positionals.is_empty() {
-        eprintln!("razel build: expected <target>...");
-        return ExitCode::from(EX_USAGE);
+        // Bazel does NOT error on a bare `build` — it builds the empty target set and exits
+        // 0 ("requested an empty set of targets. Nothing will be built."). Match that.
+        eprintln!(
+            "WARNING: Your request is correct, but requested an empty set of targets. \
+             Nothing will be built."
+        );
+        eprintln!("INFO: Build completed successfully.");
+        return ExitCode::SUCCESS;
     }
     // Patterns (`//...`, `//pkg:all`) or several targets → expand + multi-build. A single
     // concrete label keeps the existing daemon/cbor-capable path (output unchanged).
@@ -574,6 +586,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     } else {
         print_build_result(&result);
         if !matches!(result.status, BuildStatus::Failed) {
+            ensure_convenience_symlinks(&o.workspace, &o.global_flags());
             eprintln!("INFO: Elapsed time: {:.3}s", t0.elapsed().as_secs_f64());
             eprintln!("INFO: Build completed successfully.");
         }
@@ -641,6 +654,9 @@ fn cmd_build_many(o: &Opts) -> ExitCode {
                 eprintln!("  {label} FAILED");
             }
         }
+    }
+    if built + cached > 0 {
+        ensure_convenience_symlinks(&o.workspace, &o.global_flags());
     }
     eprintln!("INFO: Elapsed time: {:.3}s", t0.elapsed().as_secs_f64());
     if failed > 0 {
@@ -776,6 +792,9 @@ fn cmd_test(args: &[String]) -> ExitCode {
         }
     }
     let ran = passed + failed;
+    if ran > 0 {
+        ensure_convenience_symlinks(&o.workspace, &o.global_flags());
+    }
     let tail = if build_err > 0 {
         format!(", {build_err} not built")
     } else {
@@ -806,6 +825,7 @@ enum TestOutcome {
 /// missing runnable output is a `BuildError` (exit 1, never the tests-failed code).
 fn run_one_test(o: &Opts, target_arg: &str, cache: &Cache, flags: GlobalFlags) -> TestOutcome {
     let compat = flags.bazel_build_compat; // read before `flags` moves into build_one
+    let cfg = config_segment(&flags.compilation_mode);
     let result = match build_one(o, target_arg, cache, flags) {
         Ok(r) => r,
         Err(_) => return TestOutcome::BuildError(String::new()),
@@ -825,12 +845,13 @@ fn run_one_test(o: &Opts, target_arg: &str, cache: &Cache, flags: GlobalFlags) -
         Err(e) => return TestOutcome::BuildError(format!("cannot exec {}: {e}", exe.path)),
     };
     let secs = t0.elapsed().as_secs_f64();
-    // bazel's testlogs shape: `bazel-testlogs/<pkg>/<name>/` under --bazel_build_compat
-    // (Bazel's convenience-symlink layout), else under the razel cache dir.
+    // Bazel's testlogs shape: logs land under the output base's `testlogs/<pkg>/<name>/`
+    // (`razel-out/<config>/testlogs`, or `bazel-out/<config>/testlogs` under compat), reachable
+    // via the `razel-testlogs` / `bazel-testlogs` convenience symlink.
     let rest = target_arg.trim_start_matches('/');
     let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
-    let log_root = if compat { "bazel-testlogs" } else { ".razel-cache/testlogs" };
-    let log_dir = o.workspace.join(log_root).join(pkg).join(name);
+    let out_root = if compat { "bazel-out" } else { "razel-out" };
+    let log_dir = o.workspace.join(out_root).join(&cfg).join("testlogs").join(pkg).join(name);
     let _ = std::fs::create_dir_all(&log_dir);
     let mut log = out.stdout.clone();
     log.extend_from_slice(&out.stderr);
@@ -1144,6 +1165,27 @@ fn hex(bytes: &[u8]) -> String {
             let _ = write!(s, "{b:02x}");
             s
         })
+}
+
+/// Mint Bazel-style convenience symlinks in the workspace after a build: `razel-bin` /
+/// `razel-testlogs` → `razel-out/<config>/{bin,testlogs}` (or `bazel-*` under
+/// `--bazel_build_compat`). Best-effort + idempotent; only ever replaces a symlink we own —
+/// never clobbers a real file/dir a user placed at that name.
+fn ensure_convenience_symlinks(workspace: &std::path::Path, flags: &GlobalFlags) {
+    for (link, target) in convenience_symlinks(flags) {
+        let link_path = workspace.join(&link);
+        match std::fs::symlink_metadata(&link_path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let _ = std::fs::remove_file(&link_path);
+            }
+            Ok(_) => continue, // a real file/dir — leave it alone
+            Err(_) => {}
+        }
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(&target, &link_path);
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_dir(&target, &link_path);
+    }
 }
 
 /// Bazel's build-result format (all on STDERR — stdout is for data): `Target <label>

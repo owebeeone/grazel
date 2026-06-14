@@ -36,7 +36,9 @@ fn js_binary_analyzes_with_launcher() {
     assert!(a.outputs.contains(&"srv/hello".to_string()));
     let cmd = a.argv.join(" ");
     assert!(cmd.contains("server.js"), "launcher runs the entry: {cmd}");
-    assert!(cmd.contains("dirname"), "entry resolved relative to the launcher: {cmd}");
+    // V1: the entry is referenced by its workspace-relative path (robust to the output
+    // base), run from the exec root — not via `$(dirname $0)` (which broke under razel-out).
+    assert!(cmd.contains("srv/server.js"), "entry resolved by workspace-relative path: {cmd}");
     let _ = std::fs::remove_dir_all(&ws);
 }
 

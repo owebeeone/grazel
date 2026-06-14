@@ -132,6 +132,10 @@ pub(crate) fn verify(repo_root: &Path) -> Vec<String> {
             let flags = GlobalFlags {
                 cc_toolchain: CcToolchainMode::AdoptBazel,
                 strict_bazel: strict,
+                // Parity oracle compares razel-as-bazel to bazel: emit Bazel's bazel-out/…
+                // output paths so the goldens (bazel aquery) match byte-for-byte while the
+                // default `razel build` uses its own razel-out/ tree.
+                bazel_build_compat: true,
                 ..Default::default()
             };
             match analyze_workspace_with(&ws, target, flags) {

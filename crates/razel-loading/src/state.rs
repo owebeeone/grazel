@@ -907,6 +907,13 @@ pub struct GlobalFlags {
     /// in-tree, so razel and Bazel share the same build directory. Default off (in-tree).
     /// Build-phase only.
     pub bazel_build_compat: bool,
+    /// Materialize outputs under razel's own `razel-out/<config>/bin` tree (+ `razel-bin` /
+    /// `razel-testlogs` convenience symlinks) rather than in-tree. The CLI sets this for every
+    /// `build`/`test`/`run` so a user's source tree is never polluted; the bare library
+    /// default is off (in-tree), which keeps analysis snapshots output-base-independent.
+    /// Superseded by `bazel_build_compat` (which forces the real Bazel `bazel-out` names).
+    /// Build-phase only.
+    pub bin_tree_layout: bool,
 }
 
 impl GlobalFlags {
@@ -1137,46 +1144,73 @@ pub(crate) fn qualify(sess: &Session, path: &str) -> String {
 }
 
 /// Bazel's configuration mnemonic for this build, e.g. `darwin_arm64-fastbuild` — the
-/// `<cpu>-<compilation_mode>` segment of `bazel-out/<config>/bin`.
-pub(crate) fn bazel_config(sess: &Session) -> String {
+/// `<cpu>-<compilation_mode>` segment of `<out>/<config>/bin`, computable from the
+/// compilation mode alone (no `Session`) so the CLI can mint matching convenience symlinks.
+pub fn config_segment(compilation_mode: &str) -> String {
     let cpu = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "darwin_arm64",
         ("macos", "x86_64") => "darwin_x86_64",
         ("linux", "x86_64") => "k8",
         (_, arch) => arch,
     };
-    let mode = match sess.global.compilation_mode.as_str() {
+    let mode = match compilation_mode {
         "" => "fastbuild",
         m => m,
     };
     format!("{cpu}-{mode}")
 }
 
-/// Bazel's output bin root for this build. Under `--bazel_build_compat` it's the real
-/// `bazel-out/<config>/bin`; otherwise razel's existing constant `bazel-out/bin` (the
-/// fiction `$(BINDIR)` has always substituted — kept so non-compat goldens are unchanged).
+/// `<cpu>-<compilation_mode>` segment of `<out>/<config>/bin`.
+pub(crate) fn bazel_config(sess: &Session) -> String {
+    config_segment(&sess.global.compilation_mode)
+}
+
+/// Bazel-style convenience symlinks for a build: `(link-name, relative-target)` pairs to
+/// create in the workspace root. Default → `razel-bin`/`razel-testlogs` →
+/// `razel-out/<config>/{bin,testlogs}`; under `--bazel_build_compat` → `bazel-bin`/
+/// `bazel-testlogs` → `bazel-out/<config>/…` (mirroring Bazel exactly).
+pub fn convenience_symlinks(flags: &GlobalFlags) -> Vec<(String, String)> {
+    let r = if flags.bazel_build_compat { "bazel" } else { "razel" };
+    let cfg = config_segment(&flags.compilation_mode);
+    vec![
+        (format!("{r}-bin"), format!("{r}-out/{cfg}/bin")),
+        (format!("{r}-testlogs"), format!("{r}-out/{cfg}/testlogs")),
+    ]
+}
+
+/// The output bin root for this build. `--bazel_build_compat` → the real Bazel
+/// `bazel-out/<config>/bin` (so the parity goldens, captured from `bazel aquery`, match
+/// byte-for-byte). Otherwise, when the driver opts into the output tree
+/// (`bin_tree_layout`, which the CLI sets) → razel's own `razel-out/<config>/bin` (same
+/// structure, razel name; generated files never pollute the source tree, `razel-bin`
+/// mirrors `bazel-bin`). With neither — the bare library default used by analysis tests —
+/// it's the legacy `bazel-out/bin` fiction that `$(BINDIR)` has always substituted, and
+/// outputs stay package-relative (in-tree).
 pub(crate) fn bin_dir(sess: &Session) -> String {
     if sess.global.bazel_build_compat {
         format!("bazel-out/{}/bin", bazel_config(sess))
+    } else if sess.global.bin_tree_layout {
+        format!("razel-out/{}/bin", bazel_config(sess))
     } else {
         "bazel-out/bin".to_string()
     }
 }
 
-/// Like [`qualify`], but for OUTPUT (generated) files. Under `--bazel_build_compat`, outputs
-/// live in Bazel's `bazel-out/<config>/bin/<pkg>/…` tree, so the path carries the prefix into
-/// command lines, declared outputs, and dependents' references BY CONSTRUCTION (matching
-/// Bazel; no rewrite). Without compat it is exactly [`qualify`] — so misclassifying a source
-/// as an output is invisible in the default (golden) mode and only matters under compat.
+/// Like [`qualify`], but for OUTPUT (generated) files. When the build opts into the output
+/// tree (`--bazel_build_compat` → `bazel-out/…`, or the CLI's `bin_tree_layout` →
+/// `razel-out/…`), outputs live in `<root>/<config>/bin/<pkg>/…`, so the path carries the
+/// prefix into command lines, declared outputs, and dependents' references BY CONSTRUCTION
+/// (matching Bazel; no rewrite). Otherwise it is exactly [`qualify`] (in-tree).
 pub(crate) fn qualify_output(sess: &Session, path: &str) -> String {
     bin_prefix(sess, &qualify(sess, path))
 }
 
-/// Prefix an ALREADY-package-qualified output path with the bin root under
-/// `--bazel_build_compat` (no-op otherwise). For outputs whose name derives from a qualified
-/// path (e.g. a `.o` named `<qualified-src>.o`) where re-qualifying would double the package.
+/// Prefix an ALREADY-package-qualified output path with the bin root ([`bin_dir`]) when the
+/// build uses the output tree; otherwise a no-op. For outputs whose name derives from a
+/// qualified path (e.g. a `.o` named `<qualified-src>.o`) where re-qualifying would double
+/// the package.
 pub(crate) fn bin_prefix(sess: &Session, qualified: &str) -> String {
-    if sess.global.bazel_build_compat {
+    if sess.global.bazel_build_compat || sess.global.bin_tree_layout {
         format!("{}/{qualified}", bin_dir(sess))
     } else {
         qualified.to_string()

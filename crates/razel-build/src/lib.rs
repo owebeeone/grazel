@@ -21,7 +21,9 @@ use razel_loading::{
     analyze_bazel_with, analyze_starlark, analyze_workspace_with, load_tree_report_with_targets,
 };
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
-pub use razel_loading::{AnalyzedTarget, GlobalFlags, resolve_build_file};
+pub use razel_loading::{
+    AnalyzedTarget, GlobalFlags, config_segment, convenience_symlinks, resolve_build_file,
+};
 
 /// Build `target` from a **real Bazel `BUILD`** (loads cc rules from `@rules_cc`,
 /// resolved to razel's native rules). Analysis + execution; single-package.
@@ -132,6 +134,7 @@ fn discover_packages(root: &Path, strict_bazel: bool) -> Vec<String> {
             let name = e.file_name().to_string_lossy().to_string();
             if name.starts_with('.')
                 || name.starts_with("bazel-")
+                || name.starts_with("razel-") // razel-out / razel-bin / razel-testlogs
                 || matches!(name.as_str(), "external" | "node_modules" | "target")
             {
                 continue;

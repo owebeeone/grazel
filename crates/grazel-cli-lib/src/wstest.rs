@@ -1159,7 +1159,7 @@ fn test_verb_protocol(ctx: &StageCtx) -> Result<(), String> {
     if code != Some(0) || !stdout.contains("PASSED") {
         return Err(format!("passing test: exit {code:?}, output: {stdout}"));
     }
-    let log = ws.join(".razel-cache/testlogs/t/ok/test.log");
+    let log = ws.join("razel-testlogs/t/ok/test.log"); // Bazel testlogs layout (via the symlink)
     if !std::fs::read_to_string(&log).map_err(|e| e.to_string())?.contains("fine") {
         return Err("test.log missing the test's stdout".into());
     }

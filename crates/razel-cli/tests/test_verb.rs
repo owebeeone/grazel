@@ -32,8 +32,8 @@ fn passing_sh_test_reports_passed_and_exits_zero() {
     let stdout = String::from_utf8_lossy(&out.stderr); // razel's test summary → stderr (Bazel)
     assert_eq!(out.status.code(), Some(0), "stdout: {stdout}");
     assert!(stdout.contains("//t:ok") && stdout.contains("PASSED"), "{stdout}");
-    // test.log captured (bazel's testlogs shape under the razel cache dir).
-    let log = w.join(".razel-cache/testlogs/t/ok/test.log");
+    // test.log captured (Bazel's testlogs shape, reachable via the razel-testlogs symlink).
+    let log = w.join("razel-testlogs/t/ok/test.log");
     assert!(log.is_file(), "test.log at {}", log.display());
     assert!(std::fs::read_to_string(&log).unwrap().contains("all good"));
     let _ = std::fs::remove_dir_all(&w);
@@ -57,7 +57,7 @@ fn failing_test_reports_failed_and_exits_three() {
     // Bazel's contract: exit 3 = build succeeded, tests failed.
     assert_eq!(out.status.code(), Some(3), "stdout: {stdout}");
     assert!(stdout.contains("//t:bad") && stdout.contains("FAILED"), "{stdout}");
-    let log = w.join(".razel-cache/testlogs/t/bad/test.log");
+    let log = w.join("razel-testlogs/t/bad/test.log");
     assert!(std::fs::read_to_string(&log).unwrap().contains("boom"), "stderr captured");
     let _ = std::fs::remove_dir_all(&w);
 }

@@ -15,9 +15,10 @@
 //! absorbed, not modeled.
 //!
 //! - `js_binary(name, entry_point, srcs=[], data=[])`: ONE action emitting a launcher
-//!   that execs the SOURCE entry (`$(dirname $0)/<entry_point>` — node's walk-up finds
-//!   the workspace node_modules; runfiles trees are the spike's later runfiles step).
-//!   DefaultInfo = the launcher.
+//!   that execs the SOURCE entry by its workspace-relative path (`node <entry_q>`, run from
+//!   the exec root — robust to the output base; node's walk-up finds the workspace
+//!   node_modules; runfiles trees are the spike's later runfiles step). DefaultInfo = the
+//!   launcher.
 //! - `ts_project(name, srcs, deps=[])`: ONE tsc action (`-lite`: no tsconfig modeling
 //!   yet) compiling srcs to `<name>_out/` — the cc-host-toolchain posture:
 //!   non-hermetic, visible in the argv.
@@ -39,16 +40,18 @@ use starlark::values::none::NoneType;
 
 /// The launcher for `js_binary` — one `/bin/sh -c` action emitting one output file.
 ///
-/// V1 runs the entry FROM THE SOURCE TREE: the launcher lands in the entry's package
-/// dir, so `$(dirname $0)/<entry>` is the source file, and node's own walk-up finds
-/// the workspace's fetch-npm-materialized `node_modules` (physical adjacency — ESM
-/// resolution included). No runfiles assembly: the executor sandbox stages declared
-/// outputs only, and a Bazel-faithful runfiles tree is the spike's later runfiles
-/// step, not S3a. `node_modules`/`srcs` are recorded as inputs (the dep edge as
-/// data), not staged.
-fn js_binary_action(entry: &str, entry_q: &str, srcs_q: &[String], out_q: &str) -> AnalyzedAction {
+/// V1 runs the entry FROM THE SOURCE TREE via its workspace-relative path (`entry_q`), with
+/// the launcher invoked from the exec root (`razel run`/`test` set `cwd` = workspace). This is
+/// robust to the output base: the launcher can live in-tree OR under `razel-out/<config>/bin`
+/// while the entry stays a source — `node <entry_q>` resolves identically, and node's own
+/// walk-up from the entry's dir finds the workspace's fetch-npm-materialized `node_modules`
+/// (ESM resolution included). No runfiles assembly: the executor sandbox stages declared
+/// outputs only; a Bazel-faithful runfiles tree (which would make the launcher
+/// cwd-independent) is the spike's later runfiles step, not S3a. `node_modules`/`srcs` are
+/// recorded as inputs (the dep edge as data), not staged.
+fn js_binary_action(entry_q: &str, srcs_q: &[String], out_q: &str) -> AnalyzedAction {
     let script = format!(
-        "{{ echo '#!/bin/sh'; echo 'exec node \"$(dirname \"$0\")/{entry}\" \"$@\"'; }} > {out_q} && chmod +x {out_q}"
+        "{{ echo '#!/bin/sh'; echo 'exec node \"{entry_q}\" \"$@\"'; }} > {out_q} && chmod +x {out_q}"
     );
     let mut inputs = vec![entry_q.to_string()];
     inputs.extend(srcs_q.iter().cloned());
@@ -74,7 +77,7 @@ fn analyze_js_binary(
     record_target(sess, AnalyzedTarget {
         name: canon_label(sess, &name),
         deps: Vec::new(),
-        actions: vec![js_binary_action(&entry, &entry_q, &srcs_q, &out_q)],
+        actions: vec![js_binary_action(&entry_q, &srcs_q, &out_q)],
         default_info: vec![out_q],
         providers: Default::default(),
     });

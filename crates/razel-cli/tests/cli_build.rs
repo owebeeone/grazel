@@ -79,9 +79,12 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
         String::from_utf8_lossy(&out.stderr),
     );
 
-    // The cross-package binary was produced and runs.
-    let bin = root.join("main/hello-world");
-    assert!(bin.exists(), "razel did not produce main/hello-world");
+    // The cross-package binary was produced (under razel-out, reachable via the razel-bin
+    // convenience symlink — Bazel's bazel-bin layout) and runs.
+    let bin = root.join("razel-bin/main/hello-world");
+    assert!(bin.exists(), "razel did not produce razel-bin/main/hello-world");
+    // The source tree is never polluted — outputs live under razel-out, not in-tree.
+    assert!(!root.join("main/hello-world").exists(), "razel wrote an output in-tree (pollution)");
     let run = Command::new(&bin).output().unwrap();
     assert!(
         String::from_utf8_lossy(&run.stdout).starts_with("Hello world"),
