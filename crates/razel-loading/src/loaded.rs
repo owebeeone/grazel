@@ -340,6 +340,59 @@ impl QueryNode {
     }
 }
 
+// ── P0.4: edge-kind resolution (post-declaration) — design §11.2, R4 precedence ─────────────────
+
+/// The classification facts for one canonical label, gathered from the package's declarations.
+/// (P0.5 fills these from the session `aliases`/`output_index`/`config_specs` + the declared-label
+/// set + a source-file check; here they keep the precedence pure + testable.)
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EdgeFacts {
+    pub(crate) is_alias: bool,
+    pub(crate) is_generated: bool,
+    pub(crate) is_config_setting: bool,
+    pub(crate) is_declared_rule: bool,
+    pub(crate) is_source_file: bool,
+}
+
+/// The R4 PRECEDENCE — an alias is *also* a declared rule, so order is load-bearing:
+/// alias → generated → (config_setting only via a select condition) → declared rule → source
+/// file → unresolved (`None`, the caller errors). Pure.
+pub(crate) fn classify_kind(in_select_condition: bool, f: &EdgeFacts) -> Option<EdgeKind> {
+    if f.is_alias {
+        Some(EdgeKind::Alias)
+    } else if f.is_generated {
+        Some(EdgeKind::GeneratedFile)
+    } else if in_select_condition && f.is_config_setting {
+        Some(EdgeKind::ConfigSetting)
+    } else if f.is_declared_rule {
+        Some(EdgeKind::Rule)
+    } else if f.is_source_file {
+        Some(EdgeKind::SourceFile)
+    } else {
+        None
+    }
+}
+
+/// Resolve raw label refs (P0.2) to typed `Edge`s. `canon` canonicalizes a label relative to the
+/// declaring repo/package (§11.3); `gather` returns the [`EdgeFacts`] for a canonical label. An
+/// unresolved ref is a LOUD error (precedence step 6). Parameterized by closures so the session
+/// backing is supplied at P0.5 and the logic stays unit-testable.
+pub(crate) fn resolve_edges(
+    refs: &[RawLabelRef],
+    canon: impl Fn(&str) -> String,
+    gather: impl Fn(&str) -> EdgeFacts,
+) -> Result<Vec<Edge>, String> {
+    let mut edges = Vec::with_capacity(refs.len());
+    for r in refs {
+        let c = canon(&r.label);
+        match classify_kind(r.in_select_condition, &gather(&c)) {
+            Some(kind) => edges.push(Edge { to: c, kind, attr: r.attr.clone() }),
+            None => return Err(format!("unresolved label `{}` in attr `{}`", r.label, r.attr)),
+        }
+    }
+    Ok(edges)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +569,55 @@ mod tests {
             edges: vec![],
         });
         assert_eq!(alias.kind_string(), "alias rule"); // open set — falls out of rule_class
+    }
+
+    // ── P0.4: edge-kind resolution precedence (pure) ─────────────────────────────────────────
+
+    #[test]
+    fn classify_precedence_puts_alias_before_rule() {
+        // R4: an alias IS also a declared rule — alias must win, else aliases misclassify as Rule.
+        let alias_and_rule = EdgeFacts { is_alias: true, is_declared_rule: true, ..Default::default() };
+        assert_eq!(classify_kind(false, &alias_and_rule), Some(EdgeKind::Alias));
+    }
+
+    #[test]
+    fn classify_precedence_full_order() {
+        let generated = EdgeFacts { is_generated: true, is_declared_rule: true, ..Default::default() };
+        assert_eq!(classify_kind(false, &generated), Some(EdgeKind::GeneratedFile));
+        // a config_setting is ConfigSetting ONLY when reached via a select condition…
+        let cfg = EdgeFacts { is_config_setting: true, is_declared_rule: true, ..Default::default() };
+        assert_eq!(classify_kind(true, &cfg), Some(EdgeKind::ConfigSetting));
+        // …otherwise it's just a declared Rule.
+        assert_eq!(classify_kind(false, &cfg), Some(EdgeKind::Rule));
+        let rule = EdgeFacts { is_declared_rule: true, ..Default::default() };
+        assert_eq!(classify_kind(false, &rule), Some(EdgeKind::Rule));
+        let src = EdgeFacts { is_source_file: true, ..Default::default() };
+        assert_eq!(classify_kind(false, &src), Some(EdgeKind::SourceFile));
+        // nothing matches → unresolved.
+        assert_eq!(classify_kind(false, &EdgeFacts::default()), None);
+    }
+
+    #[test]
+    fn resolve_edges_maps_refs_and_errors_on_unresolved() {
+        let refs = vec![
+            RawLabelRef { label: ":base".into(), attr: "deps".into(), in_select_condition: false },
+            RawLabelRef { label: "@p//:cfg".into(), attr: "deps".into(), in_select_condition: true },
+        ];
+        let canon = |l: &str| format!("//pkg{}", l.strip_prefix(':').map(|n| format!(":{n}")).unwrap_or_else(|| l.to_string()));
+        let gather = |c: &str| {
+            if c.contains("cfg") {
+                EdgeFacts { is_config_setting: true, is_declared_rule: true, ..Default::default() }
+            } else {
+                EdgeFacts { is_declared_rule: true, ..Default::default() }
+            }
+        };
+        let edges = resolve_edges(&refs, canon, gather).unwrap();
+        assert_eq!(edges[0].kind, EdgeKind::Rule);
+        assert_eq!(edges[1].kind, EdgeKind::ConfigSetting); // in_select_condition + config_setting
+
+        // an unresolved ref is a loud error.
+        let bad = vec![RawLabelRef { label: ":ghost".into(), attr: "deps".into(), in_select_condition: false }];
+        let err = resolve_edges(&bad, |l| l.to_string(), |_| EdgeFacts::default());
+        assert!(err.is_err());
     }
 }
