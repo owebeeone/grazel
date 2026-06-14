@@ -41,11 +41,13 @@ pub fn build_bazel_with(
     cache: &Cache,
     flags: GlobalFlags,
 ) -> Result<BuildReport, String> {
-    execute(
+    let jobs = flags.jobs;
+    execute_jobs(
         &analyze_bazel_with(build_src, flags)?,
         target,
         exec_root,
         cache,
+        jobs,
     )
 }
 
@@ -63,15 +65,18 @@ pub fn build_workspace_with(
     cache: &Cache,
     flags: GlobalFlags,
 ) -> Result<BuildReport, String> {
-    execute(
+    let jobs = flags.jobs;
+    execute_jobs(
         &analyze_workspace_with(root, top_label, flags)?,
         top_label,
         root,
         cache,
+        jobs,
     )
 }
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::{Condvar, Mutex};
 
 /// A target surfaced by the impact query: its canonical label + coarse kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,14 +182,70 @@ pub fn build_target_report(
     execute(&analyze_build(build_src)?, target, exec_root, cache)
 }
 
+/// Run ONE target's actions in `exec_root` against `cache` (cache hit → 0 exec). The unit
+/// shared by the serial and parallel drivers, so `-j1` and `-jN` run identical action/cache
+/// semantics — only the *order across independent targets* differs. Returns
+/// `(executed_count, produced_paths)`.
+fn run_one_target(
+    t: &AnalyzedTarget,
+    exec_root: &Path,
+    cache: &Cache,
+) -> Result<(usize, Vec<String>), String> {
+    let mut executed = 0;
+    let mut produced = Vec::new();
+    for act in &t.actions {
+        // Digest the declared inputs that exist on disk → the action's content key.
+        let mut inputs = BTreeMap::new();
+        for inp in &act.inputs {
+            if let Ok(bytes) = std::fs::read(exec_root.join(inp)) {
+                inputs.insert(inp.clone(), Digest::of(&bytes));
+            }
+        }
+        let action = Action {
+            argv: act.argv.clone(),
+            inputs,
+            env: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+            tools: BTreeMap::new(),
+            platform: "host".into(),
+            outputs: act.outputs.clone(),
+        };
+        let r = build_action(&action, cache, exec_root).map_err(|e| e.to_string())?;
+        if r.exit_code != 0 {
+            return Err(format!("action failed ({}): {:?}", r.exit_code, act.argv));
+        }
+        if !r.cached {
+            executed += 1;
+        }
+        produced.extend(act.outputs.clone());
+    }
+    Ok((executed, produced))
+}
+
 /// Execute a pre-analyzed target graph: order deps-first and run every action in
-/// `exec_root` (cache hit → 0 exec). Separated from [`analyze_build`] so callers
-/// (the daemon) can reuse warm analysis across builds.
+/// `exec_root` (cache hit → 0 exec). Serial — equivalent to [`execute_jobs`] with `jobs=1`.
+/// Separated from [`analyze_build`] so callers (the daemon) can reuse warm analysis.
 pub fn execute(
     targets: &[AnalyzedTarget],
     target: &str,
     exec_root: &Path,
     cache: &Cache,
+) -> Result<BuildReport, String> {
+    execute_jobs(targets, target, exec_root, cache, 1)
+}
+
+/// [`execute`] with up to `jobs` targets running CONCURRENTLY (S5x). A Kahn ready-queue over
+/// the dep DAG: a target runs only once all its deps complete, so the shared `exec_root` sees
+/// the same writes-before-reads a serial build would; independent targets (same topo layer)
+/// run in parallel WITHOUT a barrier (a finished target unblocks its dependents immediately —
+/// no waiting on a slow sibling). `jobs<=1` is the plain serial walk. The report is
+/// canonicalised to the topo order, so `-j1` and `-jN` are byte-identical (the determinism
+/// bar); the per-action outputs are content-addressed, hence identical regardless of order.
+pub fn execute_jobs(
+    targets: &[AnalyzedTarget],
+    target: &str,
+    exec_root: &Path,
+    cache: &Cache,
+    jobs: usize,
 ) -> Result<BuildReport, String> {
     let by_name: HashMap<String, AnalyzedTarget> = targets
         .iter()
@@ -193,43 +254,122 @@ pub fn execute(
 
     let mut order = Vec::new();
     collect_order(target, &by_name, &mut order, &mut HashSet::new())?;
-
-    let mut produced = Vec::new();
-    let mut executed = 0;
-    for tname in &order {
-        for act in &by_name[tname].actions {
-            // Digest the declared inputs that exist on disk → the action's content key.
-            let mut inputs = BTreeMap::new();
-            for inp in &act.inputs {
-                if let Ok(bytes) = std::fs::read(exec_root.join(inp)) {
-                    inputs.insert(inp.clone(), Digest::of(&bytes));
-                }
-            }
-            let action = Action {
-                argv: act.argv.clone(),
-                inputs,
-                env: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
-                tools: BTreeMap::new(),
-                platform: "host".into(),
-                outputs: act.outputs.clone(),
-            };
-            let r = build_action(&action, cache, exec_root).map_err(|e| e.to_string())?;
-            if r.exit_code != 0 {
-                return Err(format!("action failed ({}): {:?}", r.exit_code, act.argv));
-            }
-            if !r.cached {
-                executed += 1;
-            }
-            produced.extend(act.outputs.clone());
-        }
-    }
-    // Bazel semantics: a build's OUTPUTS are the requested target's DefaultInfo,
-    // not every intermediate (post-order ⇒ the requested target is last).
+    let n = order.len();
+    // Bazel semantics: a build's OUTPUTS are the requested target's DefaultInfo, not every
+    // intermediate (post-order ⇒ the requested target is last in `order`).
     let default_outputs = order
         .last()
         .and_then(|t| by_name.get(t))
         .map(|t| t.default_info.clone())
         .unwrap_or_default();
+
+    if jobs <= 1 {
+        let mut produced = Vec::new();
+        let mut executed = 0;
+        for tname in &order {
+            let (e, p) = run_one_target(&by_name[tname], exec_root, cache)?;
+            executed += e;
+            produced.extend(p);
+        }
+        return Ok(BuildReport { produced, executed, default_outputs });
+    }
+
+    // Parallel. indegree[i] = unfinished in-graph deps of `order[i]`; rdeps[j] = the targets
+    // that depend on j (the edges we relax when j completes).
+    let pos: HashMap<&str, usize> =
+        order.iter().enumerate().map(|(i, t)| (t.as_str(), i)).collect();
+    let mut indeg = vec![0usize; n];
+    let mut rdeps: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, tname) in order.iter().enumerate() {
+        for d in &by_name[tname].deps {
+            if let Some(&j) = pos.get(d.as_str()) {
+                indeg[i] += 1;
+                rdeps[j].push(i);
+            }
+        }
+    }
+    // Per-target result slots (each written by exactly one worker → no contention).
+    let slots: Vec<Mutex<Option<(usize, Vec<String>)>>> =
+        (0..n).map(|_| Mutex::new(None)).collect();
+
+    // All scheduling state under ONE lock so readiness/active/completed stay consistent
+    // (no cross-atomic races); `active` = targets currently running, used to detect a stall
+    // (ready-empty + active==0 + work-remaining ⇒ a dependency cycle).
+    struct Sched {
+        ready: VecDeque<usize>,
+        indeg: Vec<usize>,
+        active: usize,
+        completed: usize,
+        err: Option<String>,
+    }
+    let sched = Mutex::new(Sched {
+        ready: (0..n).filter(|&i| indeg[i] == 0).collect(),
+        indeg,
+        active: 0,
+        completed: 0,
+        err: None,
+    });
+    let cv = Condvar::new();
+
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let i = {
+                        let mut s = sched.lock().expect("sched");
+                        loop {
+                            if s.err.is_some() || s.completed == n {
+                                return;
+                            }
+                            if let Some(i) = s.ready.pop_front() {
+                                s.active += 1;
+                                break i;
+                            }
+                            if s.active == 0 {
+                                // Nothing ready, nothing running, work remains → cycle.
+                                s.err = Some("dependency cycle in parallel execute".into());
+                                cv.notify_all();
+                                return;
+                            }
+                            s = cv.wait(s).expect("sched wait");
+                        }
+                    };
+                    let res = run_one_target(&by_name[&order[i]], exec_root, cache);
+                    let mut s = sched.lock().expect("sched");
+                    match res {
+                        Ok(r) => *slots[i].lock().expect("slot") = Some(r),
+                        Err(e) => {
+                            s.err = Some(e);
+                            cv.notify_all();
+                            return;
+                        }
+                    }
+                    for &j in &rdeps[i] {
+                        s.indeg[j] -= 1;
+                        if s.indeg[j] == 0 {
+                            s.ready.push_back(j);
+                        }
+                    }
+                    s.active -= 1;
+                    s.completed += 1;
+                    cv.notify_all();
+                }
+            });
+        }
+    });
+
+    let sched = sched.into_inner().expect("sched");
+    if let Some(e) = sched.err {
+        return Err(e);
+    }
+    // Flatten results in topo order → produced/executed independent of completion order.
+    let mut produced = Vec::new();
+    let mut executed = 0;
+    for slot in &slots {
+        let (e, p) = slot.lock().expect("slot").take().expect("every target ran");
+        executed += e;
+        produced.extend(p);
+    }
     Ok(BuildReport { produced, executed, default_outputs })
 }
 
@@ -1095,5 +1235,50 @@ cc_binary(name = "app", src = "app.c", deps = [":math"])
         assert!(app.exists());
         let status = std::process::Command::new(&app).status().unwrap();
         assert_eq!(status.code(), Some(0), "linked binary did not run/return 0");
+    }
+
+    /// S5x: the parallel executor. Diamond `base <- {a, b} <- top`. Each dependent CATs
+    /// its deps' outputs, so a build that completes AT ALL proves deps ran first (cat fails
+    /// on a missing input); `a` and `b` are independent (run concurrently at jobs>=2). The
+    /// SAME graph at jobs=1 and jobs=4 must give a byte-identical report + outputs — the
+    /// `-j1 == -jN` determinism bar.
+    #[test]
+    fn parallel_execute_respects_deps_and_is_deterministic_across_jobs() {
+        use razel_loading::{AnalyzedAction, AnalyzedTarget};
+        let act = |argv: &[&str], ins: &[&str], out: &str| AnalyzedAction {
+            mnemonic: "Gen".into(),
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            inputs: ins.iter().map(|s| s.to_string()).collect(),
+            outputs: vec![out.into()],
+        };
+        let t = |name: &str, deps: &[&str], a: AnalyzedAction, out: &str| AnalyzedTarget {
+            name: name.into(),
+            deps: deps.iter().map(|s| s.to_string()).collect(),
+            actions: vec![a],
+            default_info: vec![out.into()],
+            ..Default::default()
+        };
+        let targets = vec![
+            t("base", &[], act(&["/bin/sh", "-c", "echo base > base.txt"], &[], "base.txt"), "base.txt"),
+            t("a", &["base"], act(&["/bin/sh", "-c", "cat base.txt > a.txt; echo a >> a.txt"], &["base.txt"], "a.txt"), "a.txt"),
+            t("b", &["base"], act(&["/bin/sh", "-c", "cat base.txt > b.txt; echo b >> b.txt"], &["base.txt"], "b.txt"), "b.txt"),
+            t("top", &["a", "b"], act(&["/bin/sh", "-c", "cat a.txt b.txt > top.txt"], &["a.txt", "b.txt"], "top.txt"), "top.txt"),
+        ];
+        let run = |jobs: usize| {
+            let exec = tempfile::tempdir().unwrap();
+            let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+            let r = execute_jobs(&targets, "top", exec.path(), &cache, jobs).expect("build ok");
+            let top = std::fs::read_to_string(exec.path().join("top.txt")).unwrap();
+            (r.executed, r.produced, top)
+        };
+        let (e1, p1, top1) = run(1);
+        let (e4, p4, top4) = run(4);
+        // Deps respected (cat only succeeds if inputs exist first) — same content either way.
+        assert_eq!(top1, "base\na\nbase\nb\n", "ordering/content: {top1:?}");
+        // -j1 == -jN: identical executed count, produced list, and output bytes.
+        assert_eq!(e1, 4, "fresh cache executes all four");
+        assert_eq!(e4, 4, "parallel executes all four");
+        assert_eq!(p1, p4, "produced list deterministic across jobs: {p1:?} vs {p4:?}");
+        assert_eq!(top1, top4, "output byte-identical across jobs");
     }
 }

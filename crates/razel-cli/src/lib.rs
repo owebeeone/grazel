@@ -104,6 +104,8 @@ struct Opts {
     defines: Vec<String>,
     /// `--linkopt`.
     linkopts: Vec<String>,
+    /// `--jobs`/`-j`: parallel-executor concurrency (0 ⇒ serial default).
+    jobs: usize,
     positionals: Vec<String>,
 }
 
@@ -132,6 +134,7 @@ impl Opts {
                 .iter()
                 .filter_map(|d| d.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
                 .collect(),
+            jobs: self.jobs,
             ..Default::default()
         }
     }
@@ -206,6 +209,12 @@ static HANDLERS: &[(&str, Handler)] = &[
     ("conlyopt", |o, v| o.conlyopts.extend(v)),
     ("linkopt", |o, v| o.linkopts.extend(v)),
     ("define", |o, v| o.defines.extend(v)),
+    // S5x: --jobs/-j now takes effect (was recognized-but-ignored) → the parallel executor.
+    ("jobs", |o, v| {
+        if let Some(n) = v.and_then(|v| v.parse::<usize>().ok()) {
+            o.jobs = n;
+        }
+    }),
 ];
 
 /// Look up a long flag name across razel's flags then Bazel's.
@@ -973,5 +982,17 @@ mod flag_mapping_tests {
         assert_eq!(p(&["--linkopt=-s"]).global_flags().linkopts, vec!["-s"]);
         // fastbuild (default) adds no optimization flags.
         assert!(p(&["-c", "fastbuild"]).global_flags().copts.is_empty());
+    }
+
+    #[test]
+    fn jobs_flag_reaches_global_flags_in_every_form() {
+        // S5x: --jobs N / --jobs=N / -j N all land in GlobalFlags.jobs (→ execute_jobs).
+        assert_eq!(p(&["build", "--jobs", "4"]).global_flags().jobs, 4, "--jobs N");
+        assert_eq!(p(&["build", "--jobs=2"]).global_flags().jobs, 2, "--jobs=N");
+        assert_eq!(p(&["build", "-j", "6"]).global_flags().jobs, 6, "-j N");
+        // Default = 0 ⇒ execute_jobs treats it as serial (no behaviour change).
+        assert_eq!(p(&["build"]).global_flags().jobs, 0, "unset = serial");
+        // A non-numeric value is ignored (stays serial), never a parse error.
+        assert_eq!(p(&["build", "--jobs", "xyz"]).global_flags().jobs, 0, "bad value = serial");
     }
 }

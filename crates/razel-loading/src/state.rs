@@ -898,6 +898,10 @@ pub struct GlobalFlags {
     /// never an error. Full rc/CLI wiring lands at S6; the engine honors the bool
     /// from S1.
     pub strict_bazel: bool,
+    /// `--jobs`/`-j` (S5x): max targets the executor runs CONCURRENTLY. `0`/`1` = serial
+    /// (the default — no behaviour change); `N>1` enables the parallel action executor
+    /// ([`crate`]-external: `razel-build`'s `execute_jobs`). Build-phase only; analysis ignores it.
+    pub jobs: usize,
 }
 
 impl GlobalFlags {
