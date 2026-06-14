@@ -12,6 +12,7 @@ use crate::labels::LabelV;
 use crate::selects::{
     FrozenSelectBranches, FrozenSelectExpr, SelectBranches, SelectExpr, key_string,
 };
+use razel_ir::TargetKind;
 use starlark::values::dict::DictRef;
 use starlark::values::list::ListRef;
 use starlark::values::tuple::TupleRef;
@@ -263,6 +264,82 @@ pub(crate) fn extract_label_refs(attr: &str, raw: &RawAttr, out: &mut Vec<RawLab
     }
 }
 
+// ── P0.3: the loading-phase node model (LoadedTarget / QueryNode / Edge) — design §11.1 ─────────
+
+/// A typed label-edge in the loading-phase graph. `kind` is assigned by the P0.4 resolution pass
+/// (it needs the package's `output_index`/`aliases`/`config_specs`); `attr` is the provenance.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Edge {
+    pub(crate) to: String,
+    pub(crate) kind: EdgeKind,
+    pub(crate) attr: String,
+}
+
+/// The edge-kind taxonomy (design §11.2). `deps()`/`rdeps()` traverse the union; `--implicit_deps`
+/// gates `Implicit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeKind {
+    Rule,
+    Alias,
+    SourceFile,
+    GeneratedFile,
+    /// A `select()` condition label (`@platforms//…`, a `config_setting`).
+    ConfigSetting,
+    Implicit,
+}
+
+/// A loading-phase rule node: raw attrs (UNRESOLVED `select()`s), the query-facing `rule_class`,
+/// and the typed label-edges. Serializable + `Send` (no Starlark heap escapes). Design §11.1.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoadedTarget {
+    /// Identity: the bzlmod-canonical label (§11.3).
+    pub(crate) label: String,
+    pub(crate) repo: String,
+    pub(crate) package: String,
+    /// The registered rule macro the target was declared with ("rust_library", "alias", …) — the
+    /// QUERY-facing kind, NOT the coarse `TargetKind`.
+    pub(crate) rule_class: String,
+    /// The build's coarse kind (action minting only); derivable from the label at load.
+    pub(crate) kind: TargetKind,
+    pub(crate) attrs: std::collections::BTreeMap<String, RawAttr>,
+    pub(crate) edges: Vec<Edge>,
+}
+
+/// A node in the query graph — Bazel `deps()` emits file labels too, and `kind()` classifies them
+/// (design §11.1). `attr()`/`labels()` apply only to `Target`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum QueryNode {
+    Target(LoadedTarget),
+    SourceFile { label: String },
+    /// An output label → the rule that generates it.
+    GeneratedFile { label: String, by: String },
+    /// A synthesized implicit/toolchain node (§13).
+    Implicit { label: String, rule_class: String },
+}
+
+impl QueryNode {
+    /// The canonical label of this node.
+    pub(crate) fn label(&self) -> &str {
+        match self {
+            QueryNode::Target(t) => &t.label,
+            QueryNode::SourceFile { label }
+            | QueryNode::GeneratedFile { label, .. }
+            | QueryNode::Implicit { label, .. } => label,
+        }
+    }
+
+    /// The `kind()` / `--output=label_kind` string (design §12), an OPEN set: a rule node prints
+    /// `"<rule_class> rule"`, a source file `"source file"`, a generated file `"generated file"`.
+    pub(crate) fn kind_string(&self) -> String {
+        match self {
+            QueryNode::Target(t) => format!("{} rule", t.rule_class),
+            QueryNode::SourceFile { .. } => "source file".to_string(),
+            QueryNode::GeneratedFile { .. } => "generated file".to_string(),
+            QueryNode::Implicit { rule_class, .. } => format!("{rule_class} rule"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +483,38 @@ mod tests {
             got,
             [("//:base".to_string(), false), ("@p//:c".into(), true), ("//:x".into(), false)]
         );
+    }
+
+    // ── P0.3: node kind strings ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn query_node_kind_strings_match_bazel_shapes() {
+        let lt = LoadedTarget {
+            label: "@crates//:blake3".into(),
+            repo: "crates".into(),
+            package: "".into(),
+            rule_class: "rust_library".into(),
+            kind: TargetKind::Library,
+            attrs: std::collections::BTreeMap::new(),
+            edges: vec![],
+        };
+        let t = QueryNode::Target(lt);
+        assert_eq!(t.kind_string(), "rust_library rule");
+        assert_eq!(t.label(), "@crates//:blake3");
+        assert_eq!(QueryNode::SourceFile { label: "//p:a.rs".into() }.kind_string(), "source file");
+        assert_eq!(
+            QueryNode::GeneratedFile { label: "//p:gen.rs".into(), by: "//p:g".into() }.kind_string(),
+            "generated file"
+        );
+        let alias = QueryNode::Target(LoadedTarget {
+            label: "@crates//:x".into(),
+            repo: "crates".into(),
+            package: "".into(),
+            rule_class: "alias".into(),
+            kind: TargetKind::Library,
+            attrs: std::collections::BTreeMap::new(),
+            edges: vec![],
+        });
+        assert_eq!(alias.kind_string(), "alias rule"); // open set — falls out of rule_class
     }
 }
