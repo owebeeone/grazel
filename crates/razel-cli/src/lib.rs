@@ -47,6 +47,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("build") => cmd_build(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("test") => cmd_test(&args[1..]),
+        Some("clean") => cmd_clean(&args[1..]),
         Some("affected") => cmd_affected(&args[1..]),
         Some("subscribe") => cmd_subscribe(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
@@ -69,6 +70,9 @@ fn print_usage() {
 
 USAGE (Bazel-syntax flags; all Bazel options are recognized):
   razel build <target>... [--disk_cache <dir>] [-C <dir>] [--daemon] [--socket <s>] [--cbor]
+  razel run <target> [-- args…] [-C <dir>]
+  razel test <target>... [-j N] [-C <dir>]
+  razel clean [--expunge] [-C <dir>]
   razel affected <file>... [-C <dir>] [--daemon] [--socket <s>] [--cbor]
   razel subscribe [-C <dir>] [--socket <s>] [--cbor]
   razel version [--daemon] [--socket <s>] [--cbor]
@@ -106,6 +110,8 @@ struct Opts {
     linkopts: Vec<String>,
     /// `--jobs`/`-j`: parallel-executor concurrency (0 ⇒ serial default).
     jobs: usize,
+    /// `clean --expunge` (Bazel): the more-thorough clean.
+    expunge: bool,
     positionals: Vec<String>,
 }
 
@@ -215,6 +221,8 @@ static HANDLERS: &[(&str, Handler)] = &[
             o.jobs = n;
         }
     }),
+    // `clean --expunge` (handled so it doesn't self-diagnose as unsupported).
+    ("expunge", |o, v| o.expunge = v.as_deref() != Some("false")),
 ];
 
 /// Look up a long flag name across razel's flags then Bazel's.
@@ -493,26 +501,113 @@ fn cmd_run(args: &[String]) -> ExitCode {
 /// build itself failed. stdout+stderr land in
 /// `.razel-cache/testlogs/<pkg>/<name>/test.log`; one bazel-shaped summary line
 /// (`//pkg:name PASSED in 0.3s`) per target.
+/// `razel test <target>... [-j N]` (Bazel `test`): build each target, exec it, apply Bazel's
+/// test protocol — exit 0 (all pass) / 3 (a test failed) / 1 (a build failed) — write a
+/// per-target `testlogs/<pkg>/<name>/test.log`, print a PASSED/FAILED line per target plus a
+/// summary. `-j N` runs up to N targets CONCURRENTLY (test-level parallelism; each target's
+/// own build stays serial). Pattern targets (`//...`) aren't expanded yet — list explicitly.
 fn cmd_test(args: &[String]) -> ExitCode {
     let o = match parse_opts_with_rc(&["common", "build", "test"], args) {
         Ok(o) => o,
         Err(c) => return c,
     };
-    let Some(target_arg) = o.positionals.first().cloned() else {
-        eprintln!("razel test: expected <target>");
+    let targets = o.positionals.clone();
+    if targets.is_empty() {
+        eprintln!("razel test: expected <target>...");
         return ExitCode::from(EX_USAGE);
+    }
+    // §1b: ONE workspace-writer lock for the whole batch (the per-target builds run under it).
+    let _writer = match razel_daemon::outlock::acquire(&o.workspace, "razel-local", "") {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("razel: {e}");
+            return ExitCode::FAILURE;
+        }
     };
-    let result = match local_build(&o, &target_arg) {
-        Ok(r) => r,
+    let cache = match open_cache(&o) {
+        Ok(c) => c,
         Err(c) => return c,
     };
+    // Per-target builds are SERIAL (jobs = 1); the -j pool parallelizes ACROSS tests.
+    let mut build_flags = o.global_flags();
+    build_flags.jobs = 1;
+    let jobs = o.jobs.max(1);
+
+    // Run each target's (build → exec → verdict) in a jobs-bounded pool, into index-keyed
+    // slots so the printed order is the target order regardless of completion order.
+    let slots: Vec<std::sync::Mutex<Option<TestOutcome>>> =
+        (0..targets.len()).map(|_| std::sync::Mutex::new(None)).collect();
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| loop {
+                let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(t) = targets.get(i) else { break };
+                let outcome = run_one_test(&o, t, &cache, build_flags.clone());
+                *slots[i].lock().expect("test slot") = Some(outcome);
+            });
+        }
+    });
+
+    let (mut passed, mut failed, mut build_err) = (0usize, 0usize, 0usize);
+    for (i, slot) in slots.iter().enumerate() {
+        match slot.lock().expect("test slot").take().expect("target ran") {
+            TestOutcome::Passed(secs) => {
+                passed += 1;
+                println!("{}  PASSED in {secs:.1}s", targets[i]);
+            }
+            TestOutcome::Failed(secs, log) => {
+                failed += 1;
+                println!("{}  FAILED in {secs:.1}s\n  log: {log}", targets[i]);
+            }
+            TestOutcome::BuildError(msg) => {
+                build_err += 1;
+                println!("{}  BUILD FAILED", targets[i]);
+                if !msg.is_empty() {
+                    println!("  {msg}");
+                }
+            }
+        }
+    }
+    let ran = passed + failed;
+    let tail = if build_err > 0 {
+        format!(", {build_err} not built")
+    } else {
+        String::new()
+    };
+    println!(
+        "Executed {ran} out of {} tests: {passed} passing, {failed} failing{tail}.",
+        targets.len()
+    );
+    // Bazel exit codes: 1 = build/analysis error, 3 = a test failed, 0 = all passed.
+    if build_err > 0 {
+        ExitCode::FAILURE
+    } else if failed > 0 {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// One test target's verdict.
+enum TestOutcome {
+    Passed(f64),
+    Failed(f64, String),
+    BuildError(String),
+}
+
+/// Build + exec one test target, capture `test.log`, return the verdict. A build failure or a
+/// missing runnable output is a `BuildError` (exit 1, never the tests-failed code).
+fn run_one_test(o: &Opts, target_arg: &str, cache: &Cache, flags: GlobalFlags) -> TestOutcome {
+    let result = match build_one(o, target_arg, cache, flags) {
+        Ok(r) => r,
+        Err(_) => return TestOutcome::BuildError(String::new()),
+    };
     if matches!(result.status, BuildStatus::Failed) {
-        print_build_result(&result);
-        return ExitCode::FAILURE; // build failure = 1, never 3
+        return TestOutcome::BuildError(result.message.unwrap_or_default());
     }
     let Some(exe) = result.outputs.first() else {
-        eprintln!("razel test: `{target_arg}` produced no runnable test output");
-        return ExitCode::FAILURE;
+        return TestOutcome::BuildError(format!("`{target_arg}` produced no runnable test output"));
     };
     let t0 = std::time::Instant::now();
     let out = match std::process::Command::new(o.workspace.join(&exe.path))
@@ -520,10 +615,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
         .output()
     {
         Ok(out) => out,
-        Err(e) => {
-            eprintln!("razel test: cannot exec {}: {e}", exe.path);
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return TestOutcome::BuildError(format!("cannot exec {}: {e}", exe.path)),
     };
     let secs = t0.elapsed().as_secs_f64();
     // bazel's testlogs shape under the razel cache dir.
@@ -533,17 +625,42 @@ fn cmd_test(args: &[String]) -> ExitCode {
     let _ = std::fs::create_dir_all(&log_dir);
     let mut log = out.stdout.clone();
     log.extend_from_slice(&out.stderr);
-    let _ = std::fs::write(log_dir.join("test.log"), &log);
-    let passed = out.status.success();
-    println!(
-        "{target_arg} {} in {secs:.1}s",
-        if passed { "PASSED" } else { "FAILED" }
-    );
-    if passed {
-        ExitCode::SUCCESS
+    let log_path = log_dir.join("test.log");
+    let _ = std::fs::write(&log_path, &log);
+    if out.status.success() {
+        TestOutcome::Passed(secs)
     } else {
-        println!("  log: {}", log_dir.join("test.log").display());
-        ExitCode::from(3)
+        TestOutcome::Failed(secs, log_path.display().to_string())
+    }
+}
+
+/// `razel clean` (Bazel `clean`): remove razel's output/state for this workspace — the
+/// `.razel-cache/` dir (the content-addressed action cache + `testlogs/` + the workspace
+/// lock). Bazel's `clean` wipes the output base; `.razel-cache` IS razel's output base. The
+/// in-tree generated outputs can't be reclaimed yet (no output base → no manifest of what's
+/// generated; tracked debt). `--expunge`/`--async` are accepted (Bazel-compat): razel keeps a
+/// single state dir, so `--expunge` is currently equivalent and `--async` runs synchronously.
+/// Idempotent (absent dir = success), like Bazel.
+fn cmd_clean(args: &[String]) -> ExitCode {
+    let o = match parse_opts(args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    let dir = o.workspace.join(".razel-cache");
+    let how = if o.expunge { "expunged" } else { "cleaned" };
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {
+            println!("razel: {how} {}", dir.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("razel: nothing to clean ({} absent)", dir.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("razel clean: {}: {e}", dir.display());
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -689,6 +806,18 @@ fn cmd_daemon(args: &[String]) -> ExitCode {
 /// A `//pkg:name` label builds through the **multi-package workspace** loader
 /// (cross-package deps load on demand); a bare `name`/`:name` builds the workspace's
 /// own `BUILD` single-package. Both honor the global cc flags (`-c`/`--copt`/…).
+/// Open the workspace's content-addressed cache (`--disk_cache` or `<ws>/.razel-cache`).
+fn open_cache(o: &Opts) -> Result<Cache, ExitCode> {
+    let cache_path = o
+        .cache
+        .clone()
+        .unwrap_or_else(|| o.workspace.join(".razel-cache"));
+    Cache::new(&cache_path).map_err(|e| {
+        eprintln!("razel build: cannot open cache {}: {e}", cache_path.display());
+        ExitCode::FAILURE
+    })
+}
+
 fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
     // §1b: a local in-process build is a workspace WRITER too — same lock, same
     // fail-loud as the daemons (released on return via Drop).
@@ -697,27 +826,28 @@ fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
             eprintln!("razel: {e}");
             ExitCode::FAILURE
         })?;
-    let cache_path = o
-        .cache
-        .clone()
-        .unwrap_or_else(|| o.workspace.join(".razel-cache"));
-    let cache = Cache::new(&cache_path).map_err(|e| {
-        eprintln!(
-            "razel build: cannot open cache {}: {e}",
-            cache_path.display()
-        );
-        ExitCode::FAILURE
-    })?;
+    let cache = open_cache(o)?;
+    build_one(o, target_arg, &cache, o.global_flags())
+}
 
+/// Build ONE target against an already-open `cache` with explicit `flags` — the CALLER holds
+/// the workspace lock. Factored from [`local_build`] so the `test` batch holds the lock once
+/// and builds many targets (each with `flags.jobs = 1`; cross-test parallelism is the batch
+/// pool's job, not the per-build executor's).
+fn build_one(
+    o: &Opts,
+    target_arg: &str,
+    cache: &Cache,
+    flags: GlobalFlags,
+) -> Result<BuildResult, ExitCode> {
     let report = if target_arg.starts_with("//") {
         // Workspace label → load packages on demand from the workspace root.
-        build_workspace_with(&o.workspace, target_arg, &cache, o.global_flags())
+        build_workspace_with(&o.workspace, target_arg, cache, flags)
     } else {
         // Bare name / :name → single-package build from the workspace's root package.
         // Route through the canonical resolver so E-mode's `BUILD.razel` is found (and its
         // XOR with bazel grammar enforced), not just BUILD/BUILD.bazel (RG 0011).
         let name = target_arg.rsplit(':').next().unwrap_or(target_arg);
-        let flags = o.global_flags();
         let build_path = match resolve_build_file(&o.workspace, flags.strict_bazel) {
             Ok(Some(p)) => p,
             Ok(None) => {
@@ -736,7 +866,7 @@ fn local_build(o: &Opts, target_arg: &str) -> Result<BuildResult, ExitCode> {
             eprintln!("razel build: cannot read {}: {e}", build_path.display());
             ExitCode::FAILURE
         })?;
-        build_bazel_with(&build_src, name, &o.workspace, &cache, flags)
+        build_bazel_with(&build_src, name, &o.workspace, cache, flags)
     };
 
     Ok(match report {

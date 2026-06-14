@@ -102,3 +102,32 @@ fn build_failure_is_not_a_test_failure_exit() {
     assert_eq!(out.status.code(), Some(1), "build failure = exit 1, not 3");
     let _ = std::fs::remove_dir_all(&w);
 }
+
+/// `razel test <a> <b> -j N` (Bazel multi-target): both run (one passes, one fails), the
+/// summary aggregates, and a failing test exits 3 (build OK). Exercises the -j test pool.
+#[test]
+fn multi_target_test_with_jobs_aggregates_and_exits_three() {
+    let w = ws("multi");
+    write(
+        &w.join("t/BUILD"),
+        "load(\"@rules_shell//shell:sh_test.bzl\", \"sh_test\")\n\
+         sh_test(name = \"ok\", srcs = [\"ok.sh\"])\n\
+         sh_test(name = \"bad\", srcs = [\"bad.sh\"])\n",
+    );
+    write(&w.join("t/ok.sh"), "#!/bin/sh\necho good\nexit 0\n");
+    write(&w.join("t/bad.sh"), "#!/bin/sh\necho boom\nexit 1\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_razel"))
+        .args(["test", "//t:ok", "//t:bad", "-j", "2", "-C"])
+        .arg(&w)
+        .output()
+        .expect("razel test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(3), "one test failed → exit 3; stdout: {stdout}");
+    assert!(stdout.contains("//t:ok") && stdout.contains("PASSED"), "{stdout}");
+    assert!(stdout.contains("//t:bad") && stdout.contains("FAILED"), "{stdout}");
+    assert!(
+        stdout.contains("Executed 2 out of 2 tests: 1 passing, 1 failing"),
+        "summary: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&w);
+}
