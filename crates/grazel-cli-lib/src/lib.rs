@@ -94,8 +94,53 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("build" | "affected") => routed_razel_verb(args),
         // GR3b: run streams the invocation through grazeld (§4b client side).
         Some("run") => grazel_run(&args[1..]),
+        // grazel's own help index; razel-surface verbs delegate to razel's help.
+        Some("help") => grazel_help(&args[1..]),
         _ => razel_cli::run(args),
     }
+}
+
+/// `grazel help [<command>]` (Bazel `help` shape) — grazel's verb index + per-command help.
+/// razel-surface verbs (routed verbatim) delegate to razel's own supported-only help; the
+/// grazel-flavored verbs are documented here. Like razel, only flags that take effect appear.
+fn grazel_help(args: &[String]) -> ExitCode {
+    // Routed verbatim to razel → razel's flag help applies unchanged.
+    const RAZEL_SURFACE: &[&str] = &["build", "affected", "test", "clean", "subscribe"];
+    // (name, args, summary, supported options) for the grazel-flavored verbs.
+    const GRAZEL_VERBS: &[(&str, &str, &str, &str)] = &[
+        ("run", "<target> [-- args…]", "Build & run a target, streamed through grazeld.", "--scope=<s>, -C/--workspace=<dir>, --no_daemon (razel-local)"),
+        ("scope", "[--list]", "Resolve or list build scopes.", "--scope=<s>, -C/--workspace=<dir>, --list"),
+        ("ws", "test [--stage=N|--list]", "Workstream acceptance instrument.", "--stage=<n>, --list, --scope=<s>"),
+        ("daemon", "run|ping|stop|status", "Run/control grazeld (the one-binary node).", "--scope=<s>, -C/--workspace=<dir>"),
+        ("shutdown", "[--all]", "Stop grazeld scope daemon(s).", "--all, --scope=<s>"),
+        ("version", "", "Print grazel (this distribution) version.", ""),
+        ("help", "[<command>]", "Print help for a command, or this index.", ""),
+    ];
+    if let Some(cmd) = args.first().map(String::as_str) {
+        if RAZEL_SURFACE.contains(&cmd) {
+            return razel_cli::run(&["help".to_string(), cmd.to_string()]);
+        }
+        if let Some((n, a, s, opts)) = GRAZEL_VERBS.iter().find(|(n, ..)| *n == cmd) {
+            println!("Usage: grazel {n} {a}\n\n{s}");
+            if !opts.is_empty() {
+                println!("\nSupported options: {opts}");
+            }
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("grazel: unknown command {cmd:?}\n");
+    }
+    println!("grazel — razel + iroh build node (one binary)\n");
+    println!("Usage: grazel <command> <options> ...\n");
+    println!("grazel commands:");
+    for (n, _, s, _) in GRAZEL_VERBS {
+        println!("  {n:<10} {s}");
+    }
+    println!("\nrazel verbs (routed through grazeld; razel's surface verbatim):");
+    for v in RAZEL_SURFACE {
+        println!("  {v:<10} (run `grazel help {v}`)");
+    }
+    println!("\nGetting more help:\n  grazel help <command>   Print help and the supported options for <command>.");
+    ExitCode::SUCCESS
 }
 
 /// `grazel run <target> [-- prog args…]` — the streamed dev-loop verb. Flag

@@ -52,43 +52,134 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("subscribe") => cmd_subscribe(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
         Some("daemon") => cmd_daemon(&args[1..]),
+        Some("help") => {
+            cmd_help(&args[1..]);
+            ExitCode::SUCCESS
+        }
         Some("-h") | Some("--help") | None => {
-            print_usage();
+            cmd_help(&[]);
             ExitCode::SUCCESS
         }
         Some(other) => {
             eprintln!("razel: unknown command {other:?}\n");
-            print_usage();
+            cmd_help(&[]);
             ExitCode::from(EX_USAGE)
         }
     }
 }
 
-fn print_usage() {
-    eprint!(
-        "razel — build engine CLI
+/// A flag razel ACTUALLY honors — the help surface. Kept ⊆ [`HANDLERS`] (the support
+/// definition) by `help_documents_only_supported_flags`, so help never advertises a
+/// recognized-but-ignored Bazel flag.
+struct FlagHelp {
+    name: &'static str,
+    abbrev: Option<char>,
+    arg: Option<&'static str>,
+    desc: &'static str,
+}
 
-USAGE (Bazel-syntax flags; all Bazel options are recognized):
-  razel build <target>... [--disk_cache <dir>] [-C <dir>] [--daemon] [--socket <s>] [--cbor]
-  razel run <target> [-- args…] [-C <dir>]
-  razel test <target>... [-j N] [-C <dir>]
-  razel clean [--expunge] [-C <dir>]
-  razel affected <file>... [-C <dir>] [--daemon] [--socket <s>] [--cbor]
-  razel subscribe [-C <dir>] [--socket <s>] [--cbor]
-  razel version [--daemon] [--socket <s>] [--cbor]
-  razel daemon [-C <dir>] [--disk_cache <dir>] [--socket <s>]
+/// Shown under every command.
+static COMMON_FLAGS: &[&str] = &["workspace", "disk_cache"];
 
-  <target>          //pkg:name (multi-package workspace) or name/:name (single BUILD)
-  --disk_cache <d>  content-addressed cache dir (default: <workspace>/.razel-cache)
-  -C, --workspace   workspace dir with BUILD + sources (default: .) [razel-only]
-  --daemon          route the request to a running `razel daemon` over UDS [razel-only]
-  --socket <s>      daemon socket path (default: <workspace>/.razel-daemon.sock) [razel-only]
-  --cbor            print the result as taut-wire CBOR (hex) instead of text [razel-only]
+static FLAG_HELP: &[FlagHelp] = &[
+    FlagHelp { name: "workspace", abbrev: Some('C'), arg: Some("<dir>"), desc: "Workspace dir with the BUILD/MODULE files (default: .)." },
+    FlagHelp { name: "disk_cache", abbrev: None, arg: Some("<dir>"), desc: "Content-addressed output cache (default: <ws>/.razel-cache)." },
+    FlagHelp { name: "compilation_mode", abbrev: Some('c'), arg: Some("<mode>"), desc: "Compilation mode: fastbuild | dbg | opt." },
+    FlagHelp { name: "copt", abbrev: None, arg: Some("<opt>"), desc: "Add an option to every C/C++ compile (repeatable)." },
+    FlagHelp { name: "cxxopt", abbrev: None, arg: Some("<opt>"), desc: "Add an option to every C++ compile (repeatable)." },
+    FlagHelp { name: "conlyopt", abbrev: None, arg: Some("<opt>"), desc: "Add an option to every C compile (repeatable)." },
+    FlagHelp { name: "linkopt", abbrev: None, arg: Some("<opt>"), desc: "Add an option to every link (repeatable)." },
+    FlagHelp { name: "define", abbrev: None, arg: Some("<k=v>"), desc: "Set a build variable / config value (repeatable)." },
+    FlagHelp { name: "jobs", abbrev: Some('j'), arg: Some("<n>"), desc: "Run up to <n> targets/tests concurrently (default: serial)." },
+    FlagHelp { name: "bazel_build_compat", abbrev: None, arg: None, desc: "Write outputs to Bazel's bazel-out/ tree (also env RAZEL_BAZEL_BUILD_COMPAT=1)." },
+    FlagHelp { name: "expunge", abbrev: None, arg: None, desc: "Remove more thorough state (with clean)." },
+    FlagHelp { name: "daemon", abbrev: None, arg: None, desc: "Route the request to a running `razel daemon` over a socket." },
+    FlagHelp { name: "socket", abbrev: None, arg: Some("<path>"), desc: "Daemon socket path (default: <ws>/.razel-daemon.sock)." },
+    FlagHelp { name: "cbor", abbrev: None, arg: None, desc: "Print the result as taut-wire CBOR (hex) instead of text." },
+];
 
-  Other Bazel flags (e.g. -c opt, --copt, --jobs) are recognized; unsupported ones
-  print a one-line diagnostic and are ignored.
-"
-    );
+/// One CLI command: its argument shape, one-line summary, and the supported flags it honors.
+struct CmdHelp {
+    name: &'static str,
+    args: &'static str,
+    summary: &'static str,
+    flags: &'static [&'static str],
+}
+
+static COMMANDS: &[CmdHelp] = &[
+    CmdHelp { name: "build", args: "<target>...", summary: "Build the specified targets.",
+        flags: &["compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "jobs", "bazel_build_compat", "daemon", "socket", "cbor"] },
+    CmdHelp { name: "run", args: "<target> [-- args…]", summary: "Build, then run a target's output.",
+        flags: &["compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "bazel_build_compat"] },
+    CmdHelp { name: "test", args: "<target>...", summary: "Build and run the specified test targets.",
+        flags: &["jobs", "compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "bazel_build_compat"] },
+    CmdHelp { name: "clean", args: "[--expunge]", summary: "Remove razel's output/cache (.razel-cache).",
+        flags: &["expunge"] },
+    CmdHelp { name: "affected", args: "<file>...", summary: "List the targets affected by changed files.",
+        flags: &["daemon", "socket", "cbor"] },
+    CmdHelp { name: "subscribe", args: "", summary: "Stream build events from a running daemon.",
+        flags: &["socket", "cbor"] },
+    CmdHelp { name: "version", args: "", summary: "Print version information.",
+        flags: &["daemon", "socket", "cbor"] },
+    CmdHelp { name: "daemon", args: "", summary: "Run the razel build daemon.",
+        flags: &["socket", "disk_cache"] },
+    CmdHelp { name: "help", args: "[<command>]", summary: "Print help for a command, or this index.",
+        flags: &[] },
+];
+
+fn flag_help(name: &str) -> Option<&'static FlagHelp> {
+    FLAG_HELP.iter().find(|f| f.name == name)
+}
+
+/// `  -c, --compilation_mode <mode>   Compilation mode: …`
+fn flag_line(f: &FlagHelp) -> String {
+    let long = match f.arg {
+        Some(a) => format!("--{} {a}", f.name),
+        None => format!("--{}", f.name),
+    };
+    let head = match f.abbrev {
+        Some(c) => format!("-{c}, {long}"),
+        None => format!("    {long}"),
+    };
+    format!("  {head:<36}{}", f.desc)
+}
+
+/// `razel help [<command>]` (Bazel `help`): no arg ⇒ the command index; a command ⇒ its usage
+/// + the flags razel ACTUALLY honors for it. Recognized-but-ignored Bazel flags are NOT listed
+/// (they self-diagnose if used) — the help surface is the supported surface.
+fn cmd_help(args: &[String]) {
+    if let Some(cmd) = args.first()
+        && let Some(c) = COMMANDS.iter().find(|c| c.name == cmd.as_str())
+    {
+        println!("Usage: razel {} {}\n\n{}", c.name, c.args, c.summary);
+        let names: Vec<&str> = COMMON_FLAGS.iter().chain(c.flags.iter()).copied().collect();
+        if !names.is_empty() {
+            println!("\nSupported options:");
+            for n in names {
+                if let Some(f) = flag_help(n) {
+                    println!("{}", flag_line(f));
+                }
+            }
+        }
+        if c.args.contains("target") {
+            println!("\n  <target>   //pkg:name (workspace) or name/:name (single BUILD/.razel package)");
+        }
+        return;
+    }
+    if let Some(cmd) = args.first() {
+        eprintln!("razel: unknown command {cmd:?}\n");
+    }
+    let w = COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    println!("razel — a Bazel-subset build engine\n");
+    println!("Usage: razel <command> <options> ...\n");
+    println!("Available commands:");
+    for c in COMMANDS {
+        println!("  {:<w$}  {}", c.name, c.summary);
+    }
+    println!("\nGetting more help:");
+    println!("  razel help <command>   Print help and the supported options for <command>.");
+    println!("\nFlags shared by most commands: -C/--workspace, --disk_cache. Bazel flags not");
+    println!("listed under a command are recognized but ignored (a one-line diagnostic prints).");
 }
 
 /// Parsed flags shared across subcommands.
@@ -1156,6 +1247,29 @@ mod flag_mapping_tests {
         assert_eq!(p(&["--linkopt=-s"]).global_flags().linkopts, vec!["-s"]);
         // fastbuild (default) adds no optimization flags.
         assert!(p(&["-c", "fastbuild"]).global_flags().copts.is_empty());
+    }
+
+    #[test]
+    fn help_documents_only_supported_flags() {
+        // Every documented flag is ACTUALLY handled (so help never advertises a
+        // recognized-but-ignored Bazel flag) — help surface ⊆ support surface.
+        for f in FLAG_HELP {
+            assert!(
+                HANDLERS.iter().any(|(n, _)| *n == f.name),
+                "help documents `--{}` but no HANDLER backs it (would advertise an ignored flag)",
+                f.name
+            );
+        }
+        // Every command's flag refs resolve to a documented flag.
+        for c in COMMANDS {
+            for n in COMMON_FLAGS.iter().chain(c.flags.iter()) {
+                assert!(flag_help(n).is_some(), "command `{}` refs undocumented flag `{n}`", c.name);
+            }
+        }
+        // Every dispatched verb appears in the help index.
+        for v in ["build", "run", "test", "clean", "affected", "subscribe", "version", "daemon", "help"] {
+            assert!(COMMANDS.iter().any(|c| c.name == v), "verb `{v}` missing from help index");
+        }
     }
 
     #[test]
