@@ -116,7 +116,7 @@ static COMMANDS: &[CmdHelp] = &[
         flags: &["compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "bazel_build_compat"] },
     CmdHelp { name: "test", args: "<target>...", summary: "Build and run the specified test targets.",
         flags: &["jobs", "compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "bazel_build_compat"] },
-    CmdHelp { name: "clean", args: "[--expunge]", summary: "Remove razel's output/cache (.razel-cache).",
+    CmdHelp { name: "clean", args: "[--expunge]", summary: "Remove razel's outputs, cache, and convenience symlinks (razel-out, razel-bin, .razel-cache).",
         flags: &["expunge"] },
     CmdHelp { name: "affected", args: "<file>...", summary: "List the targets affected by changed files.",
         flags: &["daemon", "socket", "cbor"] },
@@ -865,33 +865,61 @@ fn run_one_test(o: &Opts, target_arg: &str, cache: &Cache, flags: GlobalFlags) -
 }
 
 /// `razel clean` (Bazel `clean`): remove razel's output/state for this workspace — the
-/// `.razel-cache/` dir (the content-addressed action cache + `testlogs/` + the workspace
-/// lock). Bazel's `clean` wipes the output base; `.razel-cache` IS razel's output base. The
-/// in-tree generated outputs can't be reclaimed yet (no output base → no manifest of what's
-/// generated; tracked debt). `--expunge`/`--async` are accepted (Bazel-compat): razel keeps a
-/// single state dir, so `--expunge` is currently equivalent and `--async` runs synchronously.
-/// Idempotent (absent dir = success), like Bazel.
+/// content-addressed cache (`.razel-cache/`), the output tree (`razel-out/`), and the
+/// Bazel-style convenience symlinks (`razel-bin`, `razel-testlogs`), just as `bazel clean`
+/// wipes `bazel-out` + its `bazel-*` symlinks. Under `--bazel_build_compat` (or the env var)
+/// razel wrote into Bazel's tree, so the `bazel-out` / `bazel-bin` / `bazel-testlogs` set is
+/// removed too. Symlinks are unlinked (never followed). `--expunge`/`--async` are accepted
+/// (Bazel-compat): razel keeps a single state dir, so `--expunge` is currently equivalent and
+/// `--async` runs synchronously. Idempotent (nothing present = success), like Bazel; the
+/// summary goes to stderr (Bazel stream discipline).
 fn cmd_clean(args: &[String]) -> ExitCode {
     let o = match parse_opts(args) {
         Ok(o) => o,
         Err(c) => return c,
     };
-    let dir = o.workspace.join(".razel-cache");
+    let compat = o.bazel_build_compat || bazel_build_compat_env();
+    let mut names: Vec<&str> = vec![".razel-cache", "razel-out", "razel-bin", "razel-testlogs"];
+    if compat {
+        names.extend(["bazel-out", "bazel-bin", "bazel-testlogs"]);
+    }
     let how = if o.expunge { "expunged" } else { "cleaned" };
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => {
-            println!("razel: {how} {}", dir.display());
-            ExitCode::SUCCESS
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("razel: nothing to clean ({} absent)", dir.display());
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("razel clean: {}: {e}", dir.display());
-            ExitCode::FAILURE
+    let (mut removed, mut errs) = (Vec::new(), 0u32);
+    for name in &names {
+        let p = o.workspace.join(name);
+        // symlink_metadata: classify WITHOUT following — a convenience symlink is unlinked,
+        // its target (already covered as its own entry) is not chased.
+        let meta = match std::fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!("razel clean: {}: {e}", p.display());
+                errs += 1;
+                continue;
+            }
+        };
+        let r = if meta.file_type().is_symlink() || meta.is_file() {
+            std::fs::remove_file(&p)
+        } else {
+            std::fs::remove_dir_all(&p)
+        };
+        match r {
+            Ok(()) => removed.push(*name),
+            Err(e) => {
+                eprintln!("razel clean: {}: {e}", p.display());
+                errs += 1;
+            }
         }
     }
+    if errs > 0 {
+        return ExitCode::FAILURE;
+    }
+    if removed.is_empty() {
+        eprintln!("razel: nothing to clean");
+    } else {
+        eprintln!("razel: {how} ({})", removed.join(", "));
+    }
+    ExitCode::SUCCESS
 }
 
 fn cmd_affected(args: &[String]) -> ExitCode {

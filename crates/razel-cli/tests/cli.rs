@@ -78,6 +78,35 @@ fn build_compiles_a_real_object_end_to_end() {
     assert!(ws.path().join("widget.o").exists(), "object not produced");
 }
 
+/// `razel clean` removes razel's output tree, cache, AND the Bazel-style convenience
+/// symlinks (like `bazel clean` wipes `bazel-out` + the `bazel-*` links) — but never a
+/// source file. Synthesizes a build's artifacts directly (no toolchain dependency).
+#[test]
+fn clean_removes_output_tree_cache_and_convenience_symlinks() {
+    let ws = tempfile::tempdir().unwrap();
+    let p = ws.path();
+    std::fs::create_dir_all(p.join("razel-out/cfg/bin")).unwrap();
+    std::fs::create_dir_all(p.join(".razel-cache")).unwrap();
+    std::fs::write(p.join("BUILD"), "# a real source — must survive clean\n").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("razel-out/cfg/bin", p.join("razel-bin")).unwrap();
+        std::os::unix::fs::symlink("razel-out/cfg/testlogs", p.join("razel-testlogs")).unwrap();
+    }
+
+    let out = razel().args(["clean", "-C"]).arg(p).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(!p.join("razel-out").exists(), "razel-out not removed");
+    assert!(!p.join(".razel-cache").exists(), ".razel-cache not removed");
+    assert!(p.join("BUILD").exists(), "clean must NOT touch source files");
+    #[cfg(unix)]
+    {
+        // The convenience symlinks themselves are unlinked (symlink_metadata = not found).
+        assert!(std::fs::symlink_metadata(p.join("razel-bin")).is_err(), "razel-bin link kept");
+        assert!(std::fs::symlink_metadata(p.join("razel-testlogs")).is_err(), "razel-testlogs kept");
+    }
+}
+
 /// RG 0011 (2): a BARE-name build must also see `BUILD.razel` (E-mode's sole grammar),
 /// not only the bazel filenames. The bare-name path predated E-mode and probed only
 /// BUILD/BUILD.bazel; it now routes through the canonical resolver (E-mode XOR incl.).
