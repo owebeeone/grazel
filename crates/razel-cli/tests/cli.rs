@@ -73,8 +73,8 @@ fn build_compiles_a_real_object_end_to_end() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("widget.o"), "stdout: {s}");
+    let s = String::from_utf8_lossy(&out.stderr); // build summary → stderr (Bazel)
+    assert!(s.contains("widget.o"), "stderr: {s}");
     assert!(ws.path().join("widget.o").exists(), "object not produced");
 }
 
@@ -305,9 +305,9 @@ fn build_through_a_spawned_daemon() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("widget.o"),
-        "stdout: {}",
-        String::from_utf8_lossy(&out.stdout)
+        String::from_utf8_lossy(&out.stderr).contains("widget.o"), // summary → stderr (Bazel)
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
     assert!(ws.path().join("widget.o").exists());
 }

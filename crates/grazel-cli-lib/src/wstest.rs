@@ -1145,11 +1145,19 @@ fn test_verb_protocol(ctx: &StageCtx) -> Result<(), String> {
             .args(["test", target, "-C", &ws_abs])
             .output()
             .map_err(|e| e.to_string())?;
-        Ok((out.status.code(), String::from_utf8_lossy(&out.stdout).to_string()))
+        // razel's test summary (PASSED/FAILED) is on STDERR (Bazel-style); capture both.
+        Ok((
+            out.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        ))
     };
     let (code, stdout) = grazel_test("//t:ok")?;
     if code != Some(0) || !stdout.contains("PASSED") {
-        return Err(format!("passing test: exit {code:?}, stdout: {stdout}"));
+        return Err(format!("passing test: exit {code:?}, output: {stdout}"));
     }
     let log = ws.join(".razel-cache/testlogs/t/ok/test.log");
     if !std::fs::read_to_string(&log).map_err(|e| e.to_string())?.contains("fine") {
@@ -1268,10 +1276,15 @@ fn gryth_examples_corpus(ctx: &StageCtx) -> Result<(), String> {
             .args(["test", "//:math", "//:strings", "-C", &ws2_abs])
             .output()
             .map_err(|e| e.to_string())?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        // razel's PASSED summary is on STDERR (Bazel-style); check both streams.
+        let stdout = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         if out.status.code() != Some(0) || !stdout.contains("PASSED") {
             return Err(format!(
-                "corpus 02 test: exit {:?}, stdout: {stdout}",
+                "corpus 02 test: exit {:?}, output: {stdout}",
                 out.status.code()
             ));
         }

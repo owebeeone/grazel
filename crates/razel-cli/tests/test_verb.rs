@@ -29,7 +29,7 @@ fn passing_sh_test_reports_passed_and_exits_zero() {
         .arg(&w)
         .output()
         .expect("razel test");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out.stderr); // razel's test summary → stderr (Bazel)
     assert_eq!(out.status.code(), Some(0), "stdout: {stdout}");
     assert!(stdout.contains("//t:ok") && stdout.contains("PASSED"), "{stdout}");
     // test.log captured (bazel's testlogs shape under the razel cache dir).
@@ -53,7 +53,7 @@ fn failing_test_reports_failed_and_exits_three() {
         .arg(&w)
         .output()
         .expect("razel test");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out.stderr); // razel's test summary → stderr (Bazel)
     // Bazel's contract: exit 3 = build succeeded, tests failed.
     assert_eq!(out.status.code(), Some(3), "stdout: {stdout}");
     assert!(stdout.contains("//t:bad") && stdout.contains("FAILED"), "{stdout}");
@@ -76,7 +76,7 @@ fn js_test_rides_the_aspect_surface() {
         .arg(&w)
         .output()
         .expect("razel test");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out.stderr); // razel's test summary → stderr (Bazel)
     assert_eq!(out.status.code(), Some(0), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("PASSED"), "{stdout}");
     let _ = std::fs::remove_dir_all(&w);
@@ -121,7 +121,7 @@ fn multi_target_test_with_jobs_aggregates_and_exits_three() {
         .arg(&w)
         .output()
         .expect("razel test");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out.stderr); // razel's test summary → stderr (Bazel)
     assert_eq!(out.status.code(), Some(3), "one test failed → exit 3; stdout: {stdout}");
     assert!(stdout.contains("//t:ok") && stdout.contains("PASSED"), "{stdout}");
     assert!(stdout.contains("//t:bad") && stdout.contains("FAILED"), "{stdout}");

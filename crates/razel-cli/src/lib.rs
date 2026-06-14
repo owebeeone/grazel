@@ -616,27 +616,27 @@ fn cmd_build_many(o: &Opts) -> ExitCode {
             Ok(r) => match r.status {
                 BuildStatus::Built => {
                     built += 1;
-                    println!("  {label} built");
+                    eprintln!("  {label} built");
                 }
                 BuildStatus::Cached => {
                     cached += 1;
-                    println!("  {label} up-to-date");
+                    eprintln!("  {label} up-to-date");
                 }
                 BuildStatus::Failed => {
                     failed += 1;
-                    println!("  {label} FAILED");
+                    eprintln!("  {label} FAILED");
                     if let Some(m) = &r.message {
-                        println!("    {m}");
+                        eprintln!("    {m}");
                     }
                 }
             },
             Err(_) => {
                 failed += 1;
-                println!("  {label} FAILED");
+                eprintln!("  {label} FAILED");
             }
         }
     }
-    println!(
+    eprintln!(
         "razel: {} target(s) — {built} built, {cached} up-to-date{}.",
         labels.len(),
         if failed > 0 { format!(", {failed} FAILED") } else { String::new() }
@@ -747,17 +747,17 @@ fn cmd_test(args: &[String]) -> ExitCode {
         match slot.lock().expect("test slot").take().expect("target ran") {
             TestOutcome::Passed(secs) => {
                 passed += 1;
-                println!("{}  PASSED in {secs:.1}s", targets[i]);
+                eprintln!("{}  PASSED in {secs:.1}s", targets[i]);
             }
             TestOutcome::Failed(secs, log) => {
                 failed += 1;
-                println!("{}  FAILED in {secs:.1}s\n  log: {log}", targets[i]);
+                eprintln!("{}  FAILED in {secs:.1}s\n  log: {log}", targets[i]);
             }
             TestOutcome::BuildError(msg) => {
                 build_err += 1;
-                println!("{}  BUILD FAILED", targets[i]);
+                eprintln!("{}  BUILD FAILED", targets[i]);
                 if !msg.is_empty() {
-                    println!("  {msg}");
+                    eprintln!("  {msg}");
                 }
             }
         }
@@ -768,7 +768,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     } else {
         String::new()
     };
-    println!(
+    eprintln!(
         "Executed {ran} out of {} tests: {passed} passing, {failed} failing{tail}.",
         targets.len()
     );
@@ -1146,7 +1146,9 @@ fn print_build_result(r: &BuildResult) {
         BuildStatus::Cached => "cached",
         _ => "built",
     };
-    println!(
+    // Bazel sends ALL progress/INFO to STDERR, reserving stdout for data (run's program
+    // output, query results, --cbor). razel matches: the build summary goes to stderr.
+    eprintln!(
         "razel: {verb} {} ({n} output{}, {} recomputed)",
         r.target,
         if n == 1 { "" } else { "s" },
@@ -1155,7 +1157,7 @@ fn print_build_result(r: &BuildResult) {
     for o in &r.outputs {
         let h = hex(&o.digest);
         let short = &h[..h.len().min(12)];
-        println!("  {short}  {}", o.path);
+        eprintln!("  {short}  {}", o.path);
     }
 }
 
