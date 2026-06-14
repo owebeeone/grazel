@@ -1237,6 +1237,45 @@ cc_binary(name = "app", src = "app.c", deps = [":math"])
         assert_eq!(status.code(), Some(0), "linked binary did not run/return 0");
     }
 
+    /// RAZEL_BAZEL_BUILD_COMPAT: a cc_library→cc_binary dep chain (native rules) builds with
+    /// EVERY output under `bazel-out/<config>/bin/…` (Bazel's layout), nothing in-tree, and the
+    /// binary still links + runs — proving dep references resolve to the bazel-out paths. The
+    /// dep's `libmath.a` is read from bazel-out by the link, because both its declared output
+    /// and the binary's reference go through `qualify_output`.
+    #[test]
+    fn bazel_build_compat_puts_outputs_under_bazel_out_and_links() {
+        if !Path::new("/usr/bin/cc").exists() {
+            return;
+        }
+        let exec = tempfile::tempdir().unwrap();
+        let src = "load(\"@rules_cc//cc:defs.bzl\", \"cc_library\", \"cc_binary\")\n\
+             cc_library(name = \"math\", srcs = [\"add.c\"])\n\
+             cc_binary(name = \"app\", srcs = [\"app.c\"], deps = [\":math\"])\n";
+        std::fs::write(exec.path().join("add.c"), "int add(int a,int b){return a+b;}").unwrap();
+        std::fs::write(
+            exec.path().join("app.c"),
+            "int add(int,int); int main(void){return add(40,2)-42;}",
+        )
+        .unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let flags = GlobalFlags { bazel_build_compat: true, ..Default::default() };
+        let report = build_bazel_with(src, "app", exec.path(), &cache, flags).unwrap();
+        // Every produced output carries the bazel-out/<config>/bin prefix — nothing in-tree.
+        assert!(
+            report.produced.iter().all(|p| p.starts_with("bazel-out/")),
+            "outputs not all under bazel-out: {:?}",
+            report.produced
+        );
+        let appout = report.default_outputs.first().expect("a default output");
+        assert!(appout.contains("/bin/") && appout.ends_with("app"), "binary path: {appout}");
+        // It physically lands there AND links (libmath.a resolved from bazel-out) + runs.
+        let app = exec.path().join(appout);
+        assert!(app.exists(), "binary missing at {}", app.display());
+        assert!(!exec.path().join("app").exists(), "binary leaked in-tree");
+        let status = std::process::Command::new(&app).status().unwrap();
+        assert_eq!(status.code(), Some(0), "compat-built binary did not link/run");
+    }
+
     /// S5x: the parallel executor. Diamond `base <- {a, b} <- top`. Each dependent CATs
     /// its deps' outputs, so a build that completes AT ALL proves deps ran first (cat fails
     /// on a missing input); `a` and `b` are independent (run concurrently at jobs>=2). The

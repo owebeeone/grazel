@@ -1136,6 +1136,53 @@ pub(crate) fn qualify(sess: &Session, path: &str) -> String {
     }
 }
 
+/// Bazel's configuration mnemonic for this build, e.g. `darwin_arm64-fastbuild` — the
+/// `<cpu>-<compilation_mode>` segment of `bazel-out/<config>/bin`.
+pub(crate) fn bazel_config(sess: &Session) -> String {
+    let cpu = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "darwin_arm64",
+        ("macos", "x86_64") => "darwin_x86_64",
+        ("linux", "x86_64") => "k8",
+        (_, arch) => arch,
+    };
+    let mode = match sess.global.compilation_mode.as_str() {
+        "" => "fastbuild",
+        m => m,
+    };
+    format!("{cpu}-{mode}")
+}
+
+/// Bazel's output bin root for this build. Under `--bazel_build_compat` it's the real
+/// `bazel-out/<config>/bin`; otherwise razel's existing constant `bazel-out/bin` (the
+/// fiction `$(BINDIR)` has always substituted — kept so non-compat goldens are unchanged).
+pub(crate) fn bin_dir(sess: &Session) -> String {
+    if sess.global.bazel_build_compat {
+        format!("bazel-out/{}/bin", bazel_config(sess))
+    } else {
+        "bazel-out/bin".to_string()
+    }
+}
+
+/// Like [`qualify`], but for OUTPUT (generated) files. Under `--bazel_build_compat`, outputs
+/// live in Bazel's `bazel-out/<config>/bin/<pkg>/…` tree, so the path carries the prefix into
+/// command lines, declared outputs, and dependents' references BY CONSTRUCTION (matching
+/// Bazel; no rewrite). Without compat it is exactly [`qualify`] — so misclassifying a source
+/// as an output is invisible in the default (golden) mode and only matters under compat.
+pub(crate) fn qualify_output(sess: &Session, path: &str) -> String {
+    bin_prefix(sess, &qualify(sess, path))
+}
+
+/// Prefix an ALREADY-package-qualified output path with the bin root under
+/// `--bazel_build_compat` (no-op otherwise). For outputs whose name derives from a qualified
+/// path (e.g. a `.o` named `<qualified-src>.o`) where re-qualifying would double the package.
+pub(crate) fn bin_prefix(sess: &Session, qualified: &str) -> String {
+    if sess.global.bazel_build_compat {
+        format!("{}/{qualified}", bin_dir(sess))
+    } else {
+        qualified.to_string()
+    }
+}
+
 /// The package of a canonical label `//pkg:name`.
 pub(crate) fn pkg_of(label: &str) -> Option<String> {
     // External: `@repo//pkg:name` → `@repo//pkg` (an external-package key for load_package).

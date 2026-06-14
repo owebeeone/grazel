@@ -1,7 +1,8 @@
 //! Native cc rules (host-compiler backend): cc_library/cc_binary actions + flag helpers. C0.
 
 use crate::state::{
-    AR, AnalyzedAction, AnalyzedTarget, Session, canon_label, native_decl, qualify, session,
+    AR, AnalyzedAction, AnalyzedTarget, Session, bin_prefix, canon_label, native_decl, qualify,
+    qualify_output, session,
 };
 use crate::deps::{record_target, resolve_dep};
 use crate::values::{unpack, unpack_strs};
@@ -73,13 +74,13 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
 
         let (mut actions, mut objs) = (Vec::new(), Vec::new());
         for s in &srcs {
-            let o = format!("{s}.o");
+            let o = bin_prefix(sess, &format!("{s}.o"));
             let mut inputs = vec![s.clone()];
             inputs.extend(avail_hdrs.iter().cloned());
             actions.push(compile_action(&sess.host_cc(), s, &o, &compile_flags, inputs));
             objs.push(o);
         }
-        let lib = qualify(sess, &format!("lib{name}.a"));
+        let lib = qualify_output(sess, &format!("lib{name}.a"));
         let mut ar_argv = vec![AR.into(), "rcs".into(), lib.clone()];
         ar_argv.extend(objs.clone());
         actions.push(AnalyzedAction {
@@ -141,13 +142,13 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
 
         let (mut actions, mut objs) = (Vec::new(), Vec::new());
         for s in &srcs {
-            let o = format!("{s}.o");
+            let o = bin_prefix(sess, &format!("{s}.o"));
             let mut inputs = vec![s.clone()];
             inputs.extend(dep_hdrs.iter().cloned());
             actions.push(compile_action(&sess.host_cc(), s, &o, &compile_flags, inputs));
             objs.push(o);
         }
-        let out = qualify(sess, &name);
+        let out = qualify_output(sess, &name);
         let mut link_inputs = objs.clone();
         link_inputs.extend(dep_libs.clone());
         let mut link_argv = vec![sess.host_cc(), "-o".into(), out.clone()];

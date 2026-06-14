@@ -5,7 +5,7 @@ use crate::deps::record_target;
 use crate::labels::LabelV;
 use crate::provider_values::{AspectObj, DepTarget, FrozenAspectObj, instance_callable};
 use crate::selects::resolve_attr_value;
-use crate::state::{AnalyzedTarget, canon_label, qualify, session};
+use crate::state::{AnalyzedTarget, canon_label, qualify, qualify_output, session};
 use crate::values::{Actions, File};
 use allocative::Allocative;
 use razel_dds::InstanceId;
@@ -1309,6 +1309,13 @@ pub(crate) fn analyze_rule_decl<'v>(
             path: qualify(sess, s),
         })
     };
+    // ctx.outputs entries are GENERATED files → bazel-out under compat (mk_file stays for the
+    // ctx.files/ctx.file SOURCE entries).
+    let mk_output = |s: &str| {
+        heap.alloc(File {
+            path: qualify_output(sess, s),
+        })
+    };
     let mut outputs_fields: Vec<(String, Value<'v>)> = Vec::new();
     // Implicit outputs: rule(outputs = {"attr": "%{name}.ext"}) — templates expand with the
     // target name into package-qualified Files on ctx.outputs.
@@ -1321,7 +1328,7 @@ pub(crate) fn analyze_rule_decl<'v>(
             .to_string();
         for (k, tpl) in d.iter() {
             if let (Some(k), Some(tpl)) = (k.unpack_str(), tpl.unpack_str()) {
-                let path = qualify(sess, &tpl.replace("%{name}", &name));
+                let path = qualify_output(sess, &tpl.replace("%{name}", &name));
                 outputs_fields.push((k.to_string(), heap.alloc(File { path })));
             }
         }
@@ -1331,16 +1338,16 @@ pub(crate) fn analyze_rule_decl<'v>(
         typed_outputs.iter().map(|(k, _)| k.as_str()).collect();
     for (k, outs) in &typed_outputs {
         if outs.len() == 1 {
-            outputs_fields.push((k.clone(), mk_file(&outs[0])));
+            outputs_fields.push((k.clone(), mk_output(&outs[0])));
         } else {
-            let files: Vec<Value<'v>> = outs.iter().map(|o| mk_file(o)).collect();
+            let files: Vec<Value<'v>> = outs.iter().map(|o| mk_output(o)).collect();
             outputs_fields.push((k.clone(), heap.alloc(files)));
         }
     }
     let kw_outputs: Vec<(String, Value<'v>)> = kwargs
         .iter()
         .filter(|(k, _)| !typed_keys.contains(k.as_str()))
-        .filter_map(|(k, v)| v.unpack_str().map(|s| (k.clone(), mk_file(s))))
+        .filter_map(|(k, v)| v.unpack_str().map(|s| (k.clone(), mk_output(s))))
         .collect();
     outputs_fields.extend(kw_outputs);
     let files_fields: Vec<(String, Value<'v>)> = kwargs

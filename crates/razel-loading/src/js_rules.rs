@@ -25,7 +25,9 @@
 //! Shared helpers from `crate::rules` per the sh_rules/py_rules pattern.
 
 use crate::deps::record_target;
-use crate::state::{AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, session};
+use crate::state::{
+    AnalyzedAction, AnalyzedTarget, Session, canon_label, qualify, qualify_output, session,
+};
 use crate::values::unpack_strs;
 use starlark::collections::SmallMap;
 use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
@@ -68,7 +70,7 @@ fn analyze_js_binary(
         .ok_or_else(|| anyhow::anyhow!("js_binary `{name}`: `entry_point` is required"))?;
     let entry_q = qualify(sess, &entry);
     let srcs_q: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
-    let out_q = qualify(sess, &name);
+    let out_q = qualify_output(sess, &name);
     record_target(sess, AnalyzedTarget {
         name: canon_label(sess, &name),
         deps: Vec::new(),
@@ -88,7 +90,7 @@ fn analyze_ts_project(
         anyhow::bail!("ts_project `{name}`: `srcs` must list the .ts sources");
     }
     let srcs_q: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
-    let out_dir = qualify(sess, &format!("{name}_out"));
+    let out_dir = qualify_output(sess, &format!("{name}_out"));
     // tsc resolved AT ACTION TIME: the workspace's locked typescript if materialized,
     // else host PATH (constant argv — machine differences don't fork the cache key).
     let tsc = "if [ -f node_modules/typescript/bin/tsc ]; \

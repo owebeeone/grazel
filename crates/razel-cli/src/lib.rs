@@ -713,6 +713,7 @@ enum TestOutcome {
 /// Build + exec one test target, capture `test.log`, return the verdict. A build failure or a
 /// missing runnable output is a `BuildError` (exit 1, never the tests-failed code).
 fn run_one_test(o: &Opts, target_arg: &str, cache: &Cache, flags: GlobalFlags) -> TestOutcome {
+    let compat = flags.bazel_build_compat; // read before `flags` moves into build_one
     let result = match build_one(o, target_arg, cache, flags) {
         Ok(r) => r,
         Err(_) => return TestOutcome::BuildError(String::new()),
@@ -732,10 +733,12 @@ fn run_one_test(o: &Opts, target_arg: &str, cache: &Cache, flags: GlobalFlags) -
         Err(e) => return TestOutcome::BuildError(format!("cannot exec {}: {e}", exe.path)),
     };
     let secs = t0.elapsed().as_secs_f64();
-    // bazel's testlogs shape under the razel cache dir.
+    // bazel's testlogs shape: `bazel-testlogs/<pkg>/<name>/` under --bazel_build_compat
+    // (Bazel's convenience-symlink layout), else under the razel cache dir.
     let rest = target_arg.trim_start_matches('/');
     let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
-    let log_dir = o.workspace.join(".razel-cache/testlogs").join(pkg).join(name);
+    let log_root = if compat { "bazel-testlogs" } else { ".razel-cache/testlogs" };
+    let log_dir = o.workspace.join(log_root).join(pkg).join(name);
     let _ = std::fs::create_dir_all(&log_dir);
     let mut log = out.stdout.clone();
     log.extend_from_slice(&out.stderr);

@@ -65,7 +65,7 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
         // workspace_root derive from the path.
         let path = match sibling.map(file_path).as_deref().and_then(|s| s.rsplit_once('/')) {
             Some((dir, _)) => format!("{dir}/{filename}"),
-            None => crate::state::qualify(session(eval), &filename),
+            None => crate::state::qualify_output(session(eval), &filename),
         };
         Ok(eval.heap().alloc(File { path }))
     }
@@ -123,7 +123,7 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
         // sibling: declare next to an existing file (same directory).
         let path = match sibling.map(file_path).as_deref().and_then(|s| s.rsplit_once('/')) {
             Some((dir, _)) => format!("{dir}/{filename}"),
-            None => crate::state::qualify(session(eval), &filename),
+            None => crate::state::qualify_output(session(eval), &filename),
         };
         Ok(eval.heap().alloc(File { path }))
     }

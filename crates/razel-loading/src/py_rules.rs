@@ -10,7 +10,9 @@
 //! `unpack`, `AnalyzedTarget`/`AnalyzedAction`) live in `crate::rules`; modelled on
 //! `rules::cc_rules`.
 
-use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, qualify, session};
+use crate::state::{
+    AnalyzedAction, AnalyzedTarget, canon_label, native_decl, qualify, qualify_output, session,
+};
 use crate::deps::{record_target, resolve_dep};
 use crate::values::{unpack, unpack_strs_any};
 use starlark::collections::SmallMap;
@@ -158,7 +160,7 @@ fn py_executable<'v>(
             .ok_or_else(|| anyhow::anyhow!("py_binary `{name}` has no srcs and no main"))?,
     };
 
-    let out = qualify(sess, &name);
+    let out = qualify_output(sess, &name);
     // Depth of the launcher's package → how many `../` to climb back to the exec root.
     // `out` is `pkg/.../name`; the exec root is that many parents up from the launcher.
     let depth = out.matches('/').count();
