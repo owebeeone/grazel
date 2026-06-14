@@ -18,5 +18,13 @@ scratch/
 
 # Bazel convenience symlinks (parity golden capture, anywhere bazel runs)
 bazel-*
+# Razel output base + convenience symlinks — anchored to repo root so they do
+# NOT match the crates/razel-* package dirs (bare razel-* would hide new sources).
+/razel-out
+/razel-bin
+/razel-testlogs
 .claude/
 .razel-cache/
+
+# Compiled Rust artifacts left in the tree (e.g. parity corpus build outputs)
+*.rlib
