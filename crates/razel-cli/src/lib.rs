@@ -112,6 +112,9 @@ struct Opts {
     jobs: usize,
     /// `clean --expunge` (Bazel): the more-thorough clean.
     expunge: bool,
+    /// `--bazel_build_compat` (razel-only): write outputs to Bazel's `bazel-out/` tree.
+    /// Also set by the `RAZEL_BAZEL_BUILD_COMPAT` env var (`1`/`T`), merged in `global_flags`.
+    bazel_build_compat: bool,
     positionals: Vec<String>,
 }
 
@@ -141,9 +144,18 @@ impl Opts {
                 .filter_map(|d| d.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
                 .collect(),
             jobs: self.jobs,
+            // CLI/.razelrc flag OR the env var (the env is the primary trigger per the spec).
+            bazel_build_compat: self.bazel_build_compat || bazel_build_compat_env(),
             ..Default::default()
         }
     }
+}
+
+/// `RAZEL_BAZEL_BUILD_COMPAT` truthy? Accepts `1`/`t`/`true` (case-insensitive).
+fn bazel_build_compat_env() -> bool {
+    std::env::var("RAZEL_BAZEL_BUILD_COMPAT")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "t" | "true"))
+        .unwrap_or(false)
 }
 
 /// A flag razel acts on: parses the (optional) value and updates [`Opts`]. Boolean
@@ -176,6 +188,14 @@ static RAZEL_FLAGS: &[FlagSpec] = &[
     },
     FlagSpec {
         name: "cbor",
+        abbrev: None,
+        takes_value: false,
+        allow_multiple: false,
+        silent: false,
+    },
+    // Bazel build-dir compat: write outputs to bazel-out/ (also via RAZEL_BAZEL_BUILD_COMPAT).
+    FlagSpec {
+        name: "bazel_build_compat",
         abbrev: None,
         takes_value: false,
         allow_multiple: false,
@@ -223,6 +243,9 @@ static HANDLERS: &[(&str, Handler)] = &[
     }),
     // `clean --expunge` (handled so it doesn't self-diagnose as unsupported).
     ("expunge", |o, v| o.expunge = v.as_deref() != Some("false")),
+    ("bazel_build_compat", |o, v| {
+        o.bazel_build_compat = v.as_deref() != Some("false")
+    }),
 ];
 
 /// Look up a long flag name across razel's flags then Bazel's.
@@ -1021,6 +1044,27 @@ mod tests {
         let o = parse_opts_with_rc(&["common", "build"], &args).unwrap();
         assert_eq!(o.cache.as_deref(), Some(std::path::Path::new("/tmp/cli-cache")));
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn bazel_build_compat_from_cli_and_razelrc() {
+        // CLI flag sets the Opts bool; absent = off (no rc files written here).
+        let ws = rc_ws("bbc", "", "");
+        let cli = |extra: &[&str]| {
+            let mut v = vec!["t".to_string(), "-C".to_string(), ws.display().to_string()];
+            v.extend(extra.iter().map(|s| s.to_string()));
+            parse_opts_with_rc(&["common", "build"], &v).unwrap()
+        };
+        assert!(!cli(&[]).bazel_build_compat, "default off");
+        assert!(cli(&["--bazel_build_compat"]).bazel_build_compat, "CLI flag on");
+        let _ = std::fs::remove_dir_all(&ws);
+
+        // …and it is read from `.razelrc` — the rc bonus AND a direct proof `.razelrc` is read.
+        let ws2 = rc_ws("bbc-rc", "", "common --bazel_build_compat\n");
+        let args = vec!["t".into(), "-C".into(), ws2.display().to_string()];
+        let o = parse_opts_with_rc(&["common", "build"], &args).unwrap();
+        assert!(o.bazel_build_compat, ".razelrc `common --bazel_build_compat` honored");
+        let _ = std::fs::remove_dir_all(&ws2);
     }
 
     #[test]

@@ -902,6 +902,11 @@ pub struct GlobalFlags {
     /// (the default — no behaviour change); `N>1` enables the parallel action executor
     /// ([`crate`]-external: `razel-build`'s `execute_jobs`). Build-phase only; analysis ignores it.
     pub jobs: usize,
+    /// `RAZEL_BAZEL_BUILD_COMPAT` / `--bazel_build_compat`: write build outputs to Bazel's
+    /// `bazel-out/<config>/bin/` tree (+ `bazel-testlogs/`, convenience symlinks) instead of
+    /// in-tree, so razel and Bazel share the same build directory. Default off (in-tree).
+    /// Build-phase only.
+    pub bazel_build_compat: bool,
 }
 
 impl GlobalFlags {
