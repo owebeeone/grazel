@@ -1,0 +1,5 @@
+filegroup(
+    name = "files",
+    srcs = glob(["**/*"], allow_empty = True),  # incl the embedded BUILD/.bzl data
+    visibility = ["//visibility:public"],
+)

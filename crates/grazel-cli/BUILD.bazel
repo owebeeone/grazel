@@ -1,0 +1,32 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_binary", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+rust_binary(
+    name = "grazel",
+    srcs = ["src/main.rs"] + glob(["src/**/*.rs"], exclude = ["src/main.rs"], allow_empty = True),
+    crate_root = "src/main.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/grazel-cli-lib:grazel_cli_lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "ws_test_test",
+    tags = ["manual"],  # daemon/socket e2e ladder — bazel test sandbox-hostile; run via cargo
+    srcs = ["tests/ws_test.rs"],
+    crate_root = "tests/ws_test.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/grazel-cli-lib:grazel_cli_lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)

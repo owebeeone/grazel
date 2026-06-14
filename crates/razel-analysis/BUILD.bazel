@@ -1,0 +1,25 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_binary", "rust_test")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+rust_library(
+    name = "razel_analysis",
+    srcs = ["src/lib.rs"] + glob(["src/**/*.rs"], exclude = ["src/lib.rs"], allow_empty = True),
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    deps = [
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "razel_analysis_unit",
+    crate = ":razel_analysis",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+)

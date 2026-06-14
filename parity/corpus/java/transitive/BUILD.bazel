@@ -1,0 +1,4 @@
+# Parity fixture (a real Bazel java project; its `BUILD` references @rules_java, which the
+# razel workspace doesn't depend on). This BUILD.bazel shadows that data `BUILD` so `//...`
+# doesn't load it, and exports the golden razel-loading's java parity test reads.
+exports_files(["golden.txt"])

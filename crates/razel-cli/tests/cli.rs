@@ -353,7 +353,11 @@ fn bare_invocation_from_workspace_dir_builds_cold() {
     let ws = tempfile::tempdir().unwrap();
     std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
     std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_razel"))
+    // Resolve the binary to an ABSOLUTE path before changing cwd — CARGO_BIN_EXE_razel may
+    // be a path relative to the initial cwd (it is under bazel's runfiles), and this test
+    // runs from `ws`. (Cargo's value is already absolute, so canonicalize is a no-op there.)
+    let razel_bin = std::fs::canonicalize(env!("CARGO_BIN_EXE_razel")).expect("razel bin");
+    let out = std::process::Command::new(&razel_bin)
         .args(["build", "widget"])
         .current_dir(ws.path())
         .output()

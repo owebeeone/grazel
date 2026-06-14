@@ -1,0 +1,671 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_binary", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+rust_library(
+    name = "razel_loading",
+    srcs = ["src/lib.rs"] + glob(["src/**/*.rs"], exclude = ["src/lib.rs"], allow_empty = True),
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    # host.rs include_str!s a tree of reference Bazel repo files; the 14 dirs holding an
+    # embedded `BUILD` are sub-packages (the glob stops at them), so pull them in explicitly.
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//crates/razel-loading/host-repos/bazel_features:files",
+        "//crates/razel-loading/host-repos/bazel_tools/src/conditions:files",
+        "//crates/razel-loading/host-repos/bazel_tools/tools/cpp:files",
+        "//crates/razel-loading/host-repos/bazel_tools/tools/proto:files",
+        "//crates/razel-loading/host-repos/cc_compatibility_proxy:files",
+        "//crates/razel-loading/host-repos/compatibility_proxy:files",
+        "//crates/razel-loading/host-repos/local_config_cuda/cuda:files",
+        "//crates/razel-loading/host-repos/local_config_nccl:files",
+        "//crates/razel-loading/host-repos/local_config_rocm/rocm:files",
+        "//crates/razel-loading/host-repos/local_config_sycl/sycl:files",
+        "//crates/razel-loading/host-repos/local_config_tensorrt:files",
+        "//crates/razel-loading/host-repos/nvshmem:files",
+        "//crates/razel-loading/host-repos/proto_bazel_features:files",
+        "//crates/razel-loading/host-repos/rules_python/python:files",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "razel_loading_unit",
+    crate = ":razel_loading",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-parity:razel_parity",
+    ],
+)
+
+rust_test(
+    name = "actions_mnemonic_test",
+    srcs = ["tests/actions_mnemonic.rs"],
+    crate_root = "tests/actions_mnemonic.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "args_fidelity_test",
+    srcs = ["tests/args_fidelity.rs"],
+    crate_root = "tests/args_fidelity.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "aspects_test",
+    srcs = ["tests/aspects.rs"],
+    crate_root = "tests/aspects.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "attr_schema_test",
+    srcs = ["tests/attr_schema.rs"],
+    crate_root = "tests/attr_schema.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "cc_defs_logic_test",
+    srcs = ["tests/cc_defs_logic.rs"],
+    crate_root = "tests/cc_defs_logic.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "cc_info_provider_test",
+    srcs = ["tests/cc_info_provider.rs"],
+    crate_root = "tests/cc_info_provider.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "cc_test_rule_test",
+    srcs = ["tests/cc_test_rule.rs"],
+    crate_root = "tests/cc_test_rule.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "characterization_test",
+    srcs = ["tests/characterization.rs"],
+    crate_root = "tests/characterization.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "cross_package_providers_test",
+    srcs = ["tests/cross_package_providers.rs"],
+    crate_root = "tests/cross_package_providers.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "demand_characterization_test",
+    srcs = ["tests/demand_characterization.rs"],
+    crate_root = "tests/demand_characterization.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "e_mode_test",
+    srcs = ["tests/e_mode.rs"],
+    crate_root = "tests/e_mode.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "external_repo_test",
+    tags = ["local"],  # needs host env (node / cc toolchain / network); not hermetic
+    srcs = ["tests/external_repo.rs"],
+    crate_root = "tests/external_repo.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "fetch_extract_test",
+    srcs = ["tests/fetch_extract.rs"],
+    crate_root = "tests/fetch_extract.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "fetched_base_test",
+    srcs = ["tests/fetched_base.rs"],
+    crate_root = "tests/fetched_base.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "forward_ref_test",
+    srcs = ["tests/forward_ref.rs"],
+    crate_root = "tests/forward_ref.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "genrule_test",
+    srcs = ["tests/genrule.rs"],
+    crate_root = "tests/genrule.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "glob_test",
+    srcs = ["tests/glob.rs"],
+    crate_root = "tests/glob.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "graph_parity_test",
+    tags = ["manual"],  # cc/java graph parity vs bazel golden — host-toolchain-coupled; run via cargo
+    srcs = ["tests/graph_parity.rs"],
+    crate_root = "tests/graph_parity.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "java_defs_logic_test",
+    srcs = ["tests/java_defs_logic.rs"],
+    crate_root = "tests/java_defs_logic.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "java_graph_parity_test",
+    tags = ["manual"],  # cc/java graph parity vs bazel golden — host-toolchain-coupled; run via cargo
+    srcs = ["tests/java_graph_parity.rs"],
+    crate_root = "tests/java_graph_parity.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "js_rules_test",
+    srcs = ["tests/js_rules.rs"],
+    crate_root = "tests/js_rules.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "label_files_test",
+    srcs = ["tests/label_files.rs"],
+    crate_root = "tests/label_files.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "parallel_parity_test",
+    srcs = ["tests/parallel_parity.rs"],
+    crate_root = "tests/parallel_parity.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "provider_def_test",
+    srcs = ["tests/provider_def.rs"],
+    crate_root = "tests/provider_def.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "provider_flow_test",
+    srcs = ["tests/provider_flow.rs"],
+    crate_root = "tests/provider_flow.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "razel_build_command_line_test",
+    srcs = ["tests/razel_build_command_line.rs"],
+    crate_root = "tests/razel_build_command_line.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "sched_seam_test",
+    srcs = ["tests/sched_seam.rs"],
+    crate_root = "tests/sched_seam.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "select_config_test",
+    srcs = ["tests/select_config.rs"],
+    crate_root = "tests/select_config.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+        "//parity/corpus/java/transitive:golden.txt",
+    ],
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-cc-toolchain:razel_cc_toolchain",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)

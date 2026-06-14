@@ -1,0 +1,7 @@
+# Dirs bazel must not scan for packages (`//...` would trip on non-build BUILD files).
+.claude
+target
+# Parity corpus = real Bazel projects (test fixtures), not part of the razel build. The cc +
+# java dirs are kept (shadowed by their own BUILD.bazel) because razel-loading/razel-cc-toolchain
+# tests read their goldens; rust isn't referenced.
+parity/corpus/rust/transitive

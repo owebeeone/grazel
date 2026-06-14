@@ -1,0 +1,92 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_binary", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+rust_library(
+    name = "razel_build",
+    srcs = ["src/lib.rs"] + glob(["src/**/*.rs"], exclude = ["src/lib.rs"], allow_empty = True),
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/razel-actions:razel_actions",
+        "//crates/razel-analysis:razel_analysis",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-engine:razel_engine",
+        "//crates/razel-exec:razel_exec",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "razel_build_unit",
+    crate = ":razel_build",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    deps = all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "py_rules_test",
+    srcs = ["tests/py_rules.rs"],
+    crate_root = "tests/py_rules.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-actions:razel_actions",
+        "//crates/razel-analysis:razel_analysis",
+        "//crates/razel-build:razel_build",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-engine:razel_engine",
+        "//crates/razel-exec:razel_exec",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "rust_rules_test",
+    srcs = ["tests/rust_rules.rs"],
+    crate_root = "tests/rust_rules.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-actions:razel_actions",
+        "//crates/razel-analysis:razel_analysis",
+        "//crates/razel-build:razel_build",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-engine:razel_engine",
+        "//crates/razel-exec:razel_exec",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "sh_rules_test",
+    srcs = ["tests/sh_rules.rs"],
+    crate_root = "tests/sh_rules.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-actions:razel_actions",
+        "//crates/razel-analysis:razel_analysis",
+        "//crates/razel-build:razel_build",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-engine:razel_engine",
+        "//crates/razel-exec:razel_exec",
+        "//crates/razel-ir:razel_ir",
+        "//crates/razel-loading:razel_loading",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)

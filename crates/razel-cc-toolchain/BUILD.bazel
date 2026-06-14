@@ -1,0 +1,32 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_binary", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+rust_library(
+    name = "razel_cc_toolchain",
+    srcs = ["src/lib.rs"] + glob(["src/**/*.rs"], exclude = ["src/lib.rs"], allow_empty = True),
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/razel-dds:razel_dds",
+        "//crates/razel-rulepack:razel_rulepack",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "razel_cc_toolchain_unit",
+    crate = ":razel_cc_toolchain",
+    edition = "2024",
+    # A #[cfg(test)] parity check include_str!s the cc transitive golden (cross-package).
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
+        "//parity/corpus/cc/transitive:golden.txt",
+    ],
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/razel-core:razel_core",
+    ],
+)

@@ -1,0 +1,6 @@
+# Workspace root. crate_universe (MODULE.bazel) reads these manifests; expose them as
+# source files so `//:Cargo.toml` / `//:Cargo.lock` labels resolve.
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+])

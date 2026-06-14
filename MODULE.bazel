@@ -1,0 +1,57 @@
+# Bazel (bzlmod) build for the razel workspace — lets `bazel` build/test the same crates
+# Cargo does. The crates' BUILD.bazel files use @rules_rust//rust:defs.bzl, which razel also
+# resolves natively, so they're shared by both build systems. (razel does NOT read this file;
+# it has its own toolchain. External crates.io deps come from crate_universe below — razel
+# can't build those yet, so razel-dogfooding is limited to internal-only Rust targets.)
+module(
+    name = "razel",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "rules_rust", version = "0.70.0")
+
+# Hermetic Rust toolchain pinned to the host (rustc/cargo 1.95.0), edition 2024.
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.95.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# External (crates.io) deps resolved from the existing Cargo.toml / Cargo.lock — the single
+# source of truth, so `cargo` and `bazel` stay in lockstep. Generated targets are
+# @crates//:<name>; per-crate BUILD.bazel files pull them in via all_crate_deps()/aliases().
+# Workspace-internal deps are plain // labels (and so also work for razel).
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = [
+        "//:Cargo.toml",
+        "//crates/grazel-cli:Cargo.toml",
+        "//crates/grazel-cli-lib:Cargo.toml",
+        "//crates/grazel-node:Cargo.toml",
+        "//crates/razel-actions:Cargo.toml",
+        "//crates/razel-analysis:Cargo.toml",
+        "//crates/razel-build:Cargo.toml",
+        "//crates/razel-cc-toolchain:Cargo.toml",
+        "//crates/razel-cli:Cargo.toml",
+        "//crates/razel-conformance:Cargo.toml",
+        "//crates/razel-core:Cargo.toml",
+        "//crates/razel-daemon:Cargo.toml",
+        "//crates/razel-dds:Cargo.toml",
+        "//crates/razel-deps-engine:Cargo.toml",
+        "//crates/razel-engine:Cargo.toml",
+        "//crates/razel-exec:Cargo.toml",
+        "//crates/razel-ir:Cargo.toml",
+        "//crates/razel-loading:Cargo.toml",
+        "//crates/razel-parity:Cargo.toml",
+        "//crates/razel-rulepack:Cargo.toml",
+        "//crates/razel-vfs:Cargo.toml",
+        "//crates/razel-wire:Cargo.toml",
+        "//xtask:Cargo.toml",
+    ],
+)
+use_repo(crate, "crates")

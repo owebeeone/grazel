@@ -1,0 +1,23 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_binary", "rust_test")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+rust_binary(
+    name = "xtask",
+    srcs = ["src/main.rs"] + glob(["src/**/*.rs"], exclude = ["src/main.rs"], allow_empty = True),
+    crate_root = "src/main.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/razel-build:razel_build",
+        "//crates/razel-core:razel_core",
+        "//crates/razel-deps-engine:razel_deps_engine",
+        "//crates/razel-exec:razel_exec",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-parity:razel_parity",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//visibility:public"],
+)

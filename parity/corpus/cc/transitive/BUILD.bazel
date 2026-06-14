@@ -1,0 +1,5 @@
+# This dir is a parity fixture (a real Bazel cc project — its `BUILD` references @rules_cc,
+# which the razel workspace doesn't depend on). This BUILD.bazel shadows that data `BUILD`
+# (bazel prefers BUILD.bazel) so `//...` doesn't try to load it, and exports the golden that
+# razel-cc-toolchain's parity test reads via include_str!.
+exports_files(["golden.txt"])

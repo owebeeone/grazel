@@ -1,0 +1,42 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_binary", "rust_test")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+rust_library(
+    name = "razel_wire",
+    srcs = ["src/lib.rs"] + glob(["src/**/*.rs"], exclude = ["src/lib.rs"], allow_empty = True),
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    deps = [],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "razel_wire_unit",
+    crate = ":razel_wire",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+)
+
+rust_test(
+    name = "cbor_runtime_test",
+    srcs = ["tests/cbor_runtime.rs"],
+    crate_root = "tests/cbor_runtime.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    deps = [
+        "//crates/razel-wire:razel_wire",
+    ],
+)
+
+rust_test(
+    name = "wire_goldens_test",
+    srcs = ["tests/wire_goldens.rs"],
+    crate_root = "tests/wire_goldens.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    deps = [
+        "//crates/razel-wire:razel_wire",
+    ],
+)
