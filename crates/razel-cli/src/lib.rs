@@ -552,6 +552,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
     let target_arg = o.positionals[0].clone();
 
+    let t0 = std::time::Instant::now();
     let result = if o.daemon {
         let socket = o
             .socket
@@ -572,6 +573,10 @@ fn cmd_build(args: &[String]) -> ExitCode {
         println!("{}", hex(&encode(&result.to_cbor())));
     } else {
         print_build_result(&result);
+        if !matches!(result.status, BuildStatus::Failed) {
+            eprintln!("INFO: Elapsed time: {:.3}s", t0.elapsed().as_secs_f64());
+            eprintln!("INFO: Build completed successfully.");
+        }
     }
     match result.status {
         BuildStatus::Failed => ExitCode::FAILURE,
@@ -610,6 +615,7 @@ fn cmd_build_many(o: &Opts) -> ExitCode {
         Ok(c) => c,
         Err(c) => return c,
     };
+    let t0 = std::time::Instant::now();
     let (mut built, mut cached, mut failed) = (0usize, 0usize, 0usize);
     for label in &labels {
         match build_one(o, label, &cache, o.global_flags()) {
@@ -636,11 +642,18 @@ fn cmd_build_many(o: &Opts) -> ExitCode {
             }
         }
     }
-    eprintln!(
-        "razel: {} target(s) — {built} built, {cached} up-to-date{}.",
-        labels.len(),
-        if failed > 0 { format!(", {failed} FAILED") } else { String::new() }
-    );
+    eprintln!("INFO: Elapsed time: {:.3}s", t0.elapsed().as_secs_f64());
+    if failed > 0 {
+        eprintln!(
+            "ERROR: build did NOT complete — {} target(s): {built} built, {cached} up-to-date, {failed} FAILED.",
+            labels.len()
+        );
+    } else {
+        eprintln!(
+            "INFO: Build completed successfully, {} target(s) ({built} built, {cached} up-to-date).",
+            labels.len()
+        );
+    }
     if failed > 0 {
         ExitCode::FAILURE
     } else {
@@ -1133,31 +1146,20 @@ fn hex(bytes: &[u8]) -> String {
         })
 }
 
+/// Bazel's build-result format (all on STDERR — stdout is for data): `Target <label>
+/// up-to-date:` + each DefaultInfo output, or `ERROR: …` on failure. The completion/elapsed
+/// `INFO:` lines are emitted by the caller (which has the timing).
 fn print_build_result(r: &BuildResult) {
     if let BuildStatus::Failed = r.status {
-        eprintln!("razel: build of {} FAILED", r.target);
+        eprintln!("ERROR: {}: build failed.", r.target);
         if let Some(m) = &r.message {
             eprintln!("  {m}");
         }
         return;
     }
-    let n = r.outputs.len();
-    let verb = match r.status {
-        BuildStatus::Cached => "cached",
-        _ => "built",
-    };
-    // Bazel sends ALL progress/INFO to STDERR, reserving stdout for data (run's program
-    // output, query results, --cbor). razel matches: the build summary goes to stderr.
-    eprintln!(
-        "razel: {verb} {} ({n} output{}, {} recomputed)",
-        r.target,
-        if n == 1 { "" } else { "s" },
-        r.recomputes
-    );
+    eprintln!("Target {} up-to-date:", r.target);
     for o in &r.outputs {
-        let h = hex(&o.digest);
-        let short = &h[..h.len().min(12)];
-        eprintln!("  {short}  {}", o.path);
+        eprintln!("  {}", o.path);
     }
 }
 

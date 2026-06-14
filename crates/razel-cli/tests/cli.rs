@@ -244,7 +244,7 @@ fn unknown_target_reports_failed_and_exits_nonzero() {
         .unwrap();
     assert!(!out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("FAILED"),
+        String::from_utf8_lossy(&out.stderr).contains("ERROR"), // Bazel: "ERROR: … build failed"
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );

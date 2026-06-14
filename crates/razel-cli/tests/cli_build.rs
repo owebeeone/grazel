@@ -98,7 +98,7 @@ cc_binary(name = "hello-world", srcs = ["hello-world.cc"], deps = [":hello-greet
         .unwrap();
     assert!(again.status.success());
     assert!(
-        String::from_utf8_lossy(&again.stderr).contains("cached"), // summary → stderr (Bazel)
+        String::from_utf8_lossy(&again.stderr).contains("up-to-date"), // Bazel: "Target … up-to-date"
         "expected a cached rebuild, got: {}",
         String::from_utf8_lossy(&again.stderr),
     );
