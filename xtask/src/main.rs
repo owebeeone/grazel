@@ -36,6 +36,7 @@ mod probe;
 mod rungold;
 mod stress;
 mod tfload;
+mod perfgate;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -59,6 +60,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("xtask stress: FAIL — {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("perfgate") => match perfgate::perfgate(&workspace_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("xtask perfgate: FAIL — {e}");
                 ExitCode::FAILURE
             }
         },
