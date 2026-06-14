@@ -18,6 +18,7 @@ mod genrule_cmd;
 mod glob;
 mod host; // razelV3: compiled-in host repos (@bazel_tools etc.)
 mod labels;
+mod loaded; // crate-universe plan P0.1+: the loading-phase RawAttr / LoadedTarget / QueryNode model
 mod native_cc;
 mod provider_values;
 mod registry;
