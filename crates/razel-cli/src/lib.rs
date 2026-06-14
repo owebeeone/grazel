@@ -531,14 +531,24 @@ fn parse_opts_with_rc(commands: &[&str], args: &[String]) -> Result<Opts, ExitCo
     parse_opts(&merged)
 }
 
+/// A Bazel target PATTERN (expands to many targets) vs a concrete label.
+fn is_pattern(t: &str) -> bool {
+    t.contains("...") || t.ends_with(":all")
+}
+
 fn cmd_build(args: &[String]) -> ExitCode {
     let o = match parse_opts_with_rc(&["common", "build"], args) {
         Ok(o) => o,
         Err(c) => return c,
     };
-    if o.positionals.len() != 1 {
-        eprintln!("razel build: expected exactly one <target>");
+    if o.positionals.is_empty() {
+        eprintln!("razel build: expected <target>...");
         return ExitCode::from(EX_USAGE);
+    }
+    // Patterns (`//...`, `//pkg:all`) or several targets → expand + multi-build. A single
+    // concrete label keeps the existing daemon/cbor-capable path (output unchanged).
+    if o.positionals.len() > 1 || o.positionals.iter().any(|t| is_pattern(t)) {
+        return cmd_build_many(&o);
     }
     let target_arg = o.positionals[0].clone();
 
@@ -566,6 +576,75 @@ fn cmd_build(args: &[String]) -> ExitCode {
     match result.status {
         BuildStatus::Failed => ExitCode::FAILURE,
         _ => ExitCode::SUCCESS,
+    }
+}
+
+/// `razel build //...` / multiple targets: expand patterns to concrete labels, build each
+/// (one workspace lock + shared cache; the cache dedups shared deps), print a Bazel-style
+/// per-target line + summary. Exit 1 if any target failed.
+fn cmd_build_many(o: &Opts) -> ExitCode {
+    let mut labels: Vec<String> = Vec::new();
+    for p in &o.positionals {
+        match razel_build::expand_pattern(&o.workspace, p, o.global_flags()) {
+            Ok(ls) => labels.extend(ls),
+            Err(e) => {
+                eprintln!("razel build: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    labels.sort();
+    labels.dedup();
+    if labels.is_empty() {
+        eprintln!("razel build: no targets matched");
+        return ExitCode::from(EX_USAGE);
+    }
+    let _writer = match razel_daemon::outlock::acquire(&o.workspace, "razel-local", "") {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("razel: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cache = match open_cache(o) {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    let (mut built, mut cached, mut failed) = (0usize, 0usize, 0usize);
+    for label in &labels {
+        match build_one(o, label, &cache, o.global_flags()) {
+            Ok(r) => match r.status {
+                BuildStatus::Built => {
+                    built += 1;
+                    println!("  {label} built");
+                }
+                BuildStatus::Cached => {
+                    cached += 1;
+                    println!("  {label} up-to-date");
+                }
+                BuildStatus::Failed => {
+                    failed += 1;
+                    println!("  {label} FAILED");
+                    if let Some(m) = &r.message {
+                        println!("    {m}");
+                    }
+                }
+            },
+            Err(_) => {
+                failed += 1;
+                println!("  {label} FAILED");
+            }
+        }
+    }
+    println!(
+        "razel: {} target(s) — {built} built, {cached} up-to-date{}.",
+        labels.len(),
+        if failed > 0 { format!(", {failed} FAILED") } else { String::new() }
+    );
+    if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

@@ -17,7 +17,9 @@ use razel_analysis::wire_to_ir;
 use razel_core::{Digest, FileId, TargetId};
 use razel_exec::{Cache, build_action};
 use razel_ir::TargetKind;
-use razel_loading::{analyze_bazel_with, analyze_starlark, analyze_workspace_with};
+use razel_loading::{
+    analyze_bazel_with, analyze_starlark, analyze_workspace_with, load_tree_report_with_targets,
+};
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
 pub use razel_loading::{AnalyzedTarget, GlobalFlags, resolve_build_file};
 
@@ -77,6 +79,72 @@ pub fn build_workspace_with(
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Condvar, Mutex};
+
+/// Expand a Bazel target PATTERN to concrete target labels under `root`. Supports `//...`,
+/// `//...:all`, `//pkg/...`, `//pkg/...:all`, and `//pkg:all`; a concrete label (`//pkg:name`,
+/// bare name — no `...`/`:all`) is returned as-is (no discovery). Discovers packages
+/// (BUILD/BUILD.bazel/BUILD.razel), keeps the ones the pattern's package part selects,
+/// analyzes them once, and returns the matching target labels (sorted, deduped).
+pub fn expand_pattern(root: &Path, pattern: &str, flags: GlobalFlags) -> Result<Vec<String>, String> {
+    if !pattern.contains("...") && !pattern.ends_with(":all") {
+        return Ok(vec![pattern.to_string()]); // concrete — no discovery
+    }
+    let body = pattern.strip_prefix("//").unwrap_or(pattern);
+    let pkgs = discover_packages(root, flags.strict_bazel);
+    let matched: Vec<String> = if body == "..." || body == "...:all" {
+        pkgs
+    } else if let Some(pfx) = body
+        .strip_suffix("/...:all")
+        .or_else(|| body.strip_suffix("/..."))
+    {
+        pkgs.into_iter().filter(|p| p == pfx || p.starts_with(&format!("{pfx}/"))).collect()
+    } else {
+        // `//pkg:all` → that one package.
+        let pkg = body.split_once(':').map(|(p, _)| p).unwrap_or(body);
+        pkgs.into_iter().filter(|p| p == pkg).collect()
+    };
+    if matched.is_empty() {
+        return Err(format!("no packages match `{pattern}` under {}", root.display()));
+    }
+    let (_report, _loaded, targets) =
+        load_tree_report_with_targets(root, flags, &matched, Vec::new(), 1);
+    let mut labels: Vec<String> = targets.into_iter().map(|t| t.name).collect();
+    labels.sort();
+    labels.dedup();
+    if labels.is_empty() {
+        return Err(format!("`{pattern}` matched {} package(s) but no targets", matched.len()));
+    }
+    Ok(labels)
+}
+
+/// Recursively discover packages — directories with a resolvable BUILD file — under `root`,
+/// as workspace-relative "/"-joined paths (the root package is `""`). Skips output, VCS,
+/// external, and `bazel-*` convenience-symlink dirs.
+fn discover_packages(root: &Path, strict_bazel: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+    while let Some((dir, rel)) = stack.pop() {
+        if resolve_build_file(&dir, strict_bazel).ok().flatten().is_some() {
+            out.push(rel.clone());
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.')
+                || name.starts_with("bazel-")
+                || matches!(name.as_str(), "external" | "node_modules" | "target")
+            {
+                continue;
+            }
+            let p = e.path();
+            if p.is_dir() && !p.is_symlink() {
+                let child = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+                stack.push((p, child));
+            }
+        }
+    }
+    out
+}
 
 /// A target surfaced by the impact query: its canonical label + coarse kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1274,6 +1342,31 @@ cc_binary(name = "app", src = "app.c", deps = [":math"])
         assert!(!exec.path().join("app").exists(), "binary leaked in-tree");
         let status = std::process::Command::new(&app).status().unwrap();
         assert_eq!(status.code(), Some(0), "compat-built binary did not link/run");
+    }
+
+    /// Target-pattern expansion: `//...` spans packages, `//pkg:all` stays in its package
+    /// (subpackages excluded), `//pkg/...` recurses, and a concrete label passes through.
+    #[test]
+    fn expand_pattern_spans_packages_and_excludes_subpackages() {
+        let root = tempfile::tempdir().unwrap();
+        let cc = "load(\"@rules_cc//cc:defs.bzl\", \"cc_library\")\n";
+        std::fs::create_dir_all(root.path().join("a/b")).unwrap();
+        std::fs::write(root.path().join("a/BUILD"), format!("{cc}cc_library(name = \"x\", srcs = [\"x.c\"])\n")).unwrap();
+        std::fs::write(root.path().join("a/b/BUILD"), format!("{cc}cc_library(name = \"y\", srcs = [\"y.c\"])\n")).unwrap();
+        let g = GlobalFlags::default;
+        let has = |v: &[String], l: &str| v.iter().any(|x| x == l);
+
+        let all = expand_pattern(root.path(), "//...", g()).unwrap();
+        assert!(has(&all, "//a:x") && has(&all, "//a/b:y"), "//... spans packages: {all:?}");
+
+        let a = expand_pattern(root.path(), "//a:all", g()).unwrap();
+        assert!(has(&a, "//a:x") && !has(&a, "//a/b:y"), "//a:all excludes subpackage: {a:?}");
+
+        let rec = expand_pattern(root.path(), "//a/...", g()).unwrap();
+        assert!(has(&rec, "//a:x") && has(&rec, "//a/b:y"), "//a/... recurses: {rec:?}");
+
+        // Concrete label → returned as-is, no discovery.
+        assert_eq!(expand_pattern(root.path(), "//a:x", g()).unwrap(), vec!["//a:x".to_string()]);
     }
 
     /// S5x: the parallel executor. Diamond `base <- {a, b} <- top`. Each dependent CATs
