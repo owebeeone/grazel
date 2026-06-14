@@ -1,6 +1,7 @@
 # RazelCrateUniversePlan — phased, ~500-LOC steps
 
-*2026-06-14, rev 2 (after `scratch/RazelCrateUniversePlan-Review55.md`). Plan. Owner: RR.
+*2026-06-15, rev 5 (after reviews `Review55` + `Review55-1` and two owner asks — perf discipline,
+then the < 20 s gate). Plan. Owner: RR.
 Decomposes [`RazelCrateUniverseDesign.md`](RazelCrateUniverseDesign.md) (rev 9) into ordered
 phases → steps, each ≤ ~500 LOC. This is **not** a re-design: the design's `§N` references are
 the contract; this file says **what to build, in what order, how it's gated, and how big each
@@ -28,11 +29,16 @@ node source (R6).*
 
 *Rev 4 adds a **performance-regression discipline** (owner ask): the loading-graph capture (P0.4/
 P0.5) and query adjacency (P1.3) run per-target/per-edge, so they are where an O(n²) effect would
-hide. New **§Performance discipline** + a **`PL` gate** built on the existing `xtask tfload`
-workspace-load timer (today it only reports): a baseline captured **first** (P0.0), a machine-
-independent **scaling assertion** (the real no-O(n²) guard), an absolute-time budget, **per-step
-complexity bounds** on the hot paths, and a **stop-and-review-and-correct** protocol — a tripped
-`PL` blocks the step, no silent budget-raising.*
+hide. New **§Performance discipline** + a **`PL` gate**: a baseline captured **first** (P0.0), a
+machine-independent **scaling assertion** (the real no-O(n²) guard), an absolute-time budget,
+**per-step complexity bounds** on the hot paths, and a **stop-and-review-and-correct** protocol —
+a tripped `PL` blocks the step, no silent budget-raising.*
+
+*Rev 5 (owner ask): the `PL` gate **must run in < 20 s** so it can run on every step. The full
+`xtask tfload` (whole TensorFlow corpus) is too slow, so the gate uses a **bounded synthetic-corpus
+load benchmark** instead (hermetic, deterministic, exact `N`/`2N` control for the scaling
+assertion, and it exercises the at-risk paths — deps chains, selects, aliases). `tfload` is
+demoted to a **manual realistic-load check**, not the gate.*
 
 ## How to read a step
 
@@ -41,9 +47,9 @@ keeps the standing gates green and adds its own:
 
 - **WS** = `cargo test --workspace` (today 86 groups) · **G** = `cargo xtask gates`
   (AD2/F13 no-ambient-state bans) · **P** = `cargo xtask probe`.
-- **PL** = perf-load gate (§Performance discipline) — `xtask tfload` workspace-load time within
-  budget of the recorded baseline **and** the no-O(n²) scaling assertion. A trip **stops the
-  phase**.
+- **PL** = perf-load gate (§Performance discipline) — a **bounded synthetic-corpus load benchmark
+  that runs in < 20 s**: load time within budget of the recorded baseline **and** the no-O(n²)
+  scaling assertion. A trip **stops the phase**.
 - **aq** = aquery analysis-parity golden — render razel's `AnalyzedAction` set →
   `razel_parity::{parse_golden,diff}` against `parity/corpus/<lang>/<case>/golden.txt`, captured
   by the goldens xtask, `omit`-allowlisted deviations (§8).
@@ -70,18 +76,24 @@ load. So the plan carries an explicit perf contract, not just correctness gates.
 Per-target and per-edge work stays **amortized-linear**: classification and lookups are O(1) hash
 hits, never a scan over all targets; snapshots move/`Arc`-share, never deep-copy per dependent.
 
-**The monitor (reuse, don't reinvent).** razel already times workspace load —
-`xtask tfload` loads the large TensorFlow corpus and reports `parse_ms` + `eval_ms`
-([tfload.rs:117-167](../xtask/src/tfload.rs)); `xtask stress` does a sequential baseline
-+ parallel sweeps with LOUD failure; `xtask probe` is the regression-sentinel framework. Today
-`tfload` only **reports**. P0.0 turns it into a **gate** and adds the scaling check.
+**The monitor — fast, bounded, hermetic (< 20 s).** The gate must run on every step, so it
+**cannot** be the full `xtask tfload` (it loads the whole TensorFlow corpus — too slow, and depends
+on that corpus being present). Instead P0.0 builds a **bounded synthetic-corpus load benchmark**: a
+deterministic generator emits `W` packages (each a few targets with `deps` chains, a `select()`,
+and an `alias` — the at-risk paths) into a temp tree, the loader loads them, wall-time recorded.
+`W` is sized so the **whole `PL` run (baseline-size + the `N`/`2N` scaling pair) is < 20 s** (target
+~10 s); the gate itself **fails if it exceeds 20 s**, so it can't silently rot slow. It **reuses**
+`xtask stress`'s LOUD-failure pattern ([stress.rs](../xtask/src/stress.rs)) and registers as an
+`xtask probe` sentinel ([probe.rs:20](../xtask/src/probe.rs)). The existing `xtask tfload`
+([tfload.rs:117](../xtask/src/tfload.rs)) stays as a **manual, realistic-corpus** sanity check —
+useful, but not the gate.
 
 **The `PL` gate has two parts:**
-- **Scaling assertion (the real no-O(n²) guard — machine-independent).** Load a workspace at
-  size *N* and *2N* targets (a synthetic corpus, or two TF subsets); assert wall-time grows
-  **~linearly** — `t(2N) / t(N) ≤ ~2.3` (a 4× blow-up = O(n²) → FAIL). Ratio-based, so it holds
-  across machines and is the primary signal.
-- **Absolute-time budget (constant-factor watch).** `tfload parse_ms`+`eval_ms` ≤ recorded
+- **Scaling assertion (the real no-O(n²) guard — machine-independent).** Generate the synthetic
+  corpus at size *N* and *2N* targets and load each; assert wall-time grows **~linearly** —
+  `t(2N) / t(N) ≤ ~2.3` (a 4× blow-up = O(n²) → FAIL). Ratio-based, so it holds across machines and
+  is the primary signal. (Synthetic `N` is the reason this is fast and exact — no whole-corpus run.)
+- **Absolute-time budget (constant-factor watch).** The bounded-benchmark load wall-time ≤ recorded
   baseline + **10%**. Catches non-O(n²) constant-factor slowdowns. Machine-relative, so it's a
   soft watch on top of the hard scaling assertion.
 
@@ -201,13 +213,17 @@ additions (no behavior change, fully unit-tested); P0.4 is a post-declaration re
 P0.5 is the one invasive wiring step. **Capture (raw refs) is split from resolution (typed
 edges)** because edge kinds aren't knowable at value-snapshot time (P1#2 — see P0.4).
 
-- **P0.0 — Perf baseline + `PL` gate** · ~250 · dep: — · §Performance discipline
-  Before any loader change: record the `xtask tfload` baseline (`parse_ms`+`eval_ms` on the TF
-  corpus) to a checked-in `perf-baseline.json`, and **promote `tfload` from report-only to a
-  gate** — add the absolute-time budget (≤ baseline + 10%) and the **scaling assertion**
-  (`t(2N)/t(N) ≤ ~2.3` over a size-`N`/`2N` corpus) as an `xtask probe` regression sentinel
-  ([probe.rs:20](../xtask/src/probe.rs)). Gate: **P** (the new sentinel runs green at baseline);
-  **PL** is now defined for every later step.
+- **P0.0 — Bounded perf benchmark + `PL` gate (< 20 s)** · ~300 · dep: — · §Performance discipline
+  Before any loader change, build the **bounded synthetic-corpus load benchmark** (a new
+  `xtask perfgate`, or a `razel-loading` bench): a deterministic generator emits `W` packages with
+  `deps` chains / a `select()` / an `alias` into a temp tree; the loader loads them; wall-time
+  recorded. Pick `W` so the **whole run is < 20 s** (target ~10 s), and **fail if it exceeds 20 s**.
+  Record the baseline to a checked-in `perf-baseline.json`, and register the **absolute-time budget**
+  (≤ baseline + 10%) + the **scaling assertion** (`t(2N)/t(N) ≤ ~2.3` at synthetic `N`/`2N`) as an
+  `xtask probe` regression sentinel ([probe.rs:20](../xtask/src/probe.rs)). Gate: **P** (the sentinel
+  runs green at baseline); **unit** (the generator is deterministic; the scaling check flags an
+  injected O(n²) stub); **PL** is now defined for every later step. *(`xtask tfload` stays a manual
+  realistic-corpus check.)*
   *This must land first* — every step from P0.4 on is measured against this baseline.
 
 - **P0.1 — `RawAttr` model + canonical stringification** · ~300 · dep: P0.0 · §11.1
@@ -293,8 +309,8 @@ edges)** because edge kinds aren't knowable at value-snapshot time (P1#2 — see
 **Phase 0 DoD:** loading the mixed-rule q1 workspace corpus yields faithful `LoadedTarget`s (raw
 attrs, unresolved selects, **resolved** typed edges, `rule_class`) via the central seam, with the
 existing build path untouched, **and `PL` green** — capture adds no super-linear effect to
-workspace load (scaling assertion holds; `tfload` within +10%). *(@crates rules are captured in
-Phase 3 when those natives exist.)*
+workspace load (the bounded-benchmark scaling assertion holds; load within +10% of baseline).
+*(@crates rules are captured in Phase 3 when those natives exist.)*
 
 ---
 
