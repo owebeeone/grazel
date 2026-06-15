@@ -22,6 +22,7 @@ mod loaded; // crate-universe plan P0.1+: the loading-phase RawAttr / LoadedTarg
 mod lock; // crate-universe P2.1: the MODULE.bazel.lock reader (@crates source of truth)
 mod native_cc;
 mod patterns; // crate-universe P1.2: load-only pattern resolver (discover / expand / load the graph)
+mod recorded; // crate-universe P2.2: the recordedInputs grammar (§2.3 staleness inputs)
 mod provider_values;
 mod registry;
 pub mod rules;
@@ -54,6 +55,7 @@ pub use workspace::{e_mode_guard, find_workspace_root, resolve_build_file};
 pub use loaded::{Edge, EdgeKind, LoadedTarget, QueryNode, RawAttr, RawLabelRef};
 pub use patterns::{discover_packages, load_query_graph, packages_for_pattern};
 pub use lock::{CrateLock, CrateRepo, read_lock};
+pub use recorded::{FileValue, RecordedInput, parse_recorded};
 pub use razel_ir::TargetKind; // re-exported: `LoadedTarget.kind` is a `TargetKind`
 
 /// Match a `glob` pattern against a path. Supports `*` (within a segment) and `**`
