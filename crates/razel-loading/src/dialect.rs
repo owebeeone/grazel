@@ -539,6 +539,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
+        crate::loaded::capture_rule(eval, &label, "genrule", &[("srcs", srcs), ("tools", tools), ("exec_tools", exec_tools)], &_kw);
         // Decompose to PLAIN-DATA parts outside the closure (selects defer to analysis —
         // the str_attr_parts pattern; top-level `srcs = select({...})` is legal Bazel).
         // tools/exec_tools join the location table + inputs (labels resolve like srcs).
@@ -637,6 +638,8 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        crate::loaded::capture_rule(eval, &label, "config_setting", &[("flag_values", flag_values)], &_kw);
         let sess = session(eval);
         let spec = crate::state::ConfigSpec {
             values: values.map(|m| m.into_iter().collect()).unwrap_or_default(),
@@ -685,6 +688,8 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        crate::loaded::capture_rule(eval, &label, "alias", &[("actual", actual)], &_kw);
         // Record the actual (selects resolve at consumption) — conditions/`deps` follow aliases.
         let actual = match actual {
             Some(v) => {
@@ -716,6 +721,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
+        crate::loaded::capture_rule(eval, &label, "filegroup", &[("srcs", srcs)], &_kw);
         // Selects defer to analysis (the str_attr_parts pattern — round 40; srcs may be a
         // select expression now that select() never resolves eagerly).
         let src_parts = crate::values::str_attr_parts(eval, srcs)?;

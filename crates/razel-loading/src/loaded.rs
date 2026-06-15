@@ -229,7 +229,7 @@ pub(crate) fn label_attrs(rule_class: &str) -> &'static [&'static str] {
     match rule_class {
         "filegroup" => &["srcs", "data"],
         "alias" => &["actual"],
-        "genrule" => &["srcs", "tools", "outs"],
+        "genrule" => &["srcs", "tools", "exec_tools"],
         "config_setting" => &["constraint_values", "flag_values"],
         "rust_library" | "rust_binary" | "rust_shared_library" | "rust_library_group"
         | "rust_proc_macro" => {
@@ -451,6 +451,27 @@ pub(crate) fn capture_loaded<'v>(
         raw_refs: refs,
     };
     sess.loaded_targets.borrow_mut().insert(label.to_string(), node);
+}
+
+/// Convenience over [`capture_loaded`]: build the attr map from a rule's named attrs (skipping
+/// `None`) plus its kwargs, then capture. Shared by the native rule families (rust/cc/dialect).
+pub(crate) fn capture_rule<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    label: &str,
+    rule_class: &str,
+    named: &[(&str, Option<Value<'v>>)],
+    kw: &SmallMap<String, Value<'v>>,
+) {
+    let mut attrs = SmallMap::new();
+    for (name, v) in named {
+        if let Some(v) = v {
+            attrs.insert((*name).to_string(), *v);
+        }
+    }
+    for (k, v) in kw.iter() {
+        attrs.insert(k.clone(), *v);
+    }
+    capture_loaded(eval, label, rule_class, &attrs);
 }
 
 /// Resolve every captured target's `raw_refs` into typed `edges` (the P0.4 pass over the whole

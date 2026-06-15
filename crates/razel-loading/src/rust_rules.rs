@@ -75,30 +75,6 @@ fn extern_args(
     Ok((args, inputs, names))
 }
 
-/// P0.5: capture a rule's loading-phase node from its raw attr Values (before they're decomposed
-/// for analysis). Only the actual-Value attrs (`srcs`/`deps` + kwargs) go in — `name` is the
-/// label and scalar attrs like `edition` aren't label-valued (scalar capture is a Phase-1 add).
-fn capture_rule<'v>(
-    eval: &mut Evaluator<'v, '_, '_>,
-    label: &str,
-    rule_class: &str,
-    srcs: Option<Value<'v>>,
-    deps: Option<Value<'v>>,
-    kw: &SmallMap<String, Value<'v>>,
-) {
-    let mut attrs = SmallMap::new();
-    if let Some(v) = srcs {
-        attrs.insert("srcs".to_string(), v);
-    }
-    if let Some(v) = deps {
-        attrs.insert("deps".to_string(), v);
-    }
-    for (k, v) in kw.iter() {
-        attrs.insert(k.clone(), *v);
-    }
-    crate::loaded::capture_loaded(eval, label, rule_class, &attrs);
-}
-
 #[starlark::starlark_module]
 fn rust_rules(b: &mut GlobalsBuilder) {
     /// `rust_library(name, srcs, deps=[], edition="2021")` → one `rustc` action
@@ -113,7 +89,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
-        capture_rule(eval, &label, "rust_library", srcs, deps, &_kw); // P0.5 loading-phase capture
+        crate::loaded::capture_rule(eval, &label, "rust_library", &[("srcs", srcs), ("deps", deps)], &_kw);
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
@@ -175,7 +151,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
-        capture_rule(eval, &label, "rust_binary", srcs, deps, &_kw); // P0.5 loading-phase capture
+        crate::loaded::capture_rule(eval, &label, "rust_binary", &[("srcs", srcs), ("deps", deps)], &_kw);
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {

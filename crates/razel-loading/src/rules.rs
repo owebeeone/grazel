@@ -1210,6 +1210,49 @@ mod tests {
         );
     }
 
+    // P0.5b: the central capture seam covers the mixed dialect rules, and finalize_edges resolves
+    // every edge kind over the live session indexes (a hermetic bare-native corpus — no loads).
+    #[test]
+    fn p05b_mixed_rule_corpus_captures_the_loading_graph() {
+        use crate::loaded::EdgeKind;
+        let tmp = std::env::temp_dir().join(format!("razel-p05b-{}", std::process::id()));
+        let pkg = tmp.join("q1");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(pkg.join("src.txt"), "").unwrap();
+        std::fs::write(
+            pkg.join("BUILD"),
+            "filegroup(name = \"leaf\", srcs = [])\n\
+             filegroup(name = \"lib\", srcs = [\":leaf\", \"src.txt\"])\n\
+             alias(name = \"lib_alias\", actual = \":lib\")\n\
+             config_setting(name = \"dbg\", values = {\"compilation_mode\": \"dbg\"})\n\
+             genrule(name = \"gen\", srcs = [\":lib\"], outs = [\"out.txt\"], cmd = \"touch $@\")\n\
+             filegroup(name = \"uses_alias\", srcs = [\":lib_alias\"])\n\
+             filegroup(name = \"uses_gen_out\", srcs = [\"out.txt\"])\n",
+        )
+        .unwrap();
+
+        let (session, _r, _l) =
+            drive_tree(&tmp, GlobalFlags::default(), &["q1".to_string()], Vec::new(), 1);
+        let g = session.loaded_targets.borrow();
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // The central seam captured every rule family with its query-facing rule_class.
+        assert_eq!(g.get("//q1:lib").expect("lib").rule_class, "filegroup");
+        assert_eq!(g.get("//q1:lib_alias").expect("alias").rule_class, "alias");
+        assert_eq!(g.get("//q1:dbg").expect("config_setting").rule_class, "config_setting");
+        assert_eq!(g.get("//q1:gen").expect("genrule").rule_class, "genrule");
+
+        let has = |label: &str, kind: EdgeKind, to: &str| {
+            g.get(label).unwrap_or_else(|| panic!("{label} not captured")).edges.iter().any(|e| e.kind == kind && e.to == to)
+        };
+        // R4 classification over the live indexes: Rule / SourceFile / Alias / GeneratedFile.
+        assert!(has("//q1:lib", EdgeKind::Rule, "//q1:leaf"), "lib deps -> :leaf is a Rule edge");
+        assert!(has("//q1:lib", EdgeKind::SourceFile, "//q1:src.txt"), "lib srcs -> src.txt is a SourceFile edge");
+        assert!(has("//q1:uses_alias", EdgeKind::Alias, "//q1:lib_alias"), "ref to an alias is an Alias edge");
+        assert!(has("//q1:uses_gen_out", EdgeKind::GeneratedFile, "//q1:out.txt"), "ref to a genrule out is a GeneratedFile edge");
+    }
+
     #[test]
     fn starlark_rule_analyzes_by_running_its_impl() {
         let src = r#"

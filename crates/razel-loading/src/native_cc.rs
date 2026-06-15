@@ -32,6 +32,7 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
+        crate::loaded::capture_rule(eval, &label, "cc_library", &[("srcs", srcs), ("hdrs", hdrs), ("deps", deps)], &_kw);
         // Decompose attrs to PLAIN-DATA parts (selects defer to analysis — Bazel's model).
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let hdrs = crate::values::str_attr_parts(eval, hdrs)?;
@@ -116,6 +117,7 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
+        crate::loaded::capture_rule(eval, &label, "cc_binary", &[("srcs", srcs), ("deps", deps)], &_kw);
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         let copts = crate::values::str_attr_parts(eval, copts)?;
