@@ -294,6 +294,29 @@ once for the WRITER (build-script) and the READER (rustc, P3.9). **AND it must w
   golden-capture path; the cc/java carve-outs are red here = that capture isn't wired/available in
   this env, so blake3 parity likely faces the same — verify before diving in).
 
+**P3.11 — RESCOPED (Gianni): local build-script parity, not external blake3.** PROBE found razel's
+build path can't resolve the real external target — `razel build @crates//:blake3` → `unknown
+target: blake3` (and `razel query` defers external `@crates//` to "q4 — §13"). So the full external
+`@crates//:blake3` analysis is an unstarted Milestone-1 integration (external repo/alias loading into
+the build path + the ~20-crate closure), NOT the plan's "~250-line golden+test". Rescoped to a LOCAL
+case proving the same §4.3 edge:
+- `6fa3cfd` — `parity/corpus/rust/build_script/` (a `rust_library` `withbs` + its `cargo_build_script`
+  `build_script_build`; `build.rs` emits a `rustc-cfg`). **Bazel-verified**: `aquery` → 3 real build
+  actions (CargoBuildScriptRun + the build-script bin Rustc + the crate Rustc through
+  `process_wrapper --env-file/--arg-file`), matching razel's P3.6/P3.8/P3.10 shape. Golden raw-captured
+  to `/tmp/bs_corpus_aquery.txt` (full deps closure at `/tmp/blake3_aquery.txt`, reusable).
+- REMAINING (the parity normalizer — substantial, a norm_version 2→3 bump → re-capture rust goldens):
+  `razel-parity` already handles the hard parts (`source_inputs` drops the toolchain-input closure;
+  hash/cfg/repo normalize; the `diff` `omit` mnemonic-list for the bazel infra actions —
+  Symlink/RunfilesTree/RepoMappingManifest/SourceSymlinkManifest/SymlinkTree/ExecutableSymlink). What's
+  NEEDED: (a) a **wrapper-prefix + leading-rustc-binary strip** (canonicalize Bazel's `process_wrapper …
+  -- <rustc>` AND razel's `razel-process-wrapper rustc --rustc=… --` both to the bare rustc args —
+  needed for ALL rust parity, hence rust has no test yet); (b) a **rustc-flag DEVIATION POLICY** —
+  razel's lean argv vs Bazel's rich one (`-Cmetadata`/`--extra-filename`/`--remap-path-prefix`/
+  `--error-format`/`--cap-lints`/lint flags); the current `diff` is argv-order-strict, so these must be
+  allowlisted/normalized. **OPEN: the deviation policy is a parity-faithfulness call (Gianni's, like the
+  cc `CppModuleMap` omit).** Then wire a `rust_graph_parity.rs` test (mirrors `graph_parity.rs`).
+
 **P3.10 build-script-edge modeling — RESOLVED: Option B (own-only `BuildScriptRun` provider).** The
 edge is INTRA-TARGET, so the transitive projection fold (the `CcInfo.hdrs` pattern) would be a
 CORRECTNESS BUG — it'd propagate blake3's build-script flags to every crate that depends on blake3.
