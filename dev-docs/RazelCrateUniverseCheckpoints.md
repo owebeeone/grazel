@@ -230,12 +230,27 @@ once for the WRITER (build-script) and the READER (rustc, P3.9). **AND it must w
   system-env baseline (`SystemRoot` etc.) so a default-deny child starts; Unix stays default-deny.
   7 tests. NAME NOTE: plan called the P3.9 crate `razel-rustc-wrapper`; generalized to
   `razel-process-wrapper` (hosts both) — flagged for veto.
-- NEXT: **P3.8b** — `razel-loading`'s `cargo_build_script` emits the RUN action (action 2) beside
-  the compile: argv `[razel-process-wrapper, build-script, --flags-out, --out-dir, <env policy>, --,
-  bin]`, run inputs (bin + srcs + data/compile_data), outputs (flags-file + OUT_DIR). Env POLICY is
-  staged: P3.8b = `OUT_DIR`/`TARGET`/`HOST`/`CARGO_FEATURE_*`; **P3.8c** = `rustc_env_files`→
-  `--env-file` + `version`/`pkg_name`→`CARGO_PKG_*` (connects P3.5a); deferred = `CARGO_CFG_*`
-  (triple-cfg derivation), cc `CC`/`AR`/`CFLAGS` (razel-cc-toolchain), `DEP_<LINKS>_*` (P4.5).
+- `69c6ba9` P3.8b — `razel-loading`'s `cargo_build_script` emits the RUN action (action 2) beside
+  the P3.6 compile: `CargoBuildScriptRun`, argv `[razel-process-wrapper, build-script, --flags-out
+  <name>.out, --out-dir <name>.out_dir, <env policy>, --, <bin>]`; run inputs = bin + build-script
+  srcs + `data`/`compile_data` (§5.2 slice-1 static keying); outputs = the §6.1 flags-file +
+  `OUT_DIR` tree; `default_info` stays EMPTY (§4.3). Env POLICY is razel-loading's (the wrapper is
+  the Cargo-agnostic mechanism); this slice = `TARGET`/`HOST` (host==target triple), a default
+  `OPT_LEVEL`, one `CARGO_FEATURE_<F>` per feature (uppercased, non-alnum→`_`). `bs_attrs` (was
+  `bs_compile_attrs`) also extracts `data`/`compile_data`; new `process_wrapper()` resolver
+  (`RAZEL_PROCESS_WRAPPER` override else the bare name). Test `p38b`.
+- `5b31d09` P3.8c — the env-file leg (§6.2): `rustc_env_files` are env-file TARGETS
+  (`cargo_toml_env_vars`, P3.5a) → resolved to their outputs → `--env-file <path>` (+ staged as run
+  inputs); literal `version`/`pkg_name` → `--env CARGO_PKG_VERSION`/`NAME`, emitted AFTER the
+  `--env-file`s so the wrapper (files-then-`--env`) lets the literal OVERRIDE the env-file. `bs_attrs`
+  extracts `rustc_env_files`/`version`/`pkg_name`; the `analyze` fixture gains a `Cargo.toml`. Test
+  `p38c`. **P3.8 run env now covers the statically-derivable §5.2 allowlist;** deferred (named):
+  `CARGO_CFG_*` (triple-cfg derivation), cc `CC`/`AR`/`CFLAGS` (razel-cc-toolchain), `DEP_<LINKS>_*`
+  (cross-build-script, P4.5). NEXT: **P3.9** — the wrapper's `rustc` subcommand (READ the flags file
+  → `--cfg`/`-l`/`-L`/`-C link-arg`/env; `read_flags_jsonl` already exists; the `kind`→rustc
+  mapping table + the explicit-argv shape `[wrapper, rustc, --flags-file=…, --env-file=…, --, <rustc
+  args…>]`; empty flags-file = no-op passthrough). **`AnalyzedAction` still has no `env` field — the
+  wrapper carries env (P3.5b env precedence rides P3.9).**
 
 **P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
 WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
@@ -268,10 +283,10 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.8
-(`CargoBuildScriptRun` action) → P3.9 (rustc wrapper
-binary; **P3.5b** env precedence + `--env-file=` consumption rides here) → P3.10 (wire the
+**Remaining for `razelv3-rust/p3`:** P3.9 (the wrapper's `rustc` subcommand;
+**P3.5b** env precedence + `--env-file=` consumption rides here) → P3.10 (wire the
 build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`).
+Deferred within P3.8: the run env's `CARGO_CFG_*` / cc `CC`/`AR`/`CFLAGS` / `DEP_<LINKS>_*` legs.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
