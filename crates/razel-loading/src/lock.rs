@@ -26,6 +26,38 @@ pub struct CrateLock {
     pub crates: BTreeMap<String, CrateRepo>,
     /// Raw `recordedInputs` tagged strings (the §2.3 grammar parses these).
     pub recorded_inputs: Vec<String>,
+    /// The canonical `@@`-repo prefix for this extension's repos (`rules_rust++crate+`), derived
+    /// from the extension key. Apparent `crates__<name>-<ver>` + this = the name Bazel
+    /// materializes under `external/` (§11.3). See [`CrateLock::canonical_repo`].
+    pub canonical_prefix: String,
+}
+
+impl CrateLock {
+    /// The canonical `@@`-repo name for an apparent crate repo (`crates`, `crates__<name>-<ver>`),
+    /// or the input unchanged if it is already canonical; `None` if `repo` is not a crate_universe
+    /// repo this lock defines. `@crates//:x` and `@@rules_rust++crate+crates//:x` name the same
+    /// target — the accept-both-forms rule (§11.3). Non-crate repos (`@rules_rust`, `@platforms`)
+    /// return `None`, so callers canonicalize only `@crates` labels.
+    pub fn canonical_repo(&self, repo: &str) -> Option<String> {
+        let defines = |apparent: &str| apparent == "crates" || self.crates.contains_key(apparent);
+        if let Some(apparent) = repo.strip_prefix(&self.canonical_prefix) {
+            return defines(apparent).then(|| repo.to_string());
+        }
+        defines(repo).then(|| format!("{}{repo}", self.canonical_prefix))
+    }
+}
+
+/// Derive the canonical `@@`-repo prefix for the crate_universe extension's repos from its
+/// extension key (`ModuleExtensionId.toString()`): the module repo (before `//`) joined to the
+/// extension name (the first `%`-segment after the `.bzl` label) by `+`. For
+/// `@@rules_rust+//crate_universe:extensions.bzl%crate` → `rules_rust++crate+`, so apparent
+/// `crates__blake3-1.8.2` → `rules_rust++crate+crates__blake3-1.8.2` (§11.3). Tolerates a trailing
+/// `%<isolationKey>` on the key.
+fn crate_canonical_prefix(ext_key: &str) -> Option<String> {
+    let key = ext_key.strip_prefix("@@")?;
+    let (module_repo, rest) = key.split_once("//")?;
+    let ext_name = rest.split_once('%')?.1.split('%').next()?;
+    Some(format!("{module_repo}+{ext_name}+"))
 }
 
 /// A per-crate repo: a `.crate` to fetch + its generated package `BUILD` (§2.2, §4.4).
@@ -127,11 +159,17 @@ pub fn parse_lock(text: &str) -> Result<CrateLock, String> {
     let root_contents = root_contents
         .ok_or("MODULE.bazel.lock has no root `@crates` repo (the inline generated contents)")?;
 
+    // The extension key always starts with CRATE_EXT_PREFIX (matched above), so the canonical
+    // prefix derives from the const regardless of any isolation suffix.
+    let canonical_prefix = crate_canonical_prefix(CRATE_EXT_PREFIX)
+        .ok_or("internal: cannot derive canonical repo prefix from the crate extension key")?;
+
     Ok(CrateLock {
         version: lock.lock_file_version,
         root_contents,
         crates,
         recorded_inputs: general.recorded_inputs.clone(),
+        canonical_prefix,
     })
 }
 
@@ -252,5 +290,52 @@ mod tests {
         assert!(lock.crates.len() > 100, "many per-crate specs ({})", lock.crates.len());
         assert!(lock.root_contents.contains_key("defs.bzl"), "root @crates defs.bzl present");
         assert!(!lock.recorded_inputs.is_empty(), "recordedInputs present");
+    }
+
+    // crate-universe P3.1c: the apparent→canonical repo mapping (§11.3 accept-both-forms).
+    #[test]
+    fn canonical_repo_maps_both_forms_and_only_crate_repos() {
+        // The prefix is DERIVED from the extension key (carries the module's `+` version marker).
+        assert_eq!(crate_canonical_prefix(CRATE_EXT_PREFIX).as_deref(), Some("rules_rust++crate+"));
+        // …and tolerates an isolation suffix on the key.
+        assert_eq!(
+            crate_canonical_prefix("@@rules_rust+//crate_universe:extensions.bzl%crate%foo+bar")
+                .as_deref(),
+            Some("rules_rust++crate+"),
+        );
+
+        let lock = parse_lock(FIXTURE).unwrap();
+        assert_eq!(lock.canonical_prefix, "rules_rust++crate+");
+        // apparent → canonical: the root and a per-crate repo.
+        assert_eq!(lock.canonical_repo("crates").as_deref(), Some("rules_rust++crate+crates"));
+        assert_eq!(
+            lock.canonical_repo("crates__blake3-1.8.2").as_deref(),
+            Some("rules_rust++crate+crates__blake3-1.8.2"),
+        );
+        // accept-both-forms: the canonical name maps to itself.
+        assert_eq!(
+            lock.canonical_repo("rules_rust++crate+crates__blake3-1.8.2").as_deref(),
+            Some("rules_rust++crate+crates__blake3-1.8.2"),
+        );
+        // not a crate_universe repo this lock defines → None (don't canonicalize @rules_rust etc.).
+        assert_eq!(lock.canonical_repo("rules_rust"), None);
+        assert_eq!(lock.canonical_repo("platforms"), None);
+        // canonical-form of an UNKNOWN crate is also None (the apparent part must be defined).
+        assert_eq!(lock.canonical_repo("rules_rust++crate+crates__nope-9.9.9"), None);
+    }
+
+    #[test]
+    fn real_lock_canonicalizes_blake3_to_the_bazel_external_dir_name() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../MODULE.bazel.lock");
+        if !path.exists() {
+            return;
+        }
+        let lock = read_lock(&path).unwrap();
+        // Matches Bazel's real dir: bazel-*/external/rules_rust++crate+crates__blake3-1.8.2.
+        assert_eq!(
+            lock.canonical_repo("crates__blake3-1.8.2").as_deref(),
+            Some("rules_rust++crate+crates__blake3-1.8.2"),
+        );
+        assert_eq!(lock.canonical_repo("crates").as_deref(), Some("rules_rust++crate+crates"));
     }
 }
