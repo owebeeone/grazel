@@ -178,6 +178,25 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   config_specs-MISS branch (a declared `config_setting` still wins). `state::host_triple()` added;
   `toolchains.rs` reuses it. So blake3's `target_compatible_with`/cfg `select()` RESOLVES (P3.1b
   only loaded it). Gate: host triple resolves its arm; non-host/foreign-os → default.
+- `c90e4fd` P3.4a — evaluate `target_compatible_with`: compatible iff every constraint holds
+  (`is_incompatible` via `condition_matches`; `@platforms//:incompatible` never holds). An
+  incompatible target gets NO actions + is flagged in `Session.incompatible_targets`
+  (`SyncCell<BTreeSet>` — chosen over an `AnalyzedTarget` field: 49 literals across 15 files).
+- `9f66a43` P3.4b — `analyze_workspace_with` loud-errors when an EXPLICIT (named top) or a
+  transitive DEP target is incompatible (§5.4). Provably inert otherwise (the set is empty unless
+  `target_compatible_with` is unsatisfiable). P3.4 split a/b/c.
+
+**P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
+WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
+`cmd_build_many` in `razel-cli` (`expand_pattern` → per-label `build_workspace_with`), but
+`build_workspace_with` → `analyze_workspace_with` now ERRORS on an incompatible target (P3.4b). So
+the loop can't just build each expanded label. How does it learn "incompatible, skip" without the
+error? (A) `cmd_build_many` catches the incompatible error string and skips that label (no new API;
+string-fragile, conflates with genuine errors). (B) a `razel-loading` API that analyzes and returns
+compatibility WITHOUT erroring — `cmd_build_many` filters, the explicit path keeps P3.4b's error
+(clean seam; small new surface). (C) `analyze_workspace_with` gains an explicit/wildcard MODE param
+(skip vs error) — one entry, but threads provenance through the loader. Pending Gianni's steer
+(cf. the P3.1e double-`@` seam).
 
 **P3.1e — SEAM DECISION RESOLVED: double-`@` everywhere (option A).** Gianni's steer was
 "double-`@` canonical everywhere now" — the design's true identity, faithful, no deferral to a
@@ -196,8 +215,7 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.4 (`target_compatible_with` — evaluate the now-resolved
-select: incompatible → no actions / skipped in wildcard / loud error when named) → P3.5
+**Remaining for `razelv3-rust/p3`:** P3.4c (wildcard-skip — the seam decision above) → P3.5
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
 build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`).
