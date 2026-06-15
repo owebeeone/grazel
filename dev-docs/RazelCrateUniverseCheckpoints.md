@@ -157,17 +157,27 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   (`analyze_workspace_with`); `@crates//:blake3` → `@crates__blake3-1.8.2//:blake3` (apparent).
 - (infra, `6f38a03`) tfload uses 6 threads; **not** a gate — `perfgate` (synthetic, ≤20s) is the
   per-step perf gate.
+- `0791370` P3.1e — canonicalize `@crates` labels to their `@@rules_rust++crate+…` identity
+  (§11.3 accept-both-forms). **P3.1 (a–e) complete.**
 
-**P3.1e — OPEN SEAM DECISION (canonical-identity representation).** The design's canonical identity
-is the **double-`@`** form (`@@rules_rust++crate+crates//:x`, §11.3), but `canon_label` keeps the
-repo as-written and `load_package` strips a single `@` (`@@` is a separate main-repo path). So
-making `@crates` identities canonical is either (A) `@@`-everywhere — teach the central label
-parsers the `@@` canonical form (faithful now; central-path regression risk), or (B) single-`@`
-canonical repo name internally (`@rules_rust++crate+crates//:x`, resolves the real canonical-named
-external dir with the existing parsers) + emit `@@` only in the P3.11 parity normalizer (lower-risk;
-defers `@@` to where parity lives). Both reach the right dir. Pending Gianni's steer before wiring.
+**P3.1e — SEAM DECISION RESOLVED: double-`@` everywhere (option A).** Gianni's steer was
+"double-`@` canonical everywhere now" — the design's true identity, faithful, no deferral to a
+parity normalizer. Wiring:
+- `GlobalFlags.crate_lock: Option<Arc<CrateLock>>` gates canonicalization; `None` for every
+  non-`@crates` build, so the central label path is **byte-identical** there (verified: full
+  workspace green except the 2 carve-outs; `perfgate` scaling **1.98**, unchanged).
+- `canon_label` wraps `canon_label_inner` with `canonicalize_crate_repo`, which maps
+  `@crates`/`@crates__*` → `@@rules_rust++crate+…` via `CrateLock::canonical_repo`. Repos the lock
+  doesn't define (`@rules_rust`, `@platforms`) keep their apparent single-`@` form.
+- `analyze_workspace_with` seeds `crate_lock` from `<root>/MODULE.bazel.lock` (read-if-present;
+  a caller/test-seeded lock wins; a malformed lock stays `None`).
+- `load_package` made `@@`-tolerant (`trim_start_matches('@')`) so the canonical repo resolves the
+  real canonical-named external dir.
+- The OTHER single-`@` extraction sites (`glob.rs`, `deps.rs`, `decls.rs`, `engine.rs`) stay
+  single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
+  (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.1e (above) → P3.2 (rust_library attr surface) → P3.3/P3.4
+**Remaining for `razelv3-rust/p3`:** P3.2 (rust_library attr surface) → P3.3/P3.4
 (condition source + `target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run,
 flags parser, rustc wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs
 live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask.
