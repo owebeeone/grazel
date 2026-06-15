@@ -954,7 +954,21 @@ pub fn analyze_workspace_with(
             load_package_entry(&session, &pkg)?;
         }
     }
-    Ok(session.take_targets())
+    let targets = session.take_targets();
+    // P3.4b (§5.4): an incompatible target reached by an EXPLICIT request (the top label) or pulled
+    // in as a DEP of a compatible target is a LOUD ERROR — never a silent drop. (A wildcard build
+    // SKIPS incompatible targets instead; that filter lives in the CLI's pattern loop — P3.4c.)
+    if let Some(bad) = targets
+        .iter()
+        .find(|t| session.incompatible_targets.borrow().contains(&t.name))
+    {
+        return Err(format!(
+            "target `{}` is incompatible with the target platform (target_compatible_with) — \
+             it cannot be built when named or required by a built target",
+            bad.name
+        ));
+    }
+    Ok(targets)
 }
 
 /// The TREE-LOAD driver (L6 coverage metric): load every given package in ONE session

@@ -730,16 +730,27 @@ mod tests {
     }
 
     #[test]
-    fn p34a_incompatible_target_has_no_actions() {
-        // target_compatible_with = [@platforms//:incompatible] never holds → no Rustc action.
-        // (P3.4a records an actionless target + flags it; the named/wildcard/dep enforcement is P3.4b.)
+    fn p34b_named_incompatible_target_is_a_loud_error() {
+        // §5.4: an explicitly-named incompatible target is a loud error (not a silent no-op).
         let build = format!(
             "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], \
              target_compatible_with = [\"@platforms//:incompatible\"])\n"
         );
-        let targets = analyze("p34a_incompat", &build).unwrap();
-        let t = targets.iter().find(|t| t.name == "//app:t").expect("//app:t recorded");
-        assert!(t.actions.is_empty(), "incompatible target has no actions: {:?}", t.actions);
+        let err = analyze("p34b_named", &build).unwrap_err();
+        assert!(err.contains("incompatible"), "named incompatible → loud error: {err}");
+    }
+
+    #[test]
+    fn p34b_incompatible_dep_of_compatible_target_errors() {
+        // §5.4: a compatible target that pulls in an incompatible dep is a loud error (never a
+        // silent drop). `t` (no constraints) deps on `lib` (@platforms//:incompatible).
+        let build = format!(
+            "{LOAD}rust_library(name = \"lib\", srcs = [\"lib.rs\"], \
+             target_compatible_with = [\"@platforms//:incompatible\"])\n\
+             rust_library(name = \"t\", srcs = [\"root.rs\"], deps = [\":lib\"])\n"
+        );
+        let err = analyze("p34b_dep", &build).unwrap_err();
+        assert!(err.contains("incompatible"), "incompatible dep → loud error: {err}");
     }
 
     #[test]
