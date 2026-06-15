@@ -211,11 +211,31 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   `error=`→fail; `rerun-if-*` recorded (not narrowing); unknown reserved `cargo::<key>` → one
   deviation line, never fatal. Reserved keys are colon-count-agnostic; non-reserved double-colon →
   deviation, single-colon → metadata. The `kind`→rustc MAPPING is **P3.9**'s (the wrapper's), NOT
-  here. Parser surface `#![allow(dead_code)]` until P3.8 consumes it. 3 goldens. NEXT: P3.8 (run
-  action) — **OPEN SEAM**: who runs the bs bin + parses its stdout into the flags file? A runner
-  WRAPPER bin (argv `[runner, --out, --, bs]`, mirrors the P3.9 rustc wrapper) vs `razel-exec`
-  special-casing the `CargoBuildScriptRun` mnemonic (razel-exec does NOT dep razel-loading, so the
-  parser would need a lighter home). The plan's "argv=[bs bin]" hints at the latter. Decide at P3.8.
+  here. 3 goldens.
+
+**P3.8 — SEAM DECISION RESOLVED: wrapper bin, ONE shared crate (option 2), Windows-capable.**
+Gianni's steer: a wrapper BIN (not a `razel-exec` mnemonic special-case — that would force the
+parser into a razel-exec-reachable crate + an `AnalyzedAction.env` field + teach the generic
+executor about cargo). ONE wrapper crate hosts both subcommands so the flags-file schema is defined
+once for the WRITER (build-script) and the READER (rustc, P3.9). **AND it must work on Windows.**
+- `aa50654` P3.8a — new LIGHT crate **`razel-process-wrapper`** (rules_rust `process_wrapper`
+  analogue; serde only, no starlark). The P3.7 flags module RELOCATED here
+  (`razel-loading/build_script.rs` → `flags.rs`, now `pub` + a `read_flags_jsonl` reader for P3.9).
+  `bs_runner.rs` = the Cargo-AGNOSTIC mechanism: `build-script --flags-out F --out-dir D [--env
+  K=V]… [--env-file P]… [--rundir R] -- PROG …` → assemble a default-deny child env (precedence
+  baseline < env-files(last wins) < explicit `--env` < `OUT_DIR`, §6.2) → run capturing stdout →
+  parse §6.1 → `warning=`/deviation to stderr, fail on `error=`/non-zero exit, else write the JSONL
+  flags file. **Windows:** writes via `std::fs` (NO `/bin/sh`, unlike P3.5a's FileWrite — that
+  Unix-ism is now a follow-up to revisit), captures via `Command::output()`, seeds a Windows
+  system-env baseline (`SystemRoot` etc.) so a default-deny child starts; Unix stays default-deny.
+  7 tests. NAME NOTE: plan called the P3.9 crate `razel-rustc-wrapper`; generalized to
+  `razel-process-wrapper` (hosts both) — flagged for veto.
+- NEXT: **P3.8b** — `razel-loading`'s `cargo_build_script` emits the RUN action (action 2) beside
+  the compile: argv `[razel-process-wrapper, build-script, --flags-out, --out-dir, <env policy>, --,
+  bin]`, run inputs (bin + srcs + data/compile_data), outputs (flags-file + OUT_DIR). Env POLICY is
+  staged: P3.8b = `OUT_DIR`/`TARGET`/`HOST`/`CARGO_FEATURE_*`; **P3.8c** = `rustc_env_files`→
+  `--env-file` + `version`/`pkg_name`→`CARGO_PKG_*` (connects P3.5a); deferred = `CARGO_CFG_*`
+  (triple-cfg derivation), cc `CC`/`AR`/`CFLAGS` (razel-cc-toolchain), `DEP_<LINKS>_*` (P4.5).
 
 **P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
 WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
