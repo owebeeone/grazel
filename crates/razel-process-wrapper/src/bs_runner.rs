@@ -14,22 +14,6 @@ use std::process::Command;
 
 use crate::flags;
 
-/// On Windows a fully `env_clear()`ed child often cannot even start (no `SystemRoot` → no DLL
-/// load), so the wrapper seeds these system vars from its own env. Unix needs no baseline — it is
-/// truly default-deny. The Cargo env on top of this is supplied by the caller (`--env`/`--env-file`).
-#[cfg(windows)]
-pub const WINDOWS_ENV_BASELINE: &[&str] = &[
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-    "windir",
-    "TEMP",
-    "TMP",
-    "NUMBER_OF_PROCESSORS",
-    "PROCESSOR_ARCHITECTURE",
-    "USERPROFILE",
-];
-
 /// Parsed `build-script` subcommand options.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RunOpts {
@@ -103,21 +87,7 @@ pub fn assemble_child_env(
     env: &[(String, String)],
     baseline: &BTreeMap<String, String>,
 ) -> io::Result<BTreeMap<String, String>> {
-    let mut out = baseline.clone();
-    for f in env_files {
-        for line in std::fs::read_to_string(f)?.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                out.insert(k.trim().to_string(), v.to_string());
-            }
-        }
-    }
-    for (k, v) in env {
-        out.insert(k.clone(), v.clone());
-    }
+    let mut out = crate::env::base_env(baseline, env_files, env)?;
     out.insert("OUT_DIR".to_string(), out_dir.to_string_lossy().into_owned());
     Ok(out)
 }
@@ -142,24 +112,13 @@ pub fn process_script_output(stdout: &[u8]) -> Processed {
     }
 }
 
-#[cfg(windows)]
-fn platform_baseline() -> BTreeMap<String, String> {
-    WINDOWS_ENV_BASELINE
-        .iter()
-        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
-        .collect()
-}
-#[cfg(not(windows))]
-fn platform_baseline() -> BTreeMap<String, String> {
-    BTreeMap::new()
-}
-
 /// Run the build script (§5.2 action 2): create OUT_DIR, assemble the env, run the bin capturing
 /// stdout, parse it, surface warnings/deviations to stderr, fail on `error=` or a non-zero script
 /// exit, else write the flags file. Returns the exit code for the wrapper to propagate.
 pub fn run_build_script(opts: &RunOpts) -> io::Result<i32> {
     std::fs::create_dir_all(&opts.out_dir)?;
-    let env = assemble_child_env(&opts.out_dir, &opts.env_files, &opts.env, &platform_baseline())?;
+    let env =
+        assemble_child_env(&opts.out_dir, &opts.env_files, &opts.env, &crate::env::platform_baseline())?;
     let mut cmd = Command::new(&opts.program);
     cmd.args(&opts.args).env_clear().envs(&env);
     if let Some(dir) = &opts.rundir {

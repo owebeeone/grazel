@@ -6,9 +6,12 @@
 //! - `build-script` (P3.8 §5.2): run a cargo build script with a default-deny env, capture its
 //!   stdout, parse the §6.1 directives, write the JSONL flags file + OUT_DIR. The WRITER.
 //! - `rustc` (P3.9, §6.1): apply a flags file to a rustc invocation (`--cfg`/`-l`/`-L`/`-C
-//!   link-arg`/env). The READER. — not yet implemented.
+//!   link-arg`/env). The READER.
 //!
-//! The shared [`flags`] module is the single definition of the flags-file schema both ends use.
+//! The shared [`flags`] module is the single definition of the flags-file schema both ends use;
+//! the shared [`env`] module is the default-deny env assembly both subcommands layer onto.
 
 pub mod bs_runner;
+pub mod env;
 pub mod flags;
+pub mod rustc;

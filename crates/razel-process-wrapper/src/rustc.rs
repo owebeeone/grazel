@@ -1,0 +1,208 @@
+//! crate-universe P3.9 (§6.1/§4.1): the `rustc` subcommand — the build-script flags-file READER.
+//! Reads a §6.1 flags file, maps each `kind` to its rustc flag(s) (the normative table below),
+//! injects `rustc-env` records + `--env-file`/`--env` as the rustc process env, and runs the real
+//! rustc with the original args + the appended flags. An empty/absent flags file is a no-op
+//! passthrough. The CARGO env CONTENT is policy razel-loading passes (P3.10 wires the edge); this
+//! subcommand is the Cargo-agnostic mechanism.
+//!
+//! Explicit-argv shape (the executor emits this, §4.1):
+//!   `razel-process-wrapper rustc --rustc=<path> [--flags-file=<f>] [--env-file=<f>]… [--env=K=V]…
+//!    -- <rustc args…>`
+
+use std::io;
+use std::path::PathBuf;
+use std::process::Command;
+
+use crate::flags::{self, FlagsRecord};
+
+/// Parsed `rustc` subcommand options. Flags are `=`-joined (`--flags-file=PATH`); everything after
+/// `--` is the real rustc argv.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RustcOpts {
+    pub rustc: String,
+    pub flags_file: Option<PathBuf>,
+    pub env_files: Vec<PathBuf>,
+    pub env: Vec<(String, String)>,
+    pub rustc_args: Vec<String>,
+}
+
+impl RustcOpts {
+    pub fn from_args(args: &[String]) -> Result<RustcOpts, String> {
+        let mut o = RustcOpts::default();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--" {
+                o.rustc_args = args[(i + 1)..].to_vec();
+                if o.rustc.is_empty() {
+                    return Err("rustc: --rustc=<path> is required".to_string());
+                }
+                return Ok(o);
+            }
+            let (flag, val) = args[i]
+                .split_once('=')
+                .ok_or_else(|| format!("rustc: expected --flag=value, got `{}`", args[i]))?;
+            match flag {
+                "--rustc" => o.rustc = val.to_string(),
+                "--flags-file" => o.flags_file = Some(PathBuf::from(val)),
+                "--env-file" => o.env_files.push(PathBuf::from(val)),
+                "--env" => {
+                    let (k, v) = val
+                        .split_once('=')
+                        .ok_or_else(|| format!("rustc: --env expects K=V, got `{val}`"))?;
+                    o.env.push((k.to_string(), v.to_string()));
+                }
+                other => return Err(format!("rustc: unknown flag `{other}`")),
+            }
+            i += 1;
+        }
+        Err("rustc: missing `--` separator before the rustc args".to_string())
+    }
+}
+
+/// The normative §6.1 `kind`→rustc mapping: returns the extra rustc ARGS to append + the `rustc-env`
+/// records to inject as process env. Pure. `args` are already tokenized by the parser (P3.7), so the
+/// reader never re-tokenizes or shell-quotes.
+pub fn apply_flags(flags: &[FlagsRecord]) -> (Vec<String>, Vec<(String, String)>) {
+    let mut args = Vec::new();
+    let mut env = Vec::new();
+    for f in flags {
+        match f.kind.as_str() {
+            "rustc-cfg" => {
+                for a in &f.args {
+                    args.push("--cfg".into());
+                    args.push(a.clone());
+                }
+            }
+            "rustc-link-lib" => {
+                for a in &f.args {
+                    args.push("-l".into());
+                    args.push(a.clone());
+                }
+            }
+            "rustc-link-search" => {
+                for a in &f.args {
+                    args.push("-L".into());
+                    args.push(a.clone());
+                }
+            }
+            // `rustc-cdylib-link-arg` is cdylib-only in cargo; slice-1 maps it like `rustc-link-arg`
+            // (`-C link-arg`) — refined if a parity golden distinguishes the crate type.
+            "rustc-link-arg" | "rustc-cdylib-link-arg" => {
+                for a in &f.args {
+                    args.push("-C".into());
+                    args.push(format!("link-arg={a}"));
+                }
+            }
+            "rustc-flags" => args.extend(f.args.iter().cloned()), // already tokenized (§6.1)
+            "rustc-env" => {
+                for a in &f.args {
+                    if let Some((k, v)) = a.split_once('=') {
+                        env.push((k.to_string(), v.to_string()));
+                    }
+                }
+            }
+            _ => {} // the parser only emits the kinds above; ignore any other defensively
+        }
+    }
+    (args, env)
+}
+
+/// Run the real rustc through the wrapper: read+apply the flags file (if any), assemble the env
+/// (baseline < `--env-file` < `rustc-env` from flags < explicit `--env`), append the mapped flags
+/// to the original rustc argv, and exec. Empty/absent flags file → a pure passthrough.
+pub fn run_rustc(opts: &RustcOpts) -> io::Result<i32> {
+    let records = match &opts.flags_file {
+        Some(p) if p.exists() => flags::read_flags_jsonl(&std::fs::read_to_string(p)?)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        _ => Vec::new(),
+    };
+    let (extra_args, rustc_env) = apply_flags(&records);
+    // baseline < env-files < build-script `rustc-env` < explicit `--env` (literal `rustc_env` is the
+    // highest authority, §6.2). `rustc-env` rides as the next-to-last layer via `base_env`.
+    let mut env = crate::env::base_env(&crate::env::platform_baseline(), &opts.env_files, &rustc_env)?;
+    for (k, v) in &opts.env {
+        env.insert(k.clone(), v.clone());
+    }
+    let status = Command::new(&opts.rustc)
+        .args(&opts.rustc_args)
+        .args(&extra_args)
+        .env_clear()
+        .envs(&env)
+        .status()?;
+    Ok(status.code().unwrap_or(-1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(kind: &str, args: &[&str]) -> FlagsRecord {
+        FlagsRecord { kind: kind.into(), args: args.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn p39_from_args_parses_equals_joined_flags_and_rustc_argv() {
+        let args: Vec<String> = [
+            "--rustc=/t/rustc",
+            "--flags-file=/o/_bs.out",
+            "--env-file=/o/cargo_pkg.env",
+            "--env=OUT_DIR=/o/_bs.out_dir",
+            "--",
+            "--edition",
+            "2021",
+            "--crate-name",
+            "blake3",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let o = RustcOpts::from_args(&args).unwrap();
+        assert_eq!(o.rustc, "/t/rustc");
+        assert_eq!(o.flags_file, Some(PathBuf::from("/o/_bs.out")));
+        assert_eq!(o.env_files, [PathBuf::from("/o/cargo_pkg.env")]);
+        assert_eq!(o.env, [("OUT_DIR".to_string(), "/o/_bs.out_dir".to_string())]);
+        assert_eq!(o.rustc_args, ["--edition", "2021", "--crate-name", "blake3"]);
+    }
+
+    #[test]
+    fn p39_from_args_requires_rustc_and_separator() {
+        assert!(RustcOpts::from_args(&["--flags-file=/x".to_string()]).unwrap_err().contains("`--` separator"));
+        let no_rustc: Vec<String> = ["--flags-file=/x", "--"].iter().map(|s| s.to_string()).collect();
+        assert!(RustcOpts::from_args(&no_rustc).unwrap_err().contains("--rustc"));
+    }
+
+    #[test]
+    fn p39_apply_flags_maps_each_kind_per_the_normative_table() {
+        let flags = vec![
+            rec("rustc-cfg", &["feature=\"simd\""]),
+            rec("rustc-link-lib", &["static=blake3"]),
+            rec("rustc-link-search", &["native=/opt/lib"]),
+            rec("rustc-link-arg", &["-Wl,-z,now"]),
+            rec("rustc-cdylib-link-arg", &["-undefined"]),
+            rec("rustc-flags", &["-L", "/extra", "--cfg", "tokio_unstable"]),
+            rec("rustc-env", &["BUILD_ID=abc123"]),
+        ];
+        let (args, env) = apply_flags(&flags);
+        assert_eq!(
+            args,
+            [
+                "--cfg", "feature=\"simd\"",
+                "-l", "static=blake3",
+                "-L", "native=/opt/lib",
+                "-C", "link-arg=-Wl,-z,now",
+                "-C", "link-arg=-undefined",
+                "-L", "/extra", "--cfg", "tokio_unstable", // rustc-flags appended verbatim
+            ],
+            "kind→rustc mapping: {args:?}"
+        );
+        // rustc-env → process env injection, NOT argv.
+        assert_eq!(env, [("BUILD_ID".to_string(), "abc123".to_string())]);
+        assert!(!args.iter().any(|a| a.contains("BUILD_ID")), "rustc-env is not an argv token");
+    }
+
+    #[test]
+    fn p39_empty_flags_is_a_no_op_passthrough() {
+        let (args, env) = apply_flags(&[]);
+        assert!(args.is_empty() && env.is_empty(), "no flags → nothing appended");
+    }
+}
