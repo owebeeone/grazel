@@ -25,11 +25,13 @@ const OMIT: &[&str] = &[
 #[test]
 fn rust_build_script_graph_matches_the_golden() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../parity");
+    // Parity posture (A2): drive razel as Bazel does — outputs in the `bazel-out/<cfg>/bin/` tree
+    // (so the action keys can pair with the golden, which is `bazel aquery`'s bazel-out paths).
+    let flags = GlobalFlags { bazel_build_compat: true, ..Default::default() };
     // Analyze the crate; its build-script dep (`:build_script_build`) is pulled in via the §4.3 edge,
     // so the action set is `withbs`'s rustc (wrapper-routed) + the build script's compile + run.
-    let targets =
-        analyze_workspace_with(&root, "//corpus/rust/build_script:withbs", GlobalFlags::default())
-            .expect("razel analyzes the build_script corpus case");
+    let targets = analyze_workspace_with(&root, "//corpus/rust/build_script:withbs", flags)
+        .expect("razel analyzes the build_script corpus case");
 
     // Render → normalize (cfg/repo/hash/sdk tokens) → canonicalize the Rustc argv (strip the
     // process-wrapper prefix so the comparison is the rustc invocation itself, A1).

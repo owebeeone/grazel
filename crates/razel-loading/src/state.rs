@@ -1190,6 +1190,22 @@ pub(crate) fn qualify(sess: &Session, path: &str) -> String {
     }
 }
 
+/// The path of a GENERATED output (rlib, bin, build-script files) as it appears in the action
+/// graph. Default: workspace-relative (`qualify`). Under `--bazel_build_compat` (the parity posture,
+/// RazelRustParityPlan A2): rooted in Bazel's output tree `bazel-out/<config>/bin/<pkg>/<name>` so
+/// razel's declared outputs + the argv paths that reference them (`--out-dir`, `--extern` rlibs, the
+/// build-script flags-file/`OUT_DIR`) match `bazel aquery`'s. Sources stay `qualify` (Bazel keeps
+/// them workspace-relative too). `normalize` tokenizes the `<config>` segment, so razel's single
+/// config matches Bazel's per-action exec/target configs.
+pub(crate) fn out_path(sess: &Session, name: &str) -> String {
+    let p = qualify(sess, name);
+    if sess.global.bazel_build_compat {
+        format!("bazel-out/{}/bin/{p}", bazel_config(sess))
+    } else {
+        p
+    }
+}
+
 /// Bazel's configuration mnemonic for this build, e.g. `darwin_arm64-fastbuild` — the
 /// `<cpu>-<compilation_mode>` segment of `<out>/<config>/bin`, computable from the
 /// compilation mode alone (no `Session`) so the CLI can mint matching convenience symlinks.

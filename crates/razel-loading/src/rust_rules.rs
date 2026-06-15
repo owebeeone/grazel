@@ -11,7 +11,7 @@
 //! the consumer can `use greet::...`. Paths are workspace-root-relative (exec_root =
 //! workspace root), matching how cc uses `-iquote .`.
 
-use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, qualify, session};
+use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, out_path, qualify, session};
 use crate::deps::{record_target, resolve_dep};
 use crate::values::{unpack, unpack_strs};
 use starlark::collections::SmallMap;
@@ -547,7 +547,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
 
-        let rlib = qualify(sess, &format!("lib{name}.rlib"));
+        let rlib = out_path(sess, &format!("lib{name}.rlib"));
         let mut argv = vec![
             rustc(),
             "--edition".into(),
@@ -633,7 +633,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
 
-        let out = qualify(sess, &name);
+        let out = out_path(sess, &name);
         let mut argv = vec![
             rustc(),
             "--edition".into(),
@@ -693,7 +693,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         // rust_shared_library: build-script edge unused for slice-1 (blake3 is a rust_library).
         let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
         let sess = session(eval);
-        let dylib = qualify(sess, &format!("lib{name}.dylib"));
+        let dylib = out_path(sess, &format!("lib{name}.dylib"));
         let mut argv = vec![
             rustc(),
             "--edition".into(),
@@ -827,7 +827,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             let sess = session(eval);
 
             // --- action 1: compile the host build-script bin (`<name>_`, §12 `:_bs_`) ---
-            let bin = qualify(sess, &format!("{name}_"));
+            let bin = out_path(sess, &format!("{name}_"));
             let mut compile_argv = vec![
                 rustc(),
                 "--edition".into(),
@@ -844,8 +844,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             compile_inputs.extend(dep_rlibs);
 
             // --- action 2: run the bin via the wrapper → §6.1 flags file + OUT_DIR tree ---
-            let flags_out = qualify(sess, &format!("{name}.out")); // §6.1 `<name>.out`
-            let out_dir = qualify(sess, &format!("{name}.out_dir")); // P2.4 tree output
+            let flags_out = out_path(sess, &format!("{name}.out")); // §6.1 `<name>.out`
+            let out_dir = out_path(sess, &format!("{name}.out_dir")); // P2.4 tree output
             let triple = crate::state::host_triple();
             let mut run_argv = vec![
                 process_wrapper(),
@@ -945,7 +945,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .ok_or_else(|| anyhow::anyhow!("cargo_toml_env_vars `{name}`: cannot read `{src}`"))?;
             let content = cargo_pkg_env_content(&toml);
-            let out = qualify(sess, &name);
+            let out = out_path(sess, &name);
             let script = format!(
                 "printf '%s' {} > {}",
                 crate::values::shquote(&content),
