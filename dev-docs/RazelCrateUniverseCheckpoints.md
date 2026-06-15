@@ -280,6 +280,28 @@ once for the WRITER (build-script) and the READER (rustc, P3.9). **AND it must w
   `:build_script_build` is never an `--extern`. **Touches `DepInfo`/the provider fold + every
   `rust_library`/`rust_binary` rustc action** — the broad core-path rewire (additive: only
   build-script-dep crates wrap).
+- `8e0fbdd` P3.10 — **wire the build-script edge** (§4.3). SEAM resolved (see below) → Option B:
+  `BuildScriptRun` is an OWN-only provider (`flags_file`/`out_dir`, `Set`, `dep_fold: None` — modeled
+  exactly like `DefaultInfo.files`), so it's read DIRECTLY off the dep and NEVER folds transitively
+  (a crate's consumers must not inherit its build-script flags). `resolve_dep` → `DepInfo.build_script`;
+  `extern_args` collects build-script edges separately and never `--extern`s them; `apply_build_script_edge`
+  rewrites the crate's rustc argv to `[process-wrapper, rustc, --rustc=…, --flags-file=…,
+  --env=OUT_DIR=…, --, <orig argv>]` + stages the flags-file + `OUT_DIR` as inputs. **Additive** — a
+  plain crate is unchanged (the cc/java carve-outs + the `p3x` argv goldens didn't move). Slice-1 =
+  ≤1 build script/crate (loud error on >1). Tests `p310`. **The build-script pipeline is now wired
+  end-to-end at the ANALYSIS level (P3.6 compile → P3.7 parse → P3.8 run → P3.9 wrapper → P3.10
+  edge).** NEXT: P3.11/P3.12 — blake3 analysis + execution PARITY vs LIVE bazel (needs the bazel
+  golden-capture path; the cc/java carve-outs are red here = that capture isn't wired/available in
+  this env, so blake3 parity likely faces the same — verify before diving in).
+
+**P3.10 build-script-edge modeling — RESOLVED: Option B (own-only `BuildScriptRun` provider).** The
+edge is INTRA-TARGET, so the transitive projection fold (the `CcInfo.hdrs` pattern) would be a
+CORRECTNESS BUG — it'd propagate blake3's build-script flags to every crate that depends on blake3.
+`DepInfo.fields` only carries transitively-folded projections, and `Scalar` fields are skipped by the
+fold entirely — neither fits. The fit is `dep_fold: None` (own-only) + a direct read in `resolve_dep`,
+which `DefaultInfo.files`/`libs` already does. Rejected: A (a new direct-only `FoldPolicy` — redundant
+with the own-only pattern), C (no provider; marker + direct `AnalyzedTarget` read — reintroduces the
+rule-specific special-casing C3a removed).
 
 **P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
 WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
@@ -312,12 +334,12 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.10 (wire the build-script edge — `BuildScriptRun` projection
-on `DepInfo`/the provider fold; route the crate's rustc action through the wrapper; never
-`--extern` the build script) → P3.11/P3.12 (analysis + execution parity vs live `bazel
-aquery`/`bazel build`; **P3.8d leg 2 — cc `CC`/`AR`/`CFLAGS` — rides P3.12**). (P3.9 done — wrapper
-feature-complete; P3.8d leg 1 `CARGO_CFG_*` done; `DEP_<LINKS>_*` is **P4.5**, Phase 4 — NOT part of
-P3.)
+**Remaining for `razelv3-rust/p3`:** P3.11 (blake3 analysis-parity golden — `bazel aquery
+'deps(@crates//:blake3)'` + the wrapper-prefix normalizer) → P3.12 (blake3 execution-parity golden —
+`bazel build @crates//:blake3__build_script_build`; the rlib + SIMD `.o`s in `OUT_DIR`; **P3.8d leg 2
+cc `CC`/`AR`/`CFLAGS` rides here**). BOTH need the LIVE-bazel golden-capture path (likely an
+environment dependency — verify). (P3.6–P3.10 done — build-script pipeline wired end-to-end at
+analysis; P3.8d leg 1 `CARGO_CFG_*` done; `DEP_<LINKS>_*` is **P4.5**, Phase 4 — NOT part of P3.)
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
