@@ -172,6 +172,12 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   until P3.5** (it needs an `AnalyzedAction.env` field + the env-file format + precedence — P3.5's
   scope; the executor already carries per-action env). `aliases` (extern rename) deferred to a
   near step alongside the dep-aliasing path. Gate: `compile_data` is an input, not an argv token.
+- `e7d291a` P3.3 — synthesize unvendored platform conditions from the host triple:
+  `host::platform_condition_matches` resolves `@platforms//{cpu,os}:*` (→ `host_constraint_matches`)
+  and `@rules_rust//rust/platform:<triple>` (→ `host_triple`), wired into `condition_matches`'
+  config_specs-MISS branch (a declared `config_setting` still wins). `state::host_triple()` added;
+  `toolchains.rs` reuses it. So blake3's `target_compatible_with`/cfg `select()` RESOLVES (P3.1b
+  only loaded it). Gate: host triple resolves its arm; non-host/foreign-os → default.
 
 **P3.1e — SEAM DECISION RESOLVED: double-`@` everywhere (option A).** Gianni's steer was
 "double-`@` canonical everywhere now" — the design's true identity, faithful, no deferral to a
@@ -190,11 +196,19 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.3 (condition source from the triple) / P3.4
-(`target_compatible_with`) → P3.5 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/
-`version`/`pkg_name`/`rustc_env_files` env family + `aliases` live) → P3.6–P3.10 (build-script
-compile/run, flags parser, rustc wrapper, build-script edge) → P3.11/P3.12 (analysis + execution
-parity vs live `bazel aquery`/`bazel build`).
+**Remaining for `razelv3-rust/p3`:** P3.4 (`target_compatible_with` — evaluate the now-resolved
+select: incompatible → no actions / skipped in wildcard / loud error when named) → P3.5
+(`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
+env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
+build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`).
+
+**Per-step gate scope (velocity).** The per-step green check is TIERED to the crate changed —
+**not** `--workspace` (touching `razel-loading` rebuilds ~24 downstream crates, ~7m; bare
+`--workspace` adds doc-tests, ~16m). Loading-layer step = `cargo test -p razel-loading --lib` +
+the 2 carve-out sentinels (`--test graph_parity --test java_graph_parity`), ~27s — skips the
+network test (`fetch_extract`) + ~28 other integration binaries. Full `-p razel-loading --tests`
+before a non-trivial commit; `--workspace --lib --tests` only at a phase tag. (`xtask gates` +
+`xtask perfgate` unchanged; `tfload` never a gate.)
 (condition source + `target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run,
 flags parser, rustc wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs
 live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask.
