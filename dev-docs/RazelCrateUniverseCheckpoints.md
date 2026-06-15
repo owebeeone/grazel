@@ -195,8 +195,10 @@ error? (A) `cmd_build_many` catches the incompatible error string and skips that
 string-fragile, conflates with genuine errors). (B) a `razel-loading` API that analyzes and returns
 compatibility WITHOUT erroring — `cmd_build_many` filters, the explicit path keeps P3.4b's error
 (clean seam; small new surface). (C) `analyze_workspace_with` gains an explicit/wildcard MODE param
-(skip vs error) — one entry, but threads provenance through the loader. Pending Gianni's steer
-(cf. the P3.1e double-`@` seam).
+(skip vs error) — one entry, but threads provenance through the loader.
+**DECISION (Gianni):** DEFER P3.4c — it's not on blake3's milestone-1 (named) path and pairs with
+P4.4's incompatible-target golden (absent-in-wildcard); land it there (approach B preferred). Roll
+to P3.5 (env-file) next, on the critical path.
 
 **P3.1e — SEAM DECISION RESOLVED: double-`@` everywhere (option A).** Gianni's steer was
 "double-`@` canonical everywhere now" — the design's true identity, faithful, no deferral to a
