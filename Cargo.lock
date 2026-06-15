@@ -1361,6 +1361,8 @@ dependencies = [
  "razel-ir",
  "razel-parity",
  "razel-rulepack",
+ "serde",
+ "serde_json",
  "starlark",
 ]
 
