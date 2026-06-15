@@ -377,18 +377,24 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
 - `1ed7fbb` **(b)** — CargoBuildScriptRun is the DOCUMENTED DEVIATION (RR's call): its output format
   (§6.1 single JSONL `.out` vs Bazel's split `.flags`/`.env`/… files) is intra-target plumbing →
   omit-listed + logged, not a §6.1 rework.
-- **REMAINING (the precise diff-spec — the substantial Rustc argv+output faithfulness, A3–A6):** the
-  2 Rustc actions must MATCH. (i) the crate compile needs the `-<hash>` + Bazel's faithful ~15-flag
-  argv in order (`--flag=value`, `--crate-type=rlib`, `--out-dir`+`--codegen=extra-filename/metadata`
-  output model replacing `-o`, `--target`/`--emit`/`--error-format`/`--color`/`-Cembed-bitcode`/
-  `--codegen=opt-level/debuginfo/strip`, `--remap-path-prefix`×3); (ii) the bin compile needs the
-  `.dSYM` output. **Emerging deviation set** (each documented): the metadata/`extra-filename` hash
-  VALUES (normalized `-<hash>`); the `--sysroot`/`-L` toolchain PATHS (razel uses the SYSTEM rustc,
-  Bazel a VENDORED `external/<repo>/rust_toolchain` → they don't normalize to the same, so these argv
-  flags are deviations unless razel adopts the vendored toolchain). **Needs a new `razel-parity`
-  capability**: argv-flag deviation handling (the `diff` is argv-order-strict; the toolchain/hash
-  flags must be filtered from both sides). This is the big precise chunk — best done as a focused pass
-  against the diff-spec, updating the `p32`-era unit tests (they pin the lean argv).
+- `e2d8a42` **A3–A6 (the Rustc argv+output faithfulness)** + `422da03` **A6 (--extern + transitive)** —
+  **MILESTONE A: rust analysis-parity GREEN** (`rust_graph_parity` 2/2: the build-script edge + the
+  transitive baseline; documented deviations only). razel's rust Rustc argv is now rules_rust-faithful:
+  crate (rlib) = the ~15-flag argv in Bazel's order (`--crate-name=`/`--crate-type=rlib` joined, the
+  `--out-dir`+`--codegen=extra-filename/metadata` hashed-output model → `lib<name>-<hash>.rlib` via
+  `metadata_hash`, `--target`/`--emit`/`--error-format`/`--color`/`-Cembed-bitcode`/`--codegen=opt-level/
+  debuginfo/strip`); deps = joined `--extern=<n>=<rlib>` + `-Ldependency=<dir>`; build-script bin =
+  `crate-type=bin`, exec config (`opt-level=3`/`strip=debuginfo`), `--emit=link=`+`.dSYM`. **Documented
+  deviations** (`razel-parity`, logged): `canonicalize_rust_argv` (wrapper strip) +
+  `strip_rust_deviation_flags` (`--sysroot`/`-L`/`--remap-path-prefix`/`--codegen=linker`/`link-arg` —
+  razel's system rustc + no cc-toolchain rust links) + the ` (TreeArtifact)` annotation strip
+  (norm_version 3) + the build-script flags-file inputs (the (b) JSONL-vs-split deviation, flowing into
+  the crate's consumption). The `p32`-era unit tests were updated off the lean argv (the entrenchment).
+- **REMAINING:** **A7** — local EXECUTION parity (`razel build //corpus/rust/build_script:withbs` → the
+  rlib + the build-script flags-file; xp diff). Needs the `razel-process-wrapper` bin RESOLVABLE at
+  exec (the run/rustc actions reference it by name) + actually running rustc/the build script — a
+  distinct execution-integration step (vs the analysis parity just landed). Then **Phase B** (external
+  `@crates//:blake3` — B1 resolve, B2 closure, B3 aq, B4 xp + cc env).
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
