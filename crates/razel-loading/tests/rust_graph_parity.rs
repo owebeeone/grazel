@@ -11,9 +11,16 @@
 use razel_loading::{analyze_workspace_with, GlobalFlags};
 use std::path::Path;
 
-/// Bazel infra actions razel does not model — allowlisted + logged (`Report::omitted`), never
-/// silently dropped (plan §2). What remains to match: the 2 Rustc + the 1 CargoBuildScriptRun.
+/// Allowlisted + logged deviations (`Report::omitted`), never silently dropped (plan §2):
+/// - the Bazel infra actions razel does not model;
+/// - **`CargoBuildScriptRun`** — DOCUMENTED DEVIATION (RR's call, plan §6.1): razel's build-script
+///   run emits ONE structured JSONL flags-file (`.out`) + `OUT_DIR`; Bazel splits it into
+///   `.flags`/`.linkflags`/`.linksearchpaths`/`.env`/`.depenv` (+ runfiles). That format is
+///   intra-target internal plumbing — consumed only by the same crate's rustc — so razel keeps its
+///   §6.1 design; the parity-meaningful surface (the crate's rustc argv + the rlib) is matched.
+/// What remains to MATCH: the 2 Rustc actions (the build-script bin compile + the crate compile).
 const OMIT: &[&str] = &[
+    "CargoBuildScriptRun",
     "ExecutableSymlink",
     "RepoMappingManifest",
     "RunfilesTree",
