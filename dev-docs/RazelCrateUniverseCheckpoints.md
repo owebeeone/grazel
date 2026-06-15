@@ -107,7 +107,36 @@ Also the implicit-deps parity rung (Phase 6).
 
 ---
 
-## Next: Phase 2 — `@crates` lock reader + repo materialization (Track A)
+## `razelv3-rust/p2` — Phase 2 complete (`@crates` lock reader + materialization)
 
-P2.1 lock reader → P2.2 recordedInputs → P2.3 stale-lock → P2.4 tree-output capture → P2.5 root
-`@crates` → P2.6 `RepoFetch` (stale-gated) → P2.7 interim cache.
+**Scope.** The full @crates source-of-truth + materialization (P2.1–P2.7): read `MODULE.bazel.lock`
+(version-aware, loud errors), the `recordedInputs` grammar, stale-lock detection (sha256 rehash of
+FILE inputs), tree-output capture in the executor cache, root `@crates` materialization (inline
+contents), per-crate `RepoFetch` (download + sha256-verify + extract + drop BUILD), and the interim
+dev-only bazel-external cache.
+
+**Commits (`p1-engine..p2`):**
+- `1a1f5a0` P2.1 — MODULE.bazel.lock reader (serde; reads the real 940KB lock)
+- `9f925a8` P2.2 — recordedInputs grammar
+- `32d08a8` P2.3 — stale-lock detection (sha2)
+- `2c8701e` P2.4 — tree-output capture in razel-exec
+- `a3c2cce` P2.5 + P2.6 — root materialization + real RepoFetch
+- `355a0a8` P2.7 — interim bazel-external cache
+
+**Verification.** ~18 razel-loading lock/materialize tests + razel-exec tree round-trip; a
+network-gated test REALLY downloads + verifies + extracts blake3 1.8.2; `xtask gates` green; full
+`cargo test --workspace` green except the 2 carve-out reds. New deps: serde/serde_json (lock) +
+sha2 (digests) — gate-clean.
+
+**Rollback.** `git reset --hard razelv3-rust/p1-engine` (Phase 2 is additive modules + the
+behavior-preserving razel-exec copy_path refactor).
+
+---
+
+## PAUSE before Phase 3 (the blake3 build) — a real roll-build guardrail
+
+Phase 3 (load surface + `cargo_build_script` + the rustc wrapper + build-script execution + the
+build-script edge + analysis/execution parity vs **live `bazel aquery`/`bazel build`**) is a
+12-step, tightly-COUPLED integration — the method's "phase too large/too coupled to complete safely
+as one checkpoint" applies, and it needs live-bazel parity capture. After two full phases tagged in
+one session, this is the honest checkpoint to land before that integration.
