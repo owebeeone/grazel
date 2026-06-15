@@ -255,6 +255,17 @@ once for the WRITER (build-script) and the READER (rustc, P3.9). **AND it must w
   mapping table + the explicit-argv shape `[wrapper, rustc, --flags-file=…, --env-file=…, --, <rustc
   args…>]`; empty flags-file = no-op passthrough). **`AnalyzedAction` still has no `env` field — the
   wrapper carries env (P3.5b env precedence rides P3.9).**
+- `0dc04e3` P3.8d **leg 1/2 — `CARGO_CFG_*`** (§5.2): the run action emits the `CARGO_CFG_*` set
+  cargo derives from the (host==target) triple via `cargo_cfg_env()` (TARGET_ARCH/OS/FAMILY/VENDOR/
+  ENV/POINTER_WIDTH/ENDIAN/FEATURE + UNIX/PANIC); `TARGET_FEATURE` is a per-arch baseline
+  (x86_64=`fxsr,sse,sse2`, aarch64=`neon`) refined at P3.12. Tests `p38d`. **Leg 2/2 — cc
+  `CC`/`AR`/`CFLAGS` — RE-SEQUENCED to ride P3.12** (not a standalone pre-P3.9 step): `razel-cc-
+  toolchain` exposes compile/archive ARGV, not the env-var form a build script's `cc` crate reads,
+  so it needs a new accessor + a toolchain-selection decision; and the `cc` crate DEFAULTS to system
+  clang absent `CC` (so blake3's `.o`s compile functionally without it). Exact `CC`/`AR`/`CFLAGS` is
+  a hermeticity/parity concern best pinned against the P3.12 golden — guessing values now risks
+  diverging from both the `cc` crate default and Bazel. (Still in-project, still Phase 3, just at the
+  golden.)
 
 **P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
 WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
@@ -287,11 +298,11 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** **P3.8d** (the run env's remaining allowlist legs —
-`CARGO_CFG_*` [triple→cfg] + cc `CC`/`AR`/`CFLAGS` [`razel-cc-toolchain`]; required for P3.12) →
-P3.9 (the wrapper's `rustc` subcommand; **P3.5b** env precedence + `--env-file=` consumption rides
-here) → P3.10 (wire the build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel
-aquery`/`bazel build`). (`DEP_<LINKS>_*` is **P4.5**, Phase 4 — NOT part of P3.)
+**Remaining for `razelv3-rust/p3`:** P3.9 (the wrapper's `rustc` subcommand; **P3.5b** env
+precedence + `--env-file=` consumption rides here) → P3.10 (wire the build-script edge) →
+P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`; **P3.8d leg 2 — cc
+`CC`/`AR`/`CFLAGS` — rides P3.12**). (P3.8d leg 1 `CARGO_CFG_*` done; `DEP_<LINKS>_*` is **P4.5**,
+Phase 4 — NOT part of P3.)
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
