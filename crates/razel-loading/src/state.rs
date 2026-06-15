@@ -918,6 +918,11 @@ pub struct GlobalFlags {
     /// Superseded by `bazel_build_compat` (which forces the real Bazel `bazel-out` names).
     /// Build-phase only.
     pub bin_tree_layout: bool,
+    /// The parsed `MODULE.bazel.lock` `@crates` world (crate-universe P3.1e), when the build uses
+    /// `@crates`. Its presence turns ON canonicalization of `@crates`/`@crates__*` labels to their
+    /// `@@rules_rust++crate+…` identity in [`canon_label`] (§11.3); `None` for every non-`@crates`
+    /// build (so the central label path is byte-identical there). `Arc` — shared, never mutated.
+    pub crate_lock: Option<std::sync::Arc<crate::lock::CrateLock>>,
 }
 
 impl GlobalFlags {
@@ -1083,6 +1088,28 @@ pub enum CcToolchainMode {
 /// Canonicalize a target name/label against the current package. Single-package
 /// mode keeps bare names; workspace mode produces `//pkg:name`.
 pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
+    canonicalize_crate_repo(sess, canon_label_inner(sess, s))
+}
+
+/// P3.1e (§11.3): rewrite a `@crates`/`@crates__*` label to its canonical `@@rules_rust++crate+…`
+/// identity, accepting either form (apparent OR already-canonical) — the rule that makes
+/// `@crates//:blake3` and `@@rules_rust++crate+crates//:blake3` the SAME target. A no-op unless the
+/// build seeded [`GlobalFlags::crate_lock`], and only for repos the lock defines (other repos —
+/// `@rules_rust`, `@platforms` — keep their single-`@` apparent form, untouched).
+fn canonicalize_crate_repo(sess: &Session, label: String) -> String {
+    let Some(lock) = &sess.global.crate_lock else { return label };
+    let trimmed = label.trim_start_matches('@');
+    let Some((repo, rest)) = trimmed.split_once("//") else { return label };
+    if repo.is_empty() {
+        return label; // main repo (`@@//`, `//`) — never a crate repo
+    }
+    match lock.canonical_repo(repo) {
+        Some(canon) => format!("@@{canon}//{rest}"),
+        None => label,
+    }
+}
+
+fn canon_label_inner(sess: &Session, s: &str) -> String {
     // Package shorthand: `//a/b` ≡ `//a/b:b` (same for `@repo//a/b`).
     let expand = |label: String| -> String {
         if let Some(rest) = label.rsplit("//").next()

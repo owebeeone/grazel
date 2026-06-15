@@ -849,8 +849,10 @@ fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> Result<(), L
     }
     // External package (`@repo//pkg`): its BUILD lives under the vendored repo's root.
     // Failures up to the eval are PRE-EVAL — the package is in error (cacheable).
-    let pkg_dir = if let Some(rest) = pkg.strip_prefix('@') {
-        let (repo, sub) = rest
+    let pkg_dir = if pkg.starts_with('@') {
+        // Both `@apparent//` and the canonical `@@repo//` (§11.3) — trim all leading `@`.
+        let (repo, sub) = pkg
+            .trim_start_matches('@')
             .split_once("//")
             .ok_or_else(|| LoadErr::declare(format!("bad package `{pkg}`")))?;
         sess.global
@@ -921,8 +923,20 @@ pub fn analyze_workspace(root: &Path, top_label: &str) -> Result<Vec<AnalyzedTar
 pub fn analyze_workspace_with(
     root: &Path,
     top_label: &str,
-    flags: GlobalFlags,
+    mut flags: GlobalFlags,
 ) -> Result<Vec<AnalyzedTarget>, String> {
+    // P3.1e: seed the `@crates` lock so `@crates` labels canonicalize (§11.3). Read-if-present —
+    // a non-`@crates` workspace has no lock (or no `@crates` labels), so this is inert there; an
+    // already-seeded `crate_lock` (a caller/test) wins. A malformed lock stays `None`: a real
+    // `@crates` build then fails later with a clear "not vendored", not a cryptic parse error here.
+    if flags.crate_lock.is_none() {
+        let lock_path = root.join("MODULE.bazel.lock");
+        if lock_path.exists()
+            && let Ok(lock) = crate::lock::read_lock(&lock_path)
+        {
+            flags.crate_lock = Some(std::sync::Arc::new(lock));
+        }
+    }
     let session = Session::new(Some(root.to_path_buf()), flags);
     let top_canon = canon_label(&session, top_label);
     let top_pkg = pkg_of(&top_canon)
@@ -1387,6 +1401,60 @@ mod tests {
         assert!(
             names.contains(&"@crates__blake3-1.8.2//:blake3"),
             "alias top-label followed to its terminal actual; got {names:?}",
+        );
+    }
+
+    #[test]
+    // crate-universe P3.1e: with the lock seeded, `@crates//:blake3` resolves to its CANONICAL
+    // `@@rules_rust++crate+...` identity (§11.3) — double-`@` everywhere. External dirs are
+    // canonical-named (the real bazel `external/` layout); the root alias's apparent `actual`
+    // (`@crates__blake3-1.8.2//:blake3`) is itself canonicalized on load.
+    fn p31e_crates_identity_is_canonical() {
+        let tmp = std::env::temp_dir().join(format!("razel-p31e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let ext = tmp.join("ext");
+        std::fs::create_dir_all(ext.join("rules_rust++crate+crates")).unwrap();
+        std::fs::create_dir_all(ext.join("rules_rust++crate+crates__blake3-1.8.2")).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(tmp.join("BUILD"), "filegroup(name = \"ws\", srcs = [])\n").unwrap();
+        std::fs::write(
+            ext.join("rules_rust++crate+crates/BUILD.bazel"),
+            "alias(name = \"blake3\", actual = \"@crates__blake3-1.8.2//:blake3\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext.join("rules_rust++crate+crates__blake3-1.8.2/BUILD.bazel"),
+            "filegroup(name = \"blake3\", srcs = [])\n",
+        )
+        .unwrap();
+        let repo = crate::lock::CrateRepo {
+            urls: vec![],
+            sha256: String::new(),
+            strip_prefix: None,
+            build_file_content: String::new(),
+            remote_patch_strip: None,
+            archive_type: None,
+        };
+        let mut crates = std::collections::BTreeMap::new();
+        crates.insert("crates__blake3-1.8.2".to_string(), repo);
+        let lock = crate::lock::CrateLock {
+            version: 26,
+            root_contents: std::collections::BTreeMap::new(),
+            crates,
+            recorded_inputs: vec![],
+            canonical_prefix: "rules_rust++crate+".to_string(),
+        };
+        let flags = GlobalFlags {
+            fetched_external_base: Some(ext.clone()),
+            crate_lock: Some(std::sync::Arc::new(lock)),
+            ..Default::default()
+        };
+        let targets = analyze_workspace_with(&tmp, "@crates//:blake3", flags).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"@@rules_rust++crate+crates__blake3-1.8.2//:blake3"),
+            "expected canonical @@ identity; got {names:?}",
         );
     }
 
