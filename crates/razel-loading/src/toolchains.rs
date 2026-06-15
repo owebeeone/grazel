@@ -37,11 +37,10 @@ pub(crate) fn toolchain_rows<'v>(
     // probe-step by probe-step; callables stay absorbed.
     let empty = |heap: starlark::values::Heap<'v>| heap.alloc(crate::engine::Absorb);
     use starlark::values::structs::AllocStruct;
-    let (triple, tos, dylib) = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => ("aarch64-apple-darwin", "darwin", ".dylib"),
-        ("macos", _) => ("x86_64-apple-darwin", "darwin", ".dylib"),
-        ("linux", "aarch64") => ("aarch64-unknown-linux-gnu", "linux", ".so"),
-        _ => ("x86_64-unknown-linux-gnu", "linux", ".so"),
+    let triple = crate::state::host_triple();
+    let (tos, dylib) = match std::env::consts::OS {
+        "macos" => ("darwin", ".dylib"),
+        _ => ("linux", ".so"),
     };
     // target_triple is rules_rust's triple STRUCT (.arch/.vendor/.system/.abi/.str);
     // version_semver is a semver struct (host rustc).

@@ -306,3 +306,20 @@ pub(crate) fn host_false_condition(canon: &str) -> bool {
     ];
     FALSE_REPOS.iter().any(|p| canon.starts_with(p))
 }
+
+/// P3.3: resolve an UNVENDORED platform condition from the host, so a crate's `select()` over
+/// `@platforms//{cpu,os}:<name>` or `@rules_rust//rust/platform:<triple>` matches without vendoring
+/// `@platforms` / `@rules_rust`. `None` for any other label — the caller falls through to its
+/// package-load / defer path (a declared `config_setting` always wins; this is only the miss-path
+/// fallback). CPU-host posture: the configured triple is the host triple (a subset — full triples
+/// + os/cpu constraints; expand as goldens demand).
+pub(crate) fn platform_condition_matches(canon: &str) -> Option<bool> {
+    if let Some(rest) = canon.strip_prefix("@platforms//") {
+        let (fam, name) = rest.split_once(':')?;
+        return Some(crate::state::host_constraint_matches(fam, name));
+    }
+    if let Some(triple) = canon.strip_prefix("@rules_rust//rust/platform:") {
+        return Some(triple == crate::state::host_triple());
+    }
+    None
+}

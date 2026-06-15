@@ -561,6 +561,8 @@ mod tests {
         std::fs::write(pkg.join("lib.rs"), "pub fn x() {}\n").unwrap();
         std::fs::write(pkg.join("root.rs"), "pub fn y() {}\n").unwrap();
         std::fs::write(pkg.join("table.bin"), "data\n").unwrap();
+        std::fs::write(pkg.join("host.txt"), "h\n").unwrap();
+        std::fs::write(pkg.join("default.txt"), "d\n").unwrap();
         std::fs::write(pkg.join("BUILD"), build).unwrap();
         let r = analyze_workspace_with(&tmp, "//app:t", GlobalFlags::default());
         let _ = std::fs::remove_dir_all(&tmp);
@@ -638,6 +640,49 @@ mod tests {
             "compile_data is not an argv token: {:?}",
             argv_of(&targets)
         );
+    }
+
+    #[test]
+    fn p33_host_platform_triple_resolves_the_select_arm() {
+        // P3.3: a `select()` keyed on the HOST `@rules_rust//rust/platform:<triple>` picks that arm
+        // (resolved from the host, no @rules_rust vendoring). Observed through P3.2b's compile_data.
+        let host = crate::state::host_triple();
+        let build = format!(
+            "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], compile_data = select({{\
+             \"@rules_rust//rust/platform:{host}\": [\"host.txt\"], \
+             \"//conditions:default\": [\"default.txt\"]}}))\n"
+        );
+        let inputs = inputs_of(&analyze("p33host", &build).unwrap());
+        assert!(inputs.contains(&"app/host.txt".to_string()), "host-triple arm wins: {inputs:?}");
+        assert!(!inputs.contains(&"app/default.txt".to_string()), "default not taken: {inputs:?}");
+    }
+
+    #[test]
+    fn p33_non_host_platform_triple_falls_to_default() {
+        let build = format!(
+            "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], compile_data = select({{\
+             \"@rules_rust//rust/platform:some-other-triple\": [\"host.txt\"], \
+             \"//conditions:default\": [\"default.txt\"]}}))\n"
+        );
+        let inputs = inputs_of(&analyze("p33other", &build).unwrap());
+        assert!(inputs.contains(&"app/default.txt".to_string()), "non-host → default: {inputs:?}");
+        assert!(!inputs.contains(&"app/host.txt".to_string()), "non-host arm not taken: {inputs:?}");
+    }
+
+    #[test]
+    fn p33_platforms_os_constraint_resolves_from_host() {
+        // `@platforms//os:<host-os>` matches; a foreign os → default. (host_constraint_matches.)
+        let host_os = match std::env::consts::OS {
+            "macos" => "osx",
+            os => os,
+        };
+        let build = format!(
+            "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], compile_data = select({{\
+             \"@platforms//os:{host_os}\": [\"host.txt\"], \
+             \"//conditions:default\": [\"default.txt\"]}}))\n"
+        );
+        let inputs = inputs_of(&analyze("p33os", &build).unwrap());
+        assert!(inputs.contains(&"app/host.txt".to_string()), "host-os arm wins: {inputs:?}");
     }
 
     #[test]

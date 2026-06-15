@@ -973,6 +973,17 @@ pub(crate) fn host_cpu() -> &'static str {
     }
 }
 
+/// The host's Rust target triple (`@rules_rust//rust/platform:<triple>` / rules_rust's
+/// `target_triple`). CPU-host posture: the configured triple IS the host's.
+pub(crate) fn host_triple() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", _) => "x86_64-apple-darwin",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        _ => "x86_64-unknown-linux-gnu",
+    }
+}
+
 /// Does a `constraint_value` (package family, value name) describe the REAL host? `@platforms`'
 /// os/cpu families match the host; foreign constraint families are conservative-false.
 pub(crate) fn host_constraint_matches(pkg: &str, name: &str) -> bool {

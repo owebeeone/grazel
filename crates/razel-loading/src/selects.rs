@@ -198,6 +198,12 @@ pub(crate) fn condition_matches(
     let spec = match spec {
         Some(s) => s,
         None => {
+            // P3.3: an unvendored platform condition resolves from the host triple (a declared
+            // config_setting would have hit `config_specs` above; this is the miss-path fallback,
+            // ahead of the package load that would fail for unvendored @platforms / @rules_rust).
+            if let Some(hit) = crate::host::platform_condition_matches(canon) {
+                return Ok(Some(hit));
+            }
             if allow_load
                 && sess.workspace.is_some()
                 && let Some(pkg) = crate::state::pkg_of(canon)
