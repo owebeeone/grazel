@@ -159,6 +159,13 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   per-step perf gate.
 - `0791370` P3.1e — canonicalize `@crates` labels to their `@@rules_rust++crate+…` identity
   (§11.3 accept-both-forms). **P3.1 (a–e) complete.**
+- `0e9edf1` P3.2a — `rust_library`/`rust_binary` §5.5 attr verdict table: replace the silent
+  `_kw` discard with an enumerated accept-vs-loud-error policy (P2#3). CompileArgv set shaped now
+  (`crate_name`/`crate_root` overrides, `crate_features`→`--cfg=feature="x"`, `rustc_flags`);
+  CompileEnv (`rustc_env`/`compile_data`/`aliases`/…) accepted **argv-inert** (P3.2b);
+  Delegated (`proc_macro_deps`→P4.1, `target_compatible_with`→P3.4, `link_deps`→P4.5);
+  Ignored (`data`/`tags`/`visibility`); unknown → loud error. Regression pin: delegated/ignored
+  attrs leave the argv byte-identical. (P3.2 split a/b per the plan's "compile set first" hint.)
 
 **P3.1e — SEAM DECISION RESOLVED: double-`@` everywhere (option A).** Gianni's steer was
 "double-`@` canonical everywhere now" — the design's true identity, faithful, no deferral to a
@@ -177,7 +184,8 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.2 (rust_library attr surface) → P3.3/P3.4
+**Remaining for `razelv3-rust/p3`:** P3.2b (env-family + `aliases` extraction — make the
+CompileEnv bucket live) → P3.3/P3.4
 (condition source + `target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run,
 flags parser, rustc wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs
 live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask.
