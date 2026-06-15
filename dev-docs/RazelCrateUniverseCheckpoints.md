@@ -266,6 +266,20 @@ once for the WRITER (build-script) and the READER (rustc, P3.9). **AND it must w
   a hermeticity/parity concern best pinned against the P3.12 golden — guessing values now risks
   diverging from both the `cc` crate default and Bazel. (Still in-project, still Phase 3, just at the
   golden.)
+- `092c5a8` P3.9 — the process-wrapper's **`rustc` subcommand** (§6.1/§4.1, the flags-file READER;
+  P3.8 was the WRITER). `rustc --rustc=PATH [--flags-file=F] [--env-file=F]… [--env=K=V]… -- <rustc
+  args…>` → read the §6.1 flags file (`read_flags_jsonl`) → the normative `kind`→rustc map
+  (`rustc-cfg`→`--cfg`, `-link-lib`→`-l`, `-link-search`→`-L`, `-link-arg`/`-cdylib-link-arg`→`-C
+  link-arg`, `rustc-flags` appended verbatim, `rustc-env`→process env NOT argv) → append to the
+  original rustc argv + exec. Empty/absent flags file = no-op passthrough. **P3.5b** env precedence:
+  baseline < `--env-file` < build-script `rustc-env` < literal `--env` (highest). Factored a shared
+  `env.rs` (`platform_baseline` + `base_env`) used by BOTH subcommands; `bs_runner` delegates to it.
+  `razel-process-wrapper` 11/11. **The wrapper crate is now feature-complete for the build-script
+  pipeline.** NEXT: **P3.10** — wire the build-script EDGE (§4.3): a `BuildScriptRun` projection so a
+  crate's rustc action routes through the wrapper (consuming the flags-file + `OUT_DIR`), and
+  `:build_script_build` is never an `--extern`. **Touches `DepInfo`/the provider fold + every
+  `rust_library`/`rust_binary` rustc action** — the broad core-path rewire (additive: only
+  build-script-dep crates wrap).
 
 **P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
 WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
@@ -298,11 +312,12 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.9 (the wrapper's `rustc` subcommand; **P3.5b** env
-precedence + `--env-file=` consumption rides here) → P3.10 (wire the build-script edge) →
-P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`; **P3.8d leg 2 — cc
-`CC`/`AR`/`CFLAGS` — rides P3.12**). (P3.8d leg 1 `CARGO_CFG_*` done; `DEP_<LINKS>_*` is **P4.5**,
-Phase 4 — NOT part of P3.)
+**Remaining for `razelv3-rust/p3`:** P3.10 (wire the build-script edge — `BuildScriptRun` projection
+on `DepInfo`/the provider fold; route the crate's rustc action through the wrapper; never
+`--extern` the build script) → P3.11/P3.12 (analysis + execution parity vs live `bazel
+aquery`/`bazel build`; **P3.8d leg 2 — cc `CC`/`AR`/`CFLAGS` — rides P3.12**). (P3.9 done — wrapper
+feature-complete; P3.8d leg 1 `CARGO_CFG_*` done; `DEP_<LINKS>_*` is **P4.5**, Phase 4 — NOT part of
+P3.)
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
