@@ -8,6 +8,7 @@ plan-docs GLP system) — tag, verification, and rollback per integration gate.
 |-----|-------|------|
 | `razelv3-rust/p0-start` | clean tree before P0.0 | — |
 | `razelv3-rust/p0-foundation` | Phase-0 foundation + rust-rule capture | `p0-start` |
+| `razelv3-rust/p0` | **Phase 0 complete** — loading-phase graph; all q1 rules capture | `p0-foundation` |
 
 ---
 
@@ -41,3 +42,38 @@ in the build path reads `loaded_targets`); the only behavior change is the rust_
 
 **Remaining for full Phase 0 (`razelv3-rust/p0`):** P0.5b — capture for cc + dialect natives + the
 other 3 rust rules; the mixed-rule q1 corpus; then the strict (non-lenient) `finalize_edges`.
+
+---
+
+## `razelv3-rust/p0` — Phase 0 complete (loading-phase graph)
+
+**Scope.** The Phase-0 DoD: the loading-phase graph is captured via the central seam for **every
+q1-corpus rule family** — rust (`rust_library`/`rust_binary`), cc (`cc_library`/`cc_binary`), and
+the dialect natives (`filegroup`/`alias`/`config_setting`/`genrule`) — and `finalize_edges`
+resolves all edge kinds over the live session indexes. Additive; the build path is unchanged;
+PL stays linear with capture on.
+
+**Commits (`p0-foundation..p0`):**
+- `8e0386d` P0.5b — capture for cc + dialect natives; generalized `capture_rule`; q1 mixed-rule test
+
+**Verification.**
+- In-crate `p05b_mixed_rule_corpus_captures_the_loading_graph`: a hermetic mixed corpus captures
+  every family with the right `rule_class`; finalize resolves Rule / SourceFile / Alias /
+  GeneratedFile edges.
+- `cargo test --workspace --no-fail-fast` — green EXCEPT the 2 carve-out reds (no new regressions).
+- `cargo xtask perfgate` — scaling **1.95** (cap 2.3), budget green, 7.5s: capture is **linear**.
+- `cargo xtask gates` — green.
+
+**Rollback.** `git reset --hard razelv3-rust/p0-foundation` (capture is additive).
+
+**Deferred (NOT Phase 0):** the 3 rarer rust rules (`rust_shared_library`/`rust_library_group`/
+`rust_doc`); scalar attrs (`name`/`edition`) in the attr map; **strict** (loud-error)
+`finalize_edges` — it needs external-target resolution, a Phase-1 (P5.2) item; a checked-in q1
+corpus fixture lands with the query goldens (P1.7).
+
+---
+
+## Next: Phase 1 — `razel query` over the workspace (q1–q3)
+
+P1.0 boundary gate → P1.1 parser → P1.2 load-only resolver (move into `razel-loading`) → P1.3
+adjacency+eval → P1.4 predicates → P1.5 somepath/allpaths → P1.6 `cmd_query` → P1.7 `qg` goldens.
