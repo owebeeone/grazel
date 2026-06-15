@@ -222,6 +222,98 @@ fn is_incompatible(sess: &crate::state::Session, constraints: &[String]) -> anyh
     Ok(false)
 }
 
+/// P3.5: the absolute disk path of `<target's package>/<src>`, resolved like `resolve_dep`'s file
+/// path — `@repo//pkg:name` → the vendored external dir (`external_repo_dirs`), `//pkg:name` → the
+/// workspace root. (Handles the `@@` canonical form via `trim_start_matches('@')`.)
+fn pkg_file_abs(
+    sess: &crate::state::Session,
+    target_canon: &str,
+    src: &str,
+) -> Option<std::path::PathBuf> {
+    let trimmed = target_canon.trim_start_matches('@');
+    let (repo, rest) = match trimmed.split_once("//") {
+        Some((r, rest)) if !r.is_empty() => (Some(r), rest),
+        _ => (None, trimmed.trim_start_matches("//")),
+    };
+    let pkg = rest.split_once(':').map(|(p, _)| p).unwrap_or(rest);
+    let join_pkg = |root: &std::path::Path| {
+        if pkg.is_empty() { root.join(src) } else { root.join(pkg).join(src) }
+    };
+    match repo {
+        Some(repo) => sess
+            .global
+            .external_repo_dirs(repo)
+            .into_iter()
+            .map(|d| join_pkg(&d))
+            .find(|p| crate::state::path_is_file(sess, p)),
+        None => {
+            let p = join_pkg(sess.workspace.as_ref()?);
+            crate::state::path_is_file(sess, &p).then_some(p)
+        }
+    }
+}
+
+/// P3.5 (§6.2): parse a `Cargo.toml`'s `[package]` table (a minimal flat `key = value` scan — no
+/// `toml` dep) into the `CARGO_PKG_*` env-file body (newline `KEY=VALUE`). Always emits NAME,
+/// VERSION, and the four VERSION parts (Cargo's contract); the optional scalar fields only when
+/// present. Array values (`authors`) join with `:` (Cargo's `CARGO_PKG_AUTHORS` separator).
+fn cargo_pkg_env_content(toml: &str) -> String {
+    let mut pkg = std::collections::BTreeMap::new();
+    let mut in_pkg = false;
+    for raw in toml.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            in_pkg = line == "[package]";
+            continue;
+        }
+        if !in_pkg || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let v = v.trim();
+            let val = if let Some(inner) = v.strip_prefix('[') {
+                inner
+                    .trim_end_matches(']')
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(":")
+            } else {
+                v.trim_matches('"').to_string()
+            };
+            pkg.insert(k.trim().to_string(), val);
+        }
+    }
+    let get = |k: &str| pkg.get(k).cloned().unwrap_or_default();
+    let version = get("version");
+    let (core, pre) = version.split_once('-').unwrap_or((version.as_str(), ""));
+    let mut parts = core.split('.');
+    let mut lines = vec![
+        format!("CARGO_PKG_NAME={}", get("name")),
+        format!("CARGO_PKG_VERSION={version}"),
+        format!("CARGO_PKG_VERSION_MAJOR={}", parts.next().unwrap_or("")),
+        format!("CARGO_PKG_VERSION_MINOR={}", parts.next().unwrap_or("")),
+        format!("CARGO_PKG_VERSION_PATCH={}", parts.next().unwrap_or("")),
+        format!("CARGO_PKG_VERSION_PRE={pre}"),
+    ];
+    for (key, var) in [
+        ("authors", "CARGO_PKG_AUTHORS"),
+        ("description", "CARGO_PKG_DESCRIPTION"),
+        ("homepage", "CARGO_PKG_HOMEPAGE"),
+        ("repository", "CARGO_PKG_REPOSITORY"),
+        ("license", "CARGO_PKG_LICENSE"),
+        ("license-file", "CARGO_PKG_LICENSE_FILE"),
+        ("rust-version", "CARGO_PKG_RUST_VERSION"),
+        ("readme", "CARGO_PKG_README"),
+    ] {
+        if let Some(v) = pkg.get(key) {
+            lines.push(format!("{var}={v}"));
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
 #[starlark::starlark_module]
 fn rust_rules(b: &mut GlobalsBuilder) {
     /// `rust_library(name, srcs, deps=[], edition="2021")` → one `rustc` action
@@ -505,15 +597,42 @@ fn rust_rules(b: &mut GlobalsBuilder) {
 
     /// P3.1: `cargo_toml_env_vars` load surface — a STUB target for now; the `CARGO_PKG_*` env-file
     /// it emits lands in P3.5.
+    /// P3.5 (§6.2): `cargo_toml_env_vars(name, src="Cargo.toml")` emits a `CARGO_PKG_*` env-file
+    /// from the crate's `Cargo.toml` via a `FileWrite` action (content baked at analysis — so it's
+    /// the action's cache key; no `Cargo.toml` runtime input). The rustc wrapper consumes it through
+    /// `--env-file=` (P3.9); precedence over literal `rustc_env`/`version`/`pkg_name` lands there.
     fn native_cargo_toml_env_vars<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] src: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
+        let src = src.unwrap_or_else(|| "Cargo.toml".into());
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
             let sess = session(eval);
-            record_target(sess, AnalyzedTarget { name: canon_label(sess, &name), ..Default::default() });
+            let canon = canon_label(sess, &name);
+            let toml = pkg_file_abs(sess, &canon, &src)
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .ok_or_else(|| anyhow::anyhow!("cargo_toml_env_vars `{name}`: cannot read `{src}`"))?;
+            let content = cargo_pkg_env_content(&toml);
+            let out = qualify(sess, &name);
+            let script = format!(
+                "printf '%s' {} > {}",
+                crate::values::shquote(&content),
+                crate::values::shquote(&out)
+            );
+            record_target(sess, AnalyzedTarget {
+                name: canon,
+                actions: vec![AnalyzedAction {
+                    mnemonic: "FileWrite".into(),
+                    argv: vec!["/bin/sh".into(), "-c".into(), script],
+                    inputs: Vec::new(),
+                    outputs: vec![out.clone()],
+                }],
+                default_info: vec![out],
+                ..Default::default()
+            });
             Ok(())
         }))?;
         Ok(NoneType)
@@ -766,6 +885,43 @@ mod tests {
         let t = targets.iter().find(|t| t.name == "//app:t").expect("//app:t");
         assert!(!t.actions.is_empty(), "compatible target builds a Rustc action");
         assert!(t.actions[0].argv.iter().any(|a| a == "--crate-name"), "{:?}", t.actions[0].argv);
+    }
+
+    #[test]
+    fn p35a_cargo_toml_env_vars_emits_the_cargo_pkg_env_file() {
+        let tmp = std::env::temp_dir().join(format!("razel-p35a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let pkg = tmp.join("c");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(
+            pkg.join("Cargo.toml"),
+            "[package]\nname = \"blake3\"\nversion = \"1.8.2\"\nlicense = \"CC0-1.0\"\n\
+             edition = \"2021\"\n\n[dependencies]\narrayref = \"0.3\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("BUILD"),
+            "load(\"@rules_rust//cargo:defs.bzl\", \"cargo_toml_env_vars\")\n\
+             cargo_toml_env_vars(name = \"env\", src = \"Cargo.toml\")\n",
+        )
+        .unwrap();
+        let targets = analyze_workspace_with(&tmp, "//c:env", GlobalFlags::default()).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let t = targets.iter().find(|t| t.name == "//c:env").expect("//c:env analyzed");
+        let script = &t.actions.first().expect("a FileWrite action").argv[2];
+        for want in [
+            "CARGO_PKG_NAME=blake3",
+            "CARGO_PKG_VERSION=1.8.2",
+            "CARGO_PKG_VERSION_MAJOR=1",
+            "CARGO_PKG_VERSION_MINOR=8",
+            "CARGO_PKG_VERSION_PATCH=2",
+            "CARGO_PKG_LICENSE=CC0-1.0",
+        ] {
+            assert!(script.contains(want), "env-file missing `{want}`: {script}");
+        }
+        // The `[dependencies]` table is not `[package]` — it must not leak into the env-file.
+        assert!(!script.contains("arrayref"), "only the [package] table: {script}");
     }
 
     #[test]

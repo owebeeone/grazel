@@ -1302,6 +1302,8 @@ mod tests {
         let pkg = tmp.join("c");
         std::fs::create_dir_all(&pkg).unwrap();
         std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        // P3.5: cargo_toml_env_vars now really reads Cargo.toml (was a stub at P3.1a).
+        std::fs::write(pkg.join("Cargo.toml"), "[package]\nname = \"c\"\nversion = \"0.1.0\"\n").unwrap();
         std::fs::write(
             pkg.join("BUILD"),
             "load(\"@rules_rust//cargo:defs.bzl\", \"cargo_build_script\", \"cargo_toml_env_vars\")\n\
