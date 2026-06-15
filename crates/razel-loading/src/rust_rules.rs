@@ -179,6 +179,76 @@ fn compile_attrs<'v>(
     Ok(out)
 }
 
+/// §5.2 verdict for a `cargo_build_script` attribute — the build-script attr surface, **distinct
+/// from `rust_library`'s §5.5** and split by phase (compile = action 1, run = action 2). Same
+/// accept-vs-loud-error discipline: an attr absent here is a loud error, never a silent pass.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BsVerdict {
+    /// Compile (action 1) — shapes the host build-script bin's `rustc` argv NOW (P3.6).
+    CompileArgv,
+    /// Compile (action 1) — accepted + captured, effect deferred (`proc_macro_deps`→P4.1,
+    /// `rustc_env`→env P3.x, `aliases`→extern rename). Argv-inert here.
+    Compile,
+    /// Run (action 2) — the build-script RUN env / inputs / links edge; semantics land in P3.8
+    /// (`version`/`pkg_name`/`rustc_env_files`/`build_script_env`/`data`/`compile_data`/`tools`/
+    /// `links`/`rundir`/`link_deps`). Argv-inert in the compile phase.
+    Run,
+    /// Bazel-only (`tags`/`visibility`) — never an action effect.
+    Ignored,
+}
+
+/// §5.2 build-script verdict table. `name`/`srcs`/`deps`/`edition` are named params (they never
+/// reach `**kwargs`), so they're handled by the signature, not here.
+fn build_script_attr_verdict(attr: &str) -> Option<BsVerdict> {
+    Some(match attr {
+        // compile (action 1) — shapes the bin argv now (P3.6); `crate_features` is BOTH phases
+        // (its run-env `CARGO_FEATURE_<F>` duty lands in P3.8).
+        "crate_name" | "crate_root" | "crate_features" | "rustc_flags" => BsVerdict::CompileArgv,
+        "proc_macro_deps" | "rustc_env" | "aliases" => BsVerdict::Compile,
+        "version" | "pkg_name" | "rustc_env_files" | "build_script_env" | "data" | "compile_data"
+        | "tools" | "links" | "rundir" | "link_deps" => BsVerdict::Run,
+        "tags" | "visibility" => BsVerdict::Ignored,
+        _ => return None,
+    })
+}
+
+/// P3.6 (§5.2): validate a `cargo_build_script`'s extra `**kwargs` against the build-script attr
+/// surface (loud-error on unknown) and extract the compile-phase argv attrs (`crate_name`/
+/// `crate_root`/`crate_features`/`rustc_flags`) into the shared [`CompileAttrs`]. Run-phase and
+/// deferred-compile attrs are accepted but left inert here — their action effects land in the
+/// named later step (accept ≠ implement, P2#3); a regression test pins the argv-inertness.
+fn bs_compile_attrs<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    name: &str,
+    kw: &SmallMap<String, Value<'v>>,
+) -> anyhow::Result<CompileAttrs> {
+    let mut out = CompileAttrs::default();
+    for (key, val) in kw.iter() {
+        let Some(verdict) = build_script_attr_verdict(key) else {
+            anyhow::bail!(
+                "cargo_build_script `{name}`: unknown attribute `{key}` — not in the build-script \
+                 attr surface (§5.2). Add it to the verdict table with an explicit phase verdict \
+                 (it must not be silently accepted)."
+            );
+        };
+        if verdict == BsVerdict::CompileArgv {
+            match key.as_str() {
+                "crate_name" => out.crate_name = val.unpack_str().map(str::to_owned),
+                "crate_root" => out.crate_root = val.unpack_str().map(str::to_owned),
+                "crate_features" => {
+                    out.crate_features = crate::values::str_attr_parts(eval, Some(*val))?
+                }
+                "rustc_flags" => {
+                    out.rustc_flags = crate::values::str_attr_parts(eval, Some(*val))?
+                }
+                _ => unreachable!("CompileArgv keys are exactly the four matched above"),
+            }
+        }
+        // `Compile` (deferred) / `Run` / `Ignored` → accepted no-ops here; never extracted.
+    }
+    Ok(out)
+}
+
 /// Resolve the P3.2a compile-argv tail at ANALYSIS time: `--cfg=feature="x"` per `crate_features`
 /// (rules_rust's form), then `rustc_flags` verbatim. (`crate_name`/`crate_root` overrides are
 /// applied inline by each rule, since they replace existing argv tokens.)
@@ -578,18 +648,74 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    /// P3.1: `cargo_build_script` load surface — a STUB target for now (records it so the package
-    /// loads and the `:build_script_build` alias/deps resolve); the compile + run pipeline + flags
-    /// file land in P3.6/P3.7.
+    /// `cargo_build_script(name, srcs, deps=[], edition="2021", **attrs)` — P3.6 (§5.2) compiles
+    /// the build-script (action 1): `crate_root`/`srcs[0]` → a HOST `rust_binary` (`<name>_`, the
+    /// §12 `:_bs_` bin) with the single toolchain, linking `deps` as `--extern` (build-deps, NOT
+    /// run inputs). The compile-phase attr split (`crate_name`/`crate_root`/`crate_features`/
+    /// `rustc_flags`) shapes the argv; the §5.2 run-phase attrs are accepted but inert until P3.8.
+    /// `default_info` is EMPTY (§4.3: a build-script target exposes no libs — the bin is consumed
+    /// intra-target by the run action P3.8, never `--extern`'d by a dependent crate).
     fn native_cargo_build_script<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
+        #[starlark(require = named)] edition: Option<String>,
+        #[starlark(kwargs)] kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
+        let compile = bs_compile_attrs(eval, &name, &kw)?; // §5.2 verdict + compile-attr split
+        let srcs = crate::values::str_attr_parts(eval, srcs)?;
+        let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
+            let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+            let deps = crate::values::resolve_str_parts(eval, &deps)?;
             let sess = session(eval);
-            record_target(sess, AnalyzedTarget { name: canon_label(sess, &name), ..Default::default() });
+            let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
+            // `crate_root` (if set) is the build.rs root; else srcs[0].
+            let crate_root = match &compile.crate_root {
+                Some(cr) => qualify(sess, cr),
+                None => srcs
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("cargo_build_script `{name}` needs a build-script src"))?
+                    .clone(),
+            };
+            let edition = edition.unwrap_or_else(|| "2021".into());
+            let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
+            let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+            let tail = compile_tail(eval, &compile)?;
+            let sess = session(eval);
+
+            // The host build-script bin (`<name>_`, the §12 `:_bs_`); P3.8's run action consumes
+            // this exact path. An intermediate output — kept OUT of `default_info` (§4.3).
+            let bin = qualify(sess, &format!("{name}_"));
+            let mut argv = vec![
+                rustc(),
+                "--edition".into(),
+                edition,
+                "--crate-name".into(),
+                crate_name,
+                crate_root,
+                "-o".into(),
+                bin.clone(),
+            ];
+            argv.extend(extern_flags);
+            argv.extend(tail);
+
+            let mut inputs = srcs;
+            inputs.extend(dep_rlibs);
+            record_target(sess, AnalyzedTarget {
+                name: canon_label(sess, &name),
+                deps: dep_names,
+                actions: vec![AnalyzedAction {
+                    mnemonic: "Rustc".into(),
+                    argv,
+                    inputs,
+                    outputs: vec![bin],
+                }],
+                default_info: Vec::new(),
+                providers: Default::default(),
+            });
             Ok(())
         }))?;
         Ok(NoneType)
@@ -930,5 +1056,57 @@ mod tests {
         let err = analyze("unknown", &build).unwrap_err();
         assert!(err.contains("unknown attribute"), "loud error: {err}");
         assert!(err.contains("bogus_attr"), "names the attr: {err}");
+    }
+
+    const BS_LOAD: &str = "load(\"@rules_rust//cargo:defs.bzl\", \"cargo_build_script\")\n";
+
+    #[test]
+    fn p36_build_script_compiles_to_a_host_bin_with_externs() {
+        // The build-script target is named `t` so the `analyze`/`action_of` helpers (which key on
+        // `//app:t`) observe ITS compile action; `:dep` is its sole build-dependency.
+        let build = format!(
+            "{LOAD}{BS_LOAD}\
+             rust_library(name = \"dep\", srcs = [\"lib.rs\"])\n\
+             cargo_build_script(name = \"t\", srcs = [\"root.rs\"], deps = [\":dep\"], \
+                 crate_features = [\"std\"], rustc_flags = [\"-Cdebuginfo=0\"], \
+                 version = \"1.2.3\", links = \"z\", data = [\"table.bin\"], tags = [\"manual\"])\n"
+        );
+        let targets = analyze("p36_bs", &build).unwrap();
+        let argv = argv_of(&targets);
+        // Compiles the build-script root → a HOST bin (`<name>_`, the §12 `:_bs_`) via rustc.
+        assert!(argv.first().is_some_and(|a| a.ends_with("rustc")), "rustc compile: {argv:?}");
+        let o = argv.iter().position(|a| a == "-o").expect("an -o flag");
+        assert_eq!(argv[o + 1], "app/t_", "host build-script bin output: {argv:?}");
+        // `deps` → `--extern` (build-deps link the host bin), NOT run inputs.
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--extern" && w[1] == "dep=app/libdep.rlib"),
+            "build-dep is an --extern: {argv:?}"
+        );
+        // `crate_root` picks root.rs as the positional; default crate_name = the target name.
+        assert!(argv.contains(&"app/root.rs".to_string()), "crate_root positional: {argv:?}");
+        let cn = argv.iter().position(|a| a == "--crate-name").unwrap();
+        assert_eq!(argv[cn + 1], "t", "default crate_name = name: {argv:?}");
+        // `crate_features` → `--cfg feature` (compile phase); `rustc_flags` verbatim.
+        assert!(argv.contains(&"--cfg=feature=\"std\"".to_string()), "{argv:?}");
+        assert!(argv.contains(&"-Cdebuginfo=0".to_string()), "{argv:?}");
+        // Run-phase attrs (`version`/`links`/`data`) + ignored (`tags`) are ACCEPTED but argv-inert.
+        assert!(
+            !argv.iter().any(|a| a.contains("1.2.3") || a.contains("table.bin") || a == "z" || a == "manual"),
+            "run-phase/ignored attrs are not compile argv: {argv:?}"
+        );
+        // §4.3: the build-script target exposes NO libs — a crate dep on it gets no `--extern`.
+        let bs = targets.iter().find(|t| t.name == "//app:t").unwrap();
+        assert!(bs.default_info.is_empty(), "build-script target has no default-info libs: {:?}", bs.default_info);
+    }
+
+    #[test]
+    fn p36_build_script_unknown_attr_is_a_loud_error() {
+        // The build-script surface is its OWN table (§5.2) — an attr outside it is a loud error.
+        let build = format!(
+            "{BS_LOAD}cargo_build_script(name = \"t\", srcs = [\"root.rs\"], not_a_bs_attr = 1)\n"
+        );
+        let err = analyze("p36_unknown", &build).unwrap_err();
+        assert!(err.contains("unknown attribute") && err.contains("not_a_bs_attr"), "loud error: {err}");
+        assert!(err.contains("build-script attr surface"), "names the surface: {err}");
     }
 }
