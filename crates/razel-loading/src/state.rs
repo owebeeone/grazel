@@ -202,6 +202,11 @@ pub(crate) struct Session {
     pub(crate) cross_index: SyncCell<std::collections::HashMap<String, usize>>,
     /// Once-per-session warning keys (tree sweeps turned per-call warnings into log storms).
     pub(crate) warned: SyncCell<std::collections::BTreeSet<String>>,
+    /// P3.4: canonical names of targets whose `target_compatible_with` is unsatisfied on the
+    /// configured platform. The rule records an actionless target + flags it here; the driver
+    /// (P3.4b) reads this to SKIP it in wildcard/transitive and LOUD-ERROR when it's named or a
+    /// dep of a compatible target. (Bazel's `IncompatiblePlatformProvider`, as a session set.)
+    pub(crate) incompatible_targets: SyncCell<std::collections::BTreeSet<String>>,
     /// Per-target transitive-fold memo (label → folded fields). The DDS fold was the tree-sweep
     /// hotspot: every dep edge re-walked its transitive closure; diamonds made it quadratic.
     pub(crate) fold_cache: SyncCell<std::collections::HashMap<String, Vec<(String, Vec<String>)>>>,

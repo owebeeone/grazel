@@ -125,6 +125,7 @@ struct CompileAttrs {
     crate_features: Vec<crate::values::StrAttrPart>,
     rustc_flags: Vec<crate::values::StrAttrPart>,
     compile_data: Vec<crate::values::StrAttrPart>,
+    target_compatible_with: Vec<crate::values::StrAttrPart>,
 }
 
 /// Apply the §5.5 verdict table to a compile rule's extra `**kwargs`: **loud-error** on any attr
@@ -164,8 +165,15 @@ fn compile_attrs<'v>(
                 }
                 _ => {} // env family — accepted, extraction in P3.5 (argv/env-inert here)
             },
-            // Accepted + recorded (via `capture_rule`); semantics in a later step or never.
-            Verdict::Delegated | Verdict::Ignored => {}
+            // `target_compatible_with` semantics land HERE (P3.4); the other delegated attrs
+            // (`proc_macro_deps` → P4.1, `link_deps` → P4.5) stay accepted + inert.
+            Verdict::Delegated => {
+                if key == "target_compatible_with" {
+                    out.target_compatible_with = crate::values::str_attr_parts(eval, Some(*val))?;
+                }
+            }
+            // Accepted + recorded (via `capture_rule`); never an action effect.
+            Verdict::Ignored => {}
         }
     }
     Ok(out)
@@ -200,6 +208,20 @@ fn data_inputs<'v>(
     Ok(out)
 }
 
+/// P3.4 (§5.4): is the target INCOMPATIBLE with the configured platform? Compatible iff EVERY
+/// `target_compatible_with` constraint holds (`condition_matches` == `Some(true)`); an empty list
+/// is compatible. `@platforms//:incompatible` never holds (so it forces incompatibility), and any
+/// unsatisfied/unresolved constraint is incompatible — never a silent pass.
+fn is_incompatible(sess: &crate::state::Session, constraints: &[String]) -> anyhow::Result<bool> {
+    for c in constraints {
+        let canon = canon_label(sess, c);
+        if crate::selects::condition_matches(sess, &canon, true, 32)? != Some(true) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[starlark::starlark_module]
 fn rust_rules(b: &mut GlobalsBuilder) {
     /// `rust_library(name, srcs, deps=[], edition="2021")` → one `rustc` action
@@ -219,6 +241,17 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        // P3.4: target_compatible_with — incompatible on this platform → NO actions, flagged.
+        let tcw = crate::values::resolve_str_parts(eval, &compile.target_compatible_with)?;
+        {
+            let sess = session(eval);
+            if is_incompatible(sess, &tcw)? {
+                let nm = canon_label(sess, &name);
+                sess.incompatible_targets.borrow_mut().insert(nm.clone());
+                record_target(sess, AnalyzedTarget { name: nm, ..Default::default() });
+                return Ok(());
+            }
+        }
         let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
         let deps = crate::values::resolve_str_parts(eval, &deps)?;
         let sess = session(eval);
@@ -291,6 +324,17 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        // P3.4: target_compatible_with — incompatible on this platform → NO actions, flagged.
+        let tcw = crate::values::resolve_str_parts(eval, &compile.target_compatible_with)?;
+        {
+            let sess = session(eval);
+            if is_incompatible(sess, &tcw)? {
+                let nm = canon_label(sess, &name);
+                sess.incompatible_targets.borrow_mut().insert(nm.clone());
+                record_target(sess, AnalyzedTarget { name: nm, ..Default::default() });
+                return Ok(());
+            }
+        }
         let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
         let deps = crate::values::resolve_str_parts(eval, &deps)?;
         let sess = session(eval);
@@ -683,6 +727,34 @@ mod tests {
         );
         let inputs = inputs_of(&analyze("p33os", &build).unwrap());
         assert!(inputs.contains(&"app/host.txt".to_string()), "host-os arm wins: {inputs:?}");
+    }
+
+    #[test]
+    fn p34a_incompatible_target_has_no_actions() {
+        // target_compatible_with = [@platforms//:incompatible] never holds → no Rustc action.
+        // (P3.4a records an actionless target + flags it; the named/wildcard/dep enforcement is P3.4b.)
+        let build = format!(
+            "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], \
+             target_compatible_with = [\"@platforms//:incompatible\"])\n"
+        );
+        let targets = analyze("p34a_incompat", &build).unwrap();
+        let t = targets.iter().find(|t| t.name == "//app:t").expect("//app:t recorded");
+        assert!(t.actions.is_empty(), "incompatible target has no actions: {:?}", t.actions);
+    }
+
+    #[test]
+    fn p34a_host_compatible_target_builds() {
+        // blake3's pattern: select on the host triple → [] (compatible) → the Rustc action is present.
+        let host = crate::state::host_triple();
+        let build = format!(
+            "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], target_compatible_with = select({{\
+             \"@rules_rust//rust/platform:{host}\": [], \
+             \"//conditions:default\": [\"@platforms//:incompatible\"]}}))\n"
+        );
+        let targets = analyze("p34a_compat", &build).unwrap();
+        let t = targets.iter().find(|t| t.name == "//app:t").expect("//app:t");
+        assert!(!t.actions.is_empty(), "compatible target builds a Rustc action");
+        assert!(t.actions[0].argv.iter().any(|a| a == "--crate-name"), "{:?}", t.actions[0].argv);
     }
 
     #[test]
