@@ -127,8 +127,13 @@ impl Eval<'_> {
                 }
                 Ok(out)
             }
-            Expr::SomePath(..) | Expr::AllPaths(..) => {
-                Err("path operators (somepath/allpaths) not yet implemented (P1.5)".into())
+            Expr::SomePath(a, b) => {
+                let (a, b) = (self.go(a)?, self.go(b)?);
+                Ok(self.graph.somepath(&a, &b, self.implicit))
+            }
+            Expr::AllPaths(a, b) => {
+                let (a, b) = (self.go(a)?, self.go(b)?);
+                Ok(self.graph.allpaths(&a, &b, self.implicit))
             }
         }
     }
@@ -212,9 +217,13 @@ mod tests {
     }
 
     #[test]
-    fn path_ops_still_deferred() {
-        let g = graph();
-        let err = eval(&g, &parse("somepath(//a:bin, //a:base)").unwrap(), false).unwrap_err();
-        assert!(err.contains("P1.5"));
+    fn somepath_and_allpaths() {
+        let g = graph(); // linear bin → lib → base
+        let run = |s: &str| {
+            eval(&g, &parse(s).unwrap(), false).unwrap().into_iter().collect::<Vec<_>>()
+        };
+        assert_eq!(run("somepath(//a:bin, //a:base)"), ["//a:base", "//a:bin", "//a:lib"]);
+        assert_eq!(run("allpaths(//a:bin, //a:base)"), ["//a:base", "//a:bin", "//a:lib"]);
+        assert!(run("somepath(//a:base, //a:bin)").is_empty()); // no forward path
     }
 }

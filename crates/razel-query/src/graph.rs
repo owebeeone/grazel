@@ -124,6 +124,47 @@ impl QueryGraph {
         seen
     }
 
+    /// `allpaths(from, to)` = the node set on SOME path `from`→`to` = the forward closure of
+    /// `from` intersected with what can still reach `to` (`rdeps` within that closure). An
+    /// order-independent set — a clean golden (§13).
+    pub fn allpaths(&self, from: &LabelSet, to: &LabelSet, implicit: bool) -> LabelSet {
+        let forward = self.deps(from, None, implicit);
+        self.rdeps(&forward, to, None)
+    }
+
+    /// `somepath(from, to)` = the nodes on ONE shortest path from some `from` to some `to`
+    /// (multi-source BFS; successors visited in sorted order for razel's own determinism). Bazel
+    /// returns *a* shortest path, so a golden must accept any valid one (§13). Empty if no path.
+    pub fn somepath(&self, from: &LabelSet, to: &LabelSet, implicit: bool) -> LabelSet {
+        use std::collections::VecDeque;
+        let mut parent: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut q: VecDeque<String> = VecDeque::new();
+        for s in from {
+            parent.insert(s.clone(), None);
+            q.push_back(s.clone());
+        }
+        while let Some(cur) = q.pop_front() {
+            if to.contains(&cur) {
+                let mut path = LabelSet::new();
+                let mut node = Some(cur);
+                while let Some(n) = node {
+                    node = parent.get(&n).cloned().flatten();
+                    path.insert(n);
+                }
+                return path;
+            }
+            let mut succ = self.successors(&cur, implicit);
+            succ.sort();
+            for s in succ {
+                if !parent.contains_key(&s) {
+                    parent.insert(s.clone(), Some(cur.clone()));
+                    q.push_back(s);
+                }
+            }
+        }
+        LabelSet::new()
+    }
+
     /// Match a target pattern against the loaded rule targets → the label set. `//...`, `//pkg/...`,
     /// `//pkg:all`, and a concrete `//pkg:name` (exact). (Files aren't matched by patterns — Bazel
     /// patterns name targets; files enter the set via `deps`.)
@@ -232,5 +273,26 @@ mod tests {
         assert_eq!(g.match_pattern("//app:all"), set(&["//app:base", "//app:bin", "//app:lib"]));
         assert_eq!(g.match_pattern("//app:lib"), set(&["//app:lib"]));
         assert_eq!(g.match_pattern("//app/..."), g.match_pattern("//app:all"));
+    }
+
+    #[test]
+    fn somepath_and_allpaths_over_a_diamond() {
+        // bin → l1 → base ; bin → l2 → base
+        let mut m = BTreeMap::new();
+        m.insert("//d:base".into(), target("//d:base", "d", "rust_library", vec![]));
+        m.insert("//d:l1".into(), target("//d:l1", "d", "rust_library", vec![("//d:base", EdgeKind::Rule)]));
+        m.insert("//d:l2".into(), target("//d:l2", "d", "rust_library", vec![("//d:base", EdgeKind::Rule)]));
+        m.insert(
+            "//d:bin".into(),
+            target("//d:bin", "d", "rust_binary", vec![("//d:l1", EdgeKind::Rule), ("//d:l2", EdgeKind::Rule)]),
+        );
+        let g = QueryGraph::new(m);
+        let (from, to) = (set(&["//d:bin"]), set(&["//d:base"]));
+        // allpaths = every node on any path (both branches).
+        assert_eq!(g.allpaths(&from, &to, false), set(&["//d:base", "//d:bin", "//d:l1", "//d:l2"]));
+        // somepath = ONE shortest path; sorted successors make it deterministic (l1 < l2).
+        assert_eq!(g.somepath(&from, &to, false), set(&["//d:base", "//d:bin", "//d:l1"]));
+        // no path → empty.
+        assert!(g.somepath(&to, &from, false).is_empty());
     }
 }
