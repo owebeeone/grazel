@@ -924,9 +924,22 @@ pub fn analyze_workspace_with(
     flags: GlobalFlags,
 ) -> Result<Vec<AnalyzedTarget>, String> {
     let session = Session::new(Some(root.to_path_buf()), flags);
-    let top_pkg = pkg_of(&canon_label(&session, top_label))
+    let top_canon = canon_label(&session, top_label);
+    let top_pkg = pkg_of(&top_canon)
         .ok_or_else(|| format!("top label must be //pkg:name, got `{top_label}`"))?;
     load_package_entry(&session, &top_pkg)?;
+    // A build of an ALIAS top-label builds its terminal `actual` (Bazel resolves the alias, not
+    // the alias node). Follow the chain — the alias map fills as the package loads — loading each
+    // actual's package on the way (e.g. `@crates//:blake3` → `@crates__blake3-1.8.2//:blake3`).
+    // The bound mirrors `resolve_dep`'s alias walk; a cycle just stops (no terminal analyzed).
+    let mut canon = top_canon;
+    for _ in 0..32 {
+        let Some(actual) = session.aliases.borrow().get(&canon).cloned() else { break };
+        canon = actual;
+        if let Some(pkg) = pkg_of(&canon) {
+            load_package_entry(&session, &pkg)?;
+        }
+    }
     Ok(session.take_targets())
 }
 
@@ -1342,6 +1355,39 @@ mod tests {
             drive_tree(&tmp, GlobalFlags::default(), &["c".to_string()], Vec::new(), 1);
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(report.iter().all(|(_, r)| r.is_ok()), "selects.with_or: {report:?}");
+    }
+
+    #[test]
+    // crate-universe P3.1d: a build of an ALIAS top-label follows it to its terminal `actual`,
+    // loading the actual's package (Bazel builds the actual, not the alias node). Exercised on an
+    // external `@crates//:blake3` → `@crates__blake3-1.8.2//:blake3` (apparent; the canonical
+    // identity is P3.1e). Hand-materialized external dirs.
+    fn p31d_build_follows_external_alias_top_label() {
+        let tmp = std::env::temp_dir().join(format!("razel-p31d-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let ext = tmp.join("ext");
+        std::fs::create_dir_all(ext.join("crates")).unwrap();
+        std::fs::create_dir_all(ext.join("crates__blake3-1.8.2")).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(tmp.join("BUILD"), "filegroup(name = \"ws\", srcs = [])\n").unwrap();
+        std::fs::write(
+            ext.join("crates/BUILD.bazel"),
+            "alias(name = \"blake3\", actual = \"@crates__blake3-1.8.2//:blake3\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext.join("crates__blake3-1.8.2/BUILD.bazel"),
+            "filegroup(name = \"blake3\", srcs = [])\n",
+        )
+        .unwrap();
+        let flags = GlobalFlags { fetched_external_base: Some(ext.clone()), ..Default::default() };
+        let targets = analyze_workspace_with(&tmp, "@crates//:blake3", flags).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"@crates__blake3-1.8.2//:blake3"),
+            "alias top-label followed to its terminal actual; got {names:?}",
+        );
     }
 
     #[test]
