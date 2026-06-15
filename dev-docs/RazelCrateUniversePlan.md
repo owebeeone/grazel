@@ -528,18 +528,16 @@ check (R5).
   `--extern`; `:build_script_build` is never passed as `--extern`. Touch `deps.rs:38` +
   `rust_rules.rs`. Gate: **unit** — the lib's rustc action consumes the flags-file, not an extern.
 
-- **P3.11 — blake3 analysis-parity golden** · ~250 (+normalizer) · dep: P3.4,P3.10 · §8
-  New corpus case `parity/corpus/rust/crate_blake3/`: capture `bazel aquery 'deps(@crates//:blake3)'`;
-  add the **wrapper-prefix normalizer** (strip `<wrapper> --rustc=…--` + flags/env-file paths to a
-  canonical token) to `razel_parity::normalize`; `omit`/deviation-allowlist `process_wrapper`/
-  `-Cmetadata`/`--extra-filename`/`--remap-path-prefix`. Gate: **aq** green (documented deviations
-  only).
-
-- **P3.12 — blake3 execution-parity golden** · ~250 · dep: P3.9,P3.10 · §8
-  Capture Bazel's `<name>.out` flags-file + `OUT_DIR` (`bazel build @crates//:blake3__build_script_build`);
-  diff razel's flags-file (§6.1) against it; assert the rlib exists and the SIMD `.o`s appear in
-  `OUT_DIR`. (Producing the rlib needs the wrapper P3.9 + the build-script edge P3.10, which in
-  turn carry the P2.5/P2.6 materialization transitively.) Gate: **xp** green.
+- **P3.11 / P3.12 — SUPERSEDED by [`RazelRustParityPlan.md`](RazelRustParityPlan.md)** (2026-06-16).
+  The P3.11 probe (`razel build @crates//:blake3` → `unknown target`) found these were under-scoped:
+  razel's rust rustc argv is a lean *original* shape (`19321b7`), structurally far from rules_rust's
+  (syntax + the hashed-output model + ~15 flags), and rust parity was never gated (cc/java have a
+  parity test, rust never did). So "blake3 parity" is not "~250 + a normalizer" — it is a faithful
+  argv rework **driven by a rust parity gate that leads** (Phase A, on a local build-script corpus
+  case) + the external `@crates//:blake3` integration (Phase B). The original intent stands:
+  - **P3.11 (analysis parity, was here)** → RazelRustParityPlan **A1–A6** (local) + **B3** (blake3).
+  - **P3.12 (execution parity, was here)** → RazelRustParityPlan **A7** (local) + **B4** (blake3; the
+    deferred P3.8d-leg-2 cc `CC`/`AR`/`CFLAGS` rides B4).
 
 **Phase 3 DoD (milestone 1):** `razel build @crates//:blake3` produces the rlib; **aq** + **xp**
 green; SIMD `.o`s in `OUT_DIR`. Closes the §10 risks *tree-output*, *rustc wrapper*, *load surface*.

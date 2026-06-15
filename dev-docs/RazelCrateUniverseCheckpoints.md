@@ -357,12 +357,15 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.11 (blake3 analysis-parity golden — `bazel aquery
-'deps(@crates//:blake3)'` + the wrapper-prefix normalizer) → P3.12 (blake3 execution-parity golden —
-`bazel build @crates//:blake3__build_script_build`; the rlib + SIMD `.o`s in `OUT_DIR`; **P3.8d leg 2
-cc `CC`/`AR`/`CFLAGS` rides here**). BOTH need the LIVE-bazel golden-capture path (likely an
-environment dependency — verify). (P3.6–P3.10 done — build-script pipeline wired end-to-end at
-analysis; P3.8d leg 1 `CARGO_CFG_*` done; `DEP_<LINKS>_*` is **P4.5**, Phase 4 — NOT part of P3.)
+**Remaining for `razelv3-rust/p3`:** P3.6→P3.10 done (build-script pipeline wired end-to-end at
+analysis). **P3.11/P3.12 are SUPERSEDED by [`RazelRustParityPlan.md`](RazelRustParityPlan.md)**
+(2026-06-16) — the P3.11 probe found razel's rust argv is a lean ORIGINAL (`19321b7`), structurally
+far from rules_rust's (syntax + the hashed-output model + ~15 flags), and rust parity was never gated
+(cc/java have a parity test, rust never did). So blake3 parity is a faithful-argv rework with a rust
+parity gate that LEADS (RazelRustParityPlan Phase A, on a local build-script corpus case) + the
+external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer". NEXT = that plan's **A1**
+(wire `rust_graph_parity` RED as the driver). Carried there: P3.8d leg 2 (cc env) → B4; `proc_macro_deps`
+→ P4.1 (B2 surfaces it). P3.8d leg 1 `CARGO_CFG_*` done; `DEP_<LINKS>_*` is **P4.5**, Phase 4.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
