@@ -117,7 +117,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("capture-goldens") => capture_goldens(),
+        Some("capture-goldens") => capture_goldens(&rest),
         Some("examples") if rest.first().map(String::as_str) == Some("--survey") => {
             match examples::survey(&workspace_root()) {
                 Ok(md) => {
@@ -159,7 +159,7 @@ fn main() -> ExitCode {
 // `golden.txt` into the case dir. This is the ONLY bazel-touching step — dev/authoring-only;
 // the (future) hermetic runner consumes the committed goldens with no bazel/toolchain.
 // Env: BAZEL (default `bazel`), RAZEL_GOLDEN_OB (bazel --output_base; default /tmp/razel-parity-ob).
-fn capture_goldens() -> ExitCode {
+fn capture_goldens(filter: &[String]) -> ExitCode {
     let root = workspace_root();
     let parity = root.join("parity");
     let corpus = parity.join("corpus");
@@ -168,6 +168,11 @@ fn capture_goldens() -> ExitCode {
 
     let mut cases = Vec::new();
     find_build_packages(&corpus, &corpus, &mut cases);
+    // Optional substring filter (e.g. `capture-goldens rust/build_script`) — capture ONLY matching
+    // cases, so refreshing one case doesn't re-touch every other golden.
+    if !filter.is_empty() {
+        cases.retain(|(_, pkg)| filter.iter().any(|f| pkg.contains(f.as_str())));
+    }
     if cases.is_empty() {
         eprintln!("capture-goldens: no corpus cases (BUILD files) under {}", corpus.display());
         return ExitCode::from(1);
