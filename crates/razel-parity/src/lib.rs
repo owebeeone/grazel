@@ -42,6 +42,9 @@ pub fn normalize(raw: &str) -> String {
         // rules_rust per-crate metadata hash (`-` + 6+ digits) — a content hash razel can't
         // reproduce, so host-volatile like the SDK (`libutil-12716653.rlib`, `metadata=-12716653`).
         s = normalize_rust_hash(&s);
+        // `aquery`'s artifact-kind annotation (` (TreeArtifact)`, ` (File)`) — razel's declared
+        // output paths carry no such tag, so drop it for comparison (it is not part of the path).
+        s = s.replace(" (TreeArtifact)", "").replace(" (File)", "");
         out.push_str(&s);
         out.push('\n');
     }
@@ -218,6 +221,39 @@ pub fn canonicalize_rust_argv(argv: &[String]) -> Vec<String> {
         start += 1;
     }
     argv[start..].to_vec()
+}
+
+/// Drop the rustc argv flags razel deliberately does NOT model faithfully — TOOLCHAIN + LINK
+/// plumbing (RazelRustParityPlan, documented deviations): `--sysroot=…` and `-L <toolchain-lib>`
+/// (razel compiles with the SYSTEM rustc; Bazel a VENDORED `external/<repo>/rust_toolchain`, so
+/// these don't normalize equal), `--remap-path-prefix=…` (Bazel's process_wrapper `${pwd}`/… subst,
+/// not razel's wrapper), and `--codegen=linker=…`/`--codegen=link-arg=…` (Bazel's cc toolchain).
+/// Applied to BOTH sides after [`canonicalize_rust_argv`]; the residual is the compile-shaping argv
+/// razel CAN match. The hash VALUES (`--codegen=metadata=-<hash>`/`extra-filename`) are NOT dropped
+/// — they're matched modulo `normalize`'s `-<hash>` tokenization.
+pub fn strip_rust_deviation_flags(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for t in argv {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let s = t.as_str();
+        if s == "-L" {
+            skip_next = true; // `-L` + its path arg (the toolchain lib search)
+            continue;
+        }
+        if s.starts_with("--sysroot=")
+            || s.starts_with("--remap-path-prefix=")
+            || s.starts_with("--codegen=linker=")
+            || s.starts_with("--codegen=link-arg=")
+        {
+            continue;
+        }
+        out.push(t.clone());
+    }
+    out
 }
 
 /// A discrepancy on a paired action (same `key`, differing argv/inputs). Carries the delta so a
@@ -522,6 +558,27 @@ mod tests {
         assert_eq!(canonicalize_rust_argv(&bazel), want, "bazel wrapper stripped");
         assert_eq!(canonicalize_rust_argv(&razel_wrapped), want, "razel wrapper stripped");
         assert_eq!(canonicalize_rust_argv(&razel_bare), want, "bare rustc binary dropped");
+    }
+
+    #[test]
+    fn strip_deviation_flags_drops_toolchain_and_link_plumbing_only() {
+        let input = argv(&[
+            "lib.rs",
+            "--crate-name=x",
+            "--codegen=metadata=-<hash>", // kept (matched modulo normalize)
+            "--remap-path-prefix=${pwd}=.", // dropped
+            "--target=aarch64-apple-darwin", // kept
+            "-L", "bazel-out/<cfg>/bin/external/<repo>/rust_toolchain/lib", // dropped (flag + arg)
+            "--edition=2021", // kept
+            "--codegen=linker=external/<repo>/cc_wrapper.sh", // dropped
+            "--codegen=link-arg=-lc++", // dropped
+            "--sysroot=bazel-out/<cfg>/bin/external/<repo>/rust_toolchain", // dropped
+        ]);
+        assert_eq!(
+            strip_rust_deviation_flags(&input),
+            argv(&["lib.rs", "--crate-name=x", "--codegen=metadata=-<hash>", "--target=aarch64-apple-darwin", "--edition=2021"]),
+            "only toolchain/link plumbing dropped; compile flags + hash kept"
+        );
     }
 
     #[test]

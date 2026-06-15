@@ -3,6 +3,6 @@
 bazel_version      = "9.1.1"
 rules_rust_version = "0.70.0"
 platform           = "darwin_arm64"   # aquery is post-analysis → goldens are platform-pinned
-norm_version       = 2                # razel-parity::normalize spec (bumped to 3 when the P3.11
-                                      # wrapper-prefix rule lands; re-capture then)
+norm_version       = 3                # razel-parity::normalize spec (3 = + the ` (TreeArtifact)` strip;
+                                      # the wrapper-prefix + deviation handling are diff-time, A1/A3)
 query              = "aquery //corpus/rust/build_script:all --output=text"

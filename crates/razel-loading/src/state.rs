@@ -1206,6 +1206,13 @@ pub(crate) fn out_path(sess: &Session, name: &str) -> String {
     }
 }
 
+/// The current package's GENERATED-output directory — `<pkg>` (default) or
+/// `bazel-out/<config>/bin/<pkg>` (under `--bazel_build_compat`). For rustc's `--out-dir=` (the
+/// faithful output model, RazelRustParityPlan A5).
+pub(crate) fn out_dir(sess: &Session) -> String {
+    out_path(sess, "").trim_end_matches('/').to_string()
+}
+
 /// Bazel's configuration mnemonic for this build, e.g. `darwin_arm64-fastbuild` — the
 /// `<cpu>-<compilation_mode>` segment of `<out>/<config>/bin`, computable from the
 /// compilation mode alone (no `Session`) so the CLI can mint matching convenience symlinks.

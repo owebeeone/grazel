@@ -11,7 +11,9 @@
 //! the consumer can `use greet::...`. Paths are workspace-root-relative (exec_root =
 //! workspace root), matching how cc uses `-iquote .`.
 
-use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, out_path, qualify, session};
+use crate::state::{
+    AnalyzedAction, AnalyzedTarget, canon_label, native_decl, out_dir, out_path, qualify, session,
+};
 use crate::deps::{record_target, resolve_dep};
 use crate::values::{unpack, unpack_strs};
 use starlark::collections::SmallMap;
@@ -43,6 +45,18 @@ fn rustc() -> String {
         }
     }
     "rustc".into()
+}
+
+/// RazelRustParityPlan A5: a deterministic per-crate metadata hash for `--codegen=metadata`/
+/// `extra-filename` + the `lib<name>-<hash>.rlib` output name (rules_rust's hashed-output model).
+/// razel mints its OWN hash — the VALUE is a content hash Bazel computes that razel can't reproduce,
+/// so it's normalized to `-<hash>` in the parity diff; only the SHAPE (`-` + ≥6 digits) matters here.
+/// `DefaultHasher::new()` has a fixed seed → deterministic across runs.
+fn metadata_hash(canon: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    canon.hash(&mut h);
+    format!("{:010}", h.finish() % 10_000_000_000) // 10 decimal digits (≥6 → normalizes to -<hash>)
 }
 
 /// P3.8: the razel process wrapper bin (the build-script runner / the P3.9 rustc wrapper). Resolved
@@ -547,21 +561,33 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
 
-        let rlib = out_path(sess, &format!("lib{name}.rlib"));
+        // RazelRustParityPlan A3/A5: rules_rust's faithful rustc invocation — `--flag=value` syntax,
+        // the `--out-dir`+`--codegen=extra-filename/metadata` hashed-output model (→
+        // `lib<name>-<hash>.rlib`), in Bazel's argv ORDER. The toolchain/link deviations
+        // (`--sysroot`/`-L`/`--remap-path-prefix`) are NOT emitted (razel's system rustc) — the
+        // parity diff filters them on both sides.
+        let hash = metadata_hash(&canon_label(sess, &name));
+        let rlib = out_path(sess, &format!("lib{crate_name}-{hash}.rlib"));
         let mut argv = vec![
             rustc(),
-            "--edition".into(),
-            edition,
-            "--crate-type".into(),
-            "lib".into(),
-            "--crate-name".into(),
-            crate_name,
             crate_root,
-            "-o".into(),
-            rlib.clone(),
+            format!("--crate-name={crate_name}"),
+            "--crate-type=rlib".into(),
+            "--error-format=human".into(),
+            format!("--codegen=metadata=-{hash}"),
+            format!("--codegen=extra-filename=-{hash}"),
+            format!("--out-dir={}", out_dir(sess)),
+            "--codegen=opt-level=0".into(),
+            "--codegen=debuginfo=0".into(),
+            "--codegen=strip=none".into(),
+            "--emit=dep-info,link".into(),
+            "--color=always".into(),
+            format!("--target={}", crate::state::host_triple()),
+            format!("--edition={edition}"),
+            "-Cembed-bitcode=no".into(),
         ];
-        argv.extend(extern_flags);
-        argv.extend(tail);
+        argv.extend(extern_flags); // empty here (build-script dep is the edge, not an --extern)
+        argv.extend(tail); // crate_features → --cfg / rustc_flags (empty for this case)
         // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper.
         let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, argv, &build_scripts)?;
 
@@ -827,16 +853,28 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             let sess = session(eval);
 
             // --- action 1: compile the host build-script bin (`<name>_`, §12 `:_bs_`) ---
+            // RazelRustParityPlan A3: rules_rust's faithful bin compile (exec config) — `bin`
+            // crate-type, `opt-level=3`/`strip=debuginfo` (exec), `--emit=link=<bin>`+`--emit=dep-info`
+            // (no metadata/extra-filename → unhashed bin name), in Bazel's argv order. The cc-toolchain
+            // link flags + `--sysroot`/`-L` are deviations razel doesn't emit (the diff filters them).
             let bin = out_path(sess, &format!("{name}_"));
+            let dsym = out_path(sess, &format!("{name}_.dSYM")); // macOS debug-symbols tree output
             let mut compile_argv = vec![
                 rustc(),
-                "--edition".into(),
-                edition,
-                "--crate-name".into(),
-                crate_name,
                 crate_root,
-                "-o".into(),
-                bin.clone(),
+                format!("--crate-name={crate_name}"),
+                "--crate-type=bin".into(),
+                "--error-format=human".into(),
+                format!("--out-dir={}", out_dir(sess)),
+                "--codegen=opt-level=3".into(),
+                "--codegen=debuginfo=0".into(),
+                "--codegen=strip=debuginfo".into(),
+                format!("--emit=link={bin}"),
+                "--emit=dep-info".into(),
+                "--color=always".into(),
+                format!("--target={}", crate::state::host_triple()),
+                format!("--edition={edition}"),
+                "-Cembed-bitcode=no".into(),
             ];
             compile_argv.extend(extern_flags);
             compile_argv.extend(tail);
@@ -901,7 +939,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                         mnemonic: "Rustc".into(),
                         argv: compile_argv,
                         inputs: compile_inputs,
-                        outputs: vec![bin.clone()],
+                        outputs: vec![bin.clone(), dsym],
                     },
                     AnalyzedAction {
                         mnemonic: "CargoBuildScriptRun".into(),
@@ -1090,9 +1128,8 @@ mod tests {
              crate_features = [\"alpha\", \"beta\"], rustc_flags = [\"-Cdebuginfo=0\"])\n"
         );
         let argv = argv_of(&analyze("compile", &build).unwrap());
-        // crate_name overrides the default (`t`).
-        let i = argv.iter().position(|a| a == "--crate-name").unwrap();
-        assert_eq!(argv[i + 1], "custom", "crate_name overrides --crate-name: {argv:?}");
+        // crate_name overrides the default (`t`) — rules_rust's `--crate-name=<n>` joined form (A3).
+        assert!(argv.contains(&"--crate-name=custom".to_string()), "crate_name override: {argv:?}");
         // crate_root picks root.rs as the positional (not srcs[0] = lib.rs).
         assert!(argv.contains(&"app/root.rs".to_string()), "crate_root is the positional: {argv:?}");
         assert!(!argv.contains(&"app/lib.rs".to_string()), "lib.rs is not the root: {argv:?}");
@@ -1217,7 +1254,7 @@ mod tests {
         let targets = analyze("p34a_compat", &build).unwrap();
         let t = targets.iter().find(|t| t.name == "//app:t").expect("//app:t");
         assert!(!t.actions.is_empty(), "compatible target builds a Rustc action");
-        assert!(t.actions[0].argv.iter().any(|a| a == "--crate-name"), "{:?}", t.actions[0].argv);
+        assert!(t.actions[0].argv.iter().any(|a| a.starts_with("--crate-name=")), "{:?}", t.actions[0].argv);
     }
 
     #[test]
@@ -1280,19 +1317,19 @@ mod tests {
         );
         let targets = analyze("p36_bs", &build).unwrap();
         let argv = argv_of(&targets);
-        // Compiles the build-script root → a HOST bin (`<name>_`, the §12 `:_bs_`) via rustc.
+        // Compiles the build-script root → a HOST bin (`<name>_`, the §12 `:_bs_`) via rustc, with
+        // rules_rust's faithful argv (A3): `--crate-type=bin`, `--emit=link=<bin>` (not `-o`).
         assert!(argv.first().is_some_and(|a| a.ends_with("rustc")), "rustc compile: {argv:?}");
-        let o = argv.iter().position(|a| a == "-o").expect("an -o flag");
-        assert_eq!(argv[o + 1], "app/t_", "host build-script bin output: {argv:?}");
-        // `deps` → `--extern` (build-deps link the host bin), NOT run inputs.
+        assert!(argv.contains(&"--crate-type=bin".to_string()), "bin crate-type: {argv:?}");
+        assert!(argv.contains(&"--emit=link=app/t_".to_string()), "host build-script bin output: {argv:?}");
+        // `deps` → `--extern` (build-deps link the host bin), NOT run inputs; the dep rlib is hashed.
         assert!(
-            argv.windows(2).any(|w| w[0] == "--extern" && w[1] == "dep=app/libdep.rlib"),
-            "build-dep is an --extern: {argv:?}"
+            argv.windows(2).any(|w| w[0] == "--extern" && w[1].starts_with("dep=app/libdep-")),
+            "build-dep is an --extern (hashed rlib): {argv:?}"
         );
         // `crate_root` picks root.rs as the positional; default crate_name = the target name.
         assert!(argv.contains(&"app/root.rs".to_string()), "crate_root positional: {argv:?}");
-        let cn = argv.iter().position(|a| a == "--crate-name").unwrap();
-        assert_eq!(argv[cn + 1], "t", "default crate_name = name: {argv:?}");
+        assert!(argv.contains(&"--crate-name=t".to_string()), "default crate_name = name: {argv:?}");
         // `crate_features` → `--cfg feature` (compile phase); `rustc_flags` verbatim.
         assert!(argv.contains(&"--cfg=feature=\"std\"".to_string()), "{argv:?}");
         assert!(argv.contains(&"-Cdebuginfo=0".to_string()), "{argv:?}");
@@ -1450,9 +1487,9 @@ mod tests {
         assert!(argv.iter().any(|a| a.starts_with("--rustc=")), "carries the real rustc: {argv:?}");
         assert!(argv.contains(&"--flags-file=app/bs.out".to_string()), "consumes the flags file: {argv:?}");
         assert!(argv.contains(&"--env=OUT_DIR=app/bs.out_dir".to_string()), "points OUT_DIR at the tree: {argv:?}");
-        // The real rustc argv follows `--` (the lib compile).
+        // The real rustc argv follows `--` (the lib compile, A3's faithful `--crate-type=rlib`).
         let sep = argv.iter().position(|a| a == "--").expect("the `--` separator");
-        assert!(argv[sep + 1..].contains(&"--crate-type".to_string()), "the crate compile is after --: {argv:?}");
+        assert!(argv[sep + 1..].contains(&"--crate-type=rlib".to_string()), "the crate compile is after --: {argv:?}");
         // §4.3: the build script is NEVER an --extern.
         assert!(!argv.iter().any(|a| a == "--extern"), "build script is not an --extern: {argv:?}");
         assert!(!argv.iter().any(|a| a.starts_with("bs=")), "no bs rlib extern: {argv:?}");

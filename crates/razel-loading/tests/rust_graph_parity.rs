@@ -29,6 +29,31 @@ const OMIT: &[&str] = &[
     "SymlinkTree",
 ];
 
+/// Canonicalize a Rustc argv for comparison: strip the process-wrapper prefix → bare rustc args
+/// (A1), then drop the toolchain/link deviation flags (documented; razel uses the system rustc + no
+/// cc-toolchain rust links). Applied to BOTH razel + golden.
+fn rustc_argv(argv: &[String]) -> Vec<String> {
+    razel_parity::strip_rust_deviation_flags(&razel_parity::canonicalize_rust_argv(argv))
+}
+
+/// The build-script run's flags-file outputs, consumed by the crate's rustc as inputs. razel emits
+/// ONE JSONL (`.out`); Bazel splits them (`.flags`/`.linkflags`/`.linksearchpaths`/`.env`/`.depenv`/
+/// `.cargo_runfiles`) — the documented (b) deviation (the CargoBuildScriptRun output format). The
+/// crate's CONSUMPTION inherits it, so drop these from the input comparison (the `OUT_DIR` tree
+/// (`.out_dir`) is NOT dropped — it matches). Applied to BOTH sides' Rustc inputs.
+fn rustc_inputs(inputs: &[String]) -> Vec<String> {
+    const BS_FLAG_SUFFIXES: &[&str] = &[
+        ".out", ".flags", ".linkflags", ".linksearchpaths", ".env", ".depenv", ".cargo_runfiles",
+    ];
+    let mut v: Vec<String> = inputs
+        .iter()
+        .filter(|i| !BS_FLAG_SUFFIXES.iter().any(|s| i.ends_with(s)))
+        .cloned()
+        .collect();
+    v.sort();
+    v
+}
+
 #[test]
 fn rust_build_script_graph_matches_the_golden() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../parity");
@@ -47,16 +72,14 @@ fn rust_build_script_graph_matches_the_golden() {
         .iter()
         .flat_map(|t| t.actions.iter())
         .map(|a| {
-            let mut inputs: Vec<String> = a.inputs.iter().map(|s| n(s)).collect();
+            let rustc = a.mnemonic == "Rustc";
+            let raw_inputs: Vec<String> = a.inputs.iter().map(|s| n(s)).collect();
+            let mut inputs = if rustc { rustc_inputs(&raw_inputs) } else { raw_inputs };
             inputs.sort();
             let mut outputs: Vec<String> = a.outputs.iter().map(|s| n(s)).collect();
             outputs.sort();
             let argv: Vec<String> = a.argv.iter().map(|s| n(s)).collect();
-            let argv = if a.mnemonic == "Rustc" {
-                razel_parity::canonicalize_rust_argv(&argv)
-            } else {
-                argv
-            };
+            let argv = if rustc { rustc_argv(&argv) } else { argv };
             razel_parity::Action { mnemonic: a.mnemonic.clone(), argv, inputs, outputs }
         })
         .collect();
@@ -66,13 +89,14 @@ fn rust_build_script_graph_matches_the_golden() {
         "../../../parity/corpus/rust/build_script/golden.txt"
     ))
     .into_iter()
-    .map(|a| razel_parity::Action {
-        argv: if a.mnemonic == "Rustc" {
-            razel_parity::canonicalize_rust_argv(&a.argv)
-        } else {
-            a.argv
-        },
-        ..a
+    .map(|a| {
+        let rustc = a.mnemonic == "Rustc";
+        razel_parity::Action {
+            argv: if rustc { rustc_argv(&a.argv) } else { a.argv.clone() },
+            inputs: if rustc { rustc_inputs(&a.inputs) } else { a.inputs.clone() },
+            mnemonic: a.mnemonic,
+            outputs: a.outputs,
+        }
     })
     .collect();
 
