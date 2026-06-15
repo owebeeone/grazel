@@ -92,6 +92,42 @@ fn cargo_cfg_env(triple: &str) -> Vec<(String, String)> {
     .collect()
 }
 
+/// P3.10 (§4.3): if a crate has a build-script edge, route its rustc `argv` through the process
+/// wrapper — `[wrapper, rustc, --rustc=<rustc>, --flags-file=<flags>, --env=OUT_DIR=<dir>, --,
+/// <original rustc argv…>]` — so the crate's compile consumes the build script's flags-file + the
+/// `OUT_DIR` tree. Returns the (possibly rewritten) argv + the extra inputs to stage. No edge → argv
+/// unchanged. Slice-1 supports ≤1 build script per crate (blake3 has one); >1 is a loud error until a
+/// crate in scope needs it (the P3.9 `rustc` subcommand takes a single `--flags-file`).
+fn apply_build_script_edge(
+    rule: &str,
+    name: &str,
+    argv: Vec<String>,
+    build_scripts: &[crate::deps::BuildScriptRunInfo],
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    match build_scripts {
+        [] => Ok((argv, Vec::new())),
+        [bs] => {
+            let mut it = argv.into_iter();
+            let rustc_path =
+                it.next().ok_or_else(|| anyhow::anyhow!("{rule} `{name}`: empty rustc argv"))?;
+            let mut wrapped = vec![
+                process_wrapper(),
+                "rustc".into(),
+                format!("--rustc={rustc_path}"),
+                format!("--flags-file={}", bs.flags_file),
+                format!("--env=OUT_DIR={}", bs.out_dir),
+                "--".into(),
+            ];
+            wrapped.extend(it);
+            Ok((wrapped, vec![bs.flags_file.clone(), bs.out_dir.clone()]))
+        }
+        _ => anyhow::bail!(
+            "{rule} `{name}`: multiple build-script deps are not supported yet (slice-1 — the rustc \
+             wrapper takes a single --flags-file)"
+        ),
+    }
+}
+
 /// The crate name a dependent uses for `--extern` / `use`: the target segment of a
 /// canonical label (`//lib:greet` → `greet`, bare `greet` → `greet`).
 fn crate_name_of(canon: &str) -> String {
@@ -102,14 +138,22 @@ fn crate_name_of(canon: &str) -> String {
         .to_string()
 }
 
-/// Resolve `deps` to `(--extern crate=rlib args, dep rlib inputs, dep canon names)`.
+/// Resolve `deps` to `(--extern crate=rlib args, dep rlib inputs, dep canon names, build-script
+/// edges)`. P3.10 (§4.3): a `cargo_build_script` dep is the intra-target build-script edge — it is
+/// NEVER passed as `--extern` (it's not an rlib); it's collected for the rustc-wrapper routing.
 fn extern_args(
     eval: &mut Evaluator<'_, '_, '_>,
     deps: Vec<String>,
-) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
-    let (mut args, mut inputs, mut names) = (Vec::new(), Vec::new(), Vec::new());
+) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>, Vec<crate::deps::BuildScriptRunInfo>)> {
+    let (mut args, mut inputs, mut names, mut build_scripts) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for d in &deps {
         let dep = resolve_dep(eval, d)?;
+        if let Some(bs) = dep.build_script {
+            build_scripts.push(bs); // the §4.3 edge — captured, never `--extern`'d
+            names.push(dep.canon);
+            continue;
+        }
         let crate_name = crate_name_of(&dep.canon);
         // A rust_library exports exactly one rlib in default_info → dep.libs.
         for rlib in &dep.libs {
@@ -119,7 +163,7 @@ fn extern_args(
         }
         names.push(dep.canon);
     }
-    Ok((args, inputs, names))
+    Ok((args, inputs, names, build_scripts))
 }
 
 /// §5.5 verdict for an attribute of the rust compile rules (`rust_library`/`rust_binary`): the
@@ -498,7 +542,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         };
         let edition = edition.unwrap_or_else(|| "2021".into());
         let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
-        let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, deps.clone())?;
         let tail = compile_tail(eval, &compile)?;
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
@@ -518,10 +562,13 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         ];
         argv.extend(extern_flags);
         argv.extend(tail);
+        // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper.
+        let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, argv, &build_scripts)?;
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
         inputs.extend(data);
+        inputs.extend(bs_inputs);
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_names,
@@ -581,7 +628,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         };
         let edition = edition.unwrap_or_else(|| "2021".into());
         let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
-        let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, deps.clone())?;
         let tail = compile_tail(eval, &compile)?;
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
@@ -599,10 +646,13 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         ];
         argv.extend(extern_flags);
         argv.extend(tail);
+        // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper.
+        let (argv, bs_inputs) = apply_build_script_edge("rust_binary", &name, argv, &build_scripts)?;
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
         inputs.extend(data);
+        inputs.extend(bs_inputs);
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_names,
@@ -640,7 +690,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             .ok_or_else(|| anyhow::anyhow!("rust_shared_library `{name}` needs at least one src"))?
             .clone();
         let edition = edition.unwrap_or_else(|| "2021".into());
-        let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+        // rust_shared_library: build-script edge unused for slice-1 (blake3 is a rust_library).
+        let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
         let sess = session(eval);
         let dylib = qualify(sess, &format!("lib{name}.dylib"));
         let mut argv = vec![
@@ -686,7 +737,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let label = canon_label(session(eval), &name);
         let deps = unpack_strs(deps);
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
-        let (_, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+        let (_, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
         let sess = session(eval);
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
@@ -755,8 +806,9 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             let edition = edition.unwrap_or_else(|| "2021".into());
             let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
             // All the `&mut eval` resolutions up front (compile argv + run env/inputs), before
-            // re-taking `sess` for the path `qualify`s + `record_target`.
-            let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+            // re-taking `sess` for the path `qualify`s + `record_target`. (Build-deps of the bs bin
+            // are normal crates, not build scripts → `_bs` edge unused here.)
+            let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
             let tail = compile_tail(eval, &compile)?;
             let features = crate::values::resolve_str_parts(eval, &compile.crate_features)?;
             // §5.2 slice-1 run inputs: declared `data` + `compile_data`, resolved to files.
@@ -841,7 +893,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             run_inputs.extend(data_files);
             run_inputs.extend(env_files);
 
-            record_target(sess, AnalyzedTarget {
+            let mut t = AnalyzedTarget {
                 name: canon_label(sess, &name),
                 deps: dep_names,
                 actions: vec![
@@ -855,12 +907,18 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                         mnemonic: "CargoBuildScriptRun".into(),
                         argv: run_argv,
                         inputs: run_inputs,
-                        outputs: vec![flags_out, out_dir],
+                        outputs: vec![flags_out.clone(), out_dir.clone()],
                     },
                 ],
                 default_info: Vec::new(),
                 providers: Default::default(),
-            });
+            };
+            // P3.10 (§4.3): expose the run action's flags-file + OUT_DIR as the OWN-only
+            // `BuildScriptRun` edge (no `dep_fold` — never propagates); the crate's `rust_library`
+            // reads it via `resolve_dep(...).build_script` and routes its rustc through the wrapper.
+            t.set_set("BuildScriptRun", "flags_file", vec![flags_out]);
+            t.set_set("BuildScriptRun", "out_dir", vec![out_dir]);
+            record_target(sess, t);
             Ok(())
         }))?;
         Ok(NoneType)
@@ -1371,5 +1429,48 @@ mod tests {
         );
         assert!(env_vals.iter().any(|e| e.starts_with("CARGO_CFG_TARGET_OS=")), "{env_vals:?}");
         assert!(env_vals.iter().any(|e| e.starts_with("CARGO_CFG_TARGET_FEATURE=")), "{env_vals:?}");
+    }
+
+    #[test]
+    fn p310_build_script_dep_routes_the_crate_rustc_through_the_wrapper() {
+        // blake3's shape: a crate deps on its own build script (via the alias), and razel must
+        // route the crate's rustc through the wrapper (consuming the flags-file + OUT_DIR) WITHOUT
+        // passing the build script as an --extern (§4.3).
+        let build = format!(
+            "{LOAD}{BS_LOAD}\
+             cargo_build_script(name = \"bs\", srcs = [\"root.rs\"])\n\
+             rust_library(name = \"t\", srcs = [\"lib.rs\"], deps = [\":bs\"])\n"
+        );
+        let targets = analyze("p310_edge", &build).unwrap();
+        let t = targets.iter().find(|t| t.name == "//app:t").expect("crate analyzed");
+        let argv = &t.actions[0].argv;
+        // The crate's rustc is wrapped: [wrapper, rustc, --rustc=…, --flags-file=…, --env=OUT_DIR=…, --, <rustc argv>].
+        assert!(argv[0].contains("razel-process-wrapper"), "routed through the wrapper: {argv:?}");
+        assert_eq!(argv[1], "rustc", "the rustc subcommand: {argv:?}");
+        assert!(argv.iter().any(|a| a.starts_with("--rustc=")), "carries the real rustc: {argv:?}");
+        assert!(argv.contains(&"--flags-file=app/bs.out".to_string()), "consumes the flags file: {argv:?}");
+        assert!(argv.contains(&"--env=OUT_DIR=app/bs.out_dir".to_string()), "points OUT_DIR at the tree: {argv:?}");
+        // The real rustc argv follows `--` (the lib compile).
+        let sep = argv.iter().position(|a| a == "--").expect("the `--` separator");
+        assert!(argv[sep + 1..].contains(&"--crate-type".to_string()), "the crate compile is after --: {argv:?}");
+        // §4.3: the build script is NEVER an --extern.
+        assert!(!argv.iter().any(|a| a == "--extern"), "build script is not an --extern: {argv:?}");
+        assert!(!argv.iter().any(|a| a.starts_with("bs=")), "no bs rlib extern: {argv:?}");
+        // The flags-file + OUT_DIR tree are staged as inputs.
+        let inputs = &t.actions[0].inputs;
+        assert!(inputs.contains(&"app/bs.out".to_string()), "flags-file is an input: {inputs:?}");
+        assert!(inputs.contains(&"app/bs.out_dir".to_string()), "OUT_DIR tree is an input: {inputs:?}");
+        // …and `:bs` is still a recorded dep (the graph edge), just not an --extern.
+        assert!(t.deps.iter().any(|d| d.ends_with(":bs")), "the build script stays a dep: {:?}", t.deps);
+    }
+
+    #[test]
+    fn p310_plain_crate_is_not_wrapped() {
+        // No build-script dep → the rustc argv is unchanged (additive: the edge only fires on a
+        // build-script dep), so argv[0] is rustc, not the wrapper.
+        let build = format!("{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"])\n");
+        let argv = argv_of(&analyze("p310_plain", &build).unwrap());
+        assert!(argv[0].ends_with("rustc"), "plain crate runs rustc directly: {argv:?}");
+        assert!(!argv[0].contains("razel-process-wrapper"), "not wrapped: {argv:?}");
     }
 }

@@ -31,14 +31,25 @@ pub(crate) fn record_target(sess: &Session, t: AnalyzedTarget) {
 }
 
 
+/// The build-script edge a `cargo_build_script` dep contributes (§4.3, P3.10): its run action's
+/// flags-file + `OUT_DIR` tree, read DIRECTLY off the dep (own-only — `BuildScriptRun` registers no
+/// `dep_fold`, so it never propagates transitively), like `libs`/`DefaultInfo`.
+#[derive(Clone)]
+pub(crate) struct BuildScriptRunInfo {
+    pub(crate) flags_file: String,
+    pub(crate) out_dir: String,
+}
+
 /// What a dep contributes to its users: its linkable outputs (`libs` — own `DefaultInfo`), its
-/// canonical label, and the TRANSITIVE dep-folded provider fields keyed by dep-struct projection
-/// (`fields` — e.g. `"headers"`, `"cflags"`; C3a.3b). A native rule reads its own projections via
+/// canonical label, the TRANSITIVE dep-folded provider fields keyed by dep-struct projection
+/// (`fields` — e.g. `"headers"`, `"cflags"`; C3a.3b), and — for a `cargo_build_script` dep — the
+/// intra-target `build_script` edge (§4.3). A native rule reads its own projections via
 /// [`DepInfo::field`] — the generic `resolve_dep` no longer hardcodes cc/java.
 pub(crate) struct DepInfo {
     pub(crate) libs: Vec<String>,
     pub(crate) canon: String,
     fields: BTreeMap<String, Vec<String>>,
+    pub(crate) build_script: Option<BuildScriptRunInfo>,
 }
 
 impl DepInfo {
@@ -96,6 +107,7 @@ pub(crate) fn resolve_dep<'v>(
                 libs: vec![out_path],
                 canon,
                 fields: Default::default(),
+                build_script: None,
             });
         }
         // Bazel file-label semantics: a label naming no declared target resolves to a SOURCE
@@ -123,7 +135,7 @@ pub(crate) fn resolve_dep<'v>(
             })
         };
         if let Some(path) = on_disk {
-            return Ok(DepInfo { libs: vec![path], canon, fields: Default::default() });
+            return Ok(DepInfo { libs: vec![path], canon, fields: Default::default(), build_script: None });
         }
         // A failed dep-package load SURFACES (round 29 — was swallowed: a missing-vendor
         // chain reported the wrong-reason "not analyzed"; loud errors over silent-wrong).
@@ -139,7 +151,15 @@ pub(crate) fn resolve_dep<'v>(
         ));
     };
     let libs = t.default_info.clone();
+    // P3.10 (§4.3): the build-script edge, read DIRECTLY off the dep's OWN provider (own-only, not
+    // the transitive fold — exactly how `libs`/`DefaultInfo.files` is read above).
+    let bs_flags = t.field_strs("BuildScriptRun", "flags_file");
+    let bs_out = t.field_strs("BuildScriptRun", "out_dir");
     drop(results);
+    let build_script = bs_flags.into_iter().next().map(|flags_file| BuildScriptRunInfo {
+        flags_file,
+        out_dir: bs_out.into_iter().next().unwrap_or_default(),
+    });
     // The transitive provider closure via the ONE registry-driven fold (C3a.3b), over the
     // Session's LIVE store (E0d) — no per-dep rebuild, no snapshot clones.
     let fields = if let Some(hit) = sess.fold_cache.borrow().get(&canon) {
@@ -153,7 +173,7 @@ pub(crate) fn resolve_dep<'v>(
         sess.fold_cache.borrow_mut().insert(canon.clone(), f.clone());
         f
     };
-    Ok(DepInfo { libs, canon, fields: fields.into_iter().collect() })
+    Ok(DepInfo { libs, canon, fields: fields.into_iter().collect(), build_script })
 }
 
 

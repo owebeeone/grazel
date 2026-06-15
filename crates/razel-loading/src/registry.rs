@@ -99,6 +99,13 @@ pub(crate) fn builtin_registry() -> ProviderRegistry {
     r.register("JavaInfo", "neverlink", FieldSpec { kind: FieldKind::Scalar, dep_fold: None });
     // py — its OWN channel for exported `.py` sources (C3a.5: no longer riding cc's `hdrs`).
     r.register("PyInfo", "srcs", FieldSpec { kind: FieldKind::Set, dep_fold: folded("py_srcs", FoldPolicy::Plain) });
+    // crate-universe P3.10 (§4.3): the build-script edge. `cargo_build_script` exposes its run
+    // action's flags-file + OUT_DIR. OWN-only (`dep_fold: None`, like `DefaultInfo.files`): the edge
+    // is INTRA-TARGET — a crate reads its DIRECT build-script dep's flags, and it must NOT fold
+    // transitively (else a crate's consumers would inherit its build-script flags). `resolve_dep`
+    // reads it directly off the dep (deps.rs), not via the transitive fold.
+    r.register("BuildScriptRun", "flags_file", FieldSpec { kind: FieldKind::Set, dep_fold: None });
+    r.register("BuildScriptRun", "out_dir", FieldSpec { kind: FieldKind::Set, dep_fold: None });
     r
 }
 
