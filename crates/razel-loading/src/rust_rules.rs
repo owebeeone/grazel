@@ -45,6 +45,14 @@ fn rustc() -> String {
     "rustc".into()
 }
 
+/// P3.8: the razel process wrapper bin (the build-script runner / the P3.9 rustc wrapper). Resolved
+/// like [`rustc`]: an explicit `RAZEL_PROCESS_WRAPPER` override, else the bare crate name (the
+/// executor / toolchain resolves it on the exec path). Parity normalizes the wrapper prefix
+/// (P3.11), so the exact path is not parity-gated.
+fn process_wrapper() -> String {
+    std::env::var("RAZEL_PROCESS_WRAPPER").unwrap_or_else(|_| "razel-process-wrapper".into())
+}
+
 /// The crate name a dependent uses for `--extern` / `use`: the target segment of a
 /// canonical label (`//lib:greet` → `greet`, bare `greet` → `greet`).
 fn crate_name_of(canon: &str) -> String {
@@ -126,6 +134,8 @@ struct CompileAttrs {
     rustc_flags: Vec<crate::values::StrAttrPart>,
     compile_data: Vec<crate::values::StrAttrPart>,
     target_compatible_with: Vec<crate::values::StrAttrPart>,
+    /// P3.8b: `data` — build-script RUN inputs (§5.2 action 2); only `cargo_build_script` fills it.
+    data: Vec<crate::values::StrAttrPart>,
 }
 
 /// Apply the §5.5 verdict table to a compile rule's extra `**kwargs`: **loud-error** on any attr
@@ -212,12 +222,13 @@ fn build_script_attr_verdict(attr: &str) -> Option<BsVerdict> {
     })
 }
 
-/// P3.6 (§5.2): validate a `cargo_build_script`'s extra `**kwargs` against the build-script attr
-/// surface (loud-error on unknown) and extract the compile-phase argv attrs (`crate_name`/
-/// `crate_root`/`crate_features`/`rustc_flags`) into the shared [`CompileAttrs`]. Run-phase and
-/// deferred-compile attrs are accepted but left inert here — their action effects land in the
-/// named later step (accept ≠ implement, P2#3); a regression test pins the argv-inertness.
-fn bs_compile_attrs<'v>(
+/// §5.2: validate a `cargo_build_script`'s extra `**kwargs` against the build-script attr surface
+/// (loud-error on unknown) and extract the implemented attrs into the shared [`CompileAttrs`]:
+/// compile-phase argv (`crate_name`/`crate_root`/`crate_features`/`rustc_flags`, P3.6) + run-phase
+/// inputs (`data`/`compile_data`, P3.8b — staged into the run action). The remaining run-phase env
+/// attrs (`version`/`pkg_name`/`rustc_env_files` → P3.8c) and the deferred-compile attrs are
+/// accepted but inert here (accept ≠ implement, P2#3).
+fn bs_attrs<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     name: &str,
     kw: &SmallMap<String, Value<'v>>,
@@ -231,8 +242,8 @@ fn bs_compile_attrs<'v>(
                  (it must not be silently accepted)."
             );
         };
-        if verdict == BsVerdict::CompileArgv {
-            match key.as_str() {
+        match verdict {
+            BsVerdict::CompileArgv => match key.as_str() {
                 "crate_name" => out.crate_name = val.unpack_str().map(str::to_owned),
                 "crate_root" => out.crate_root = val.unpack_str().map(str::to_owned),
                 "crate_features" => {
@@ -242,9 +253,18 @@ fn bs_compile_attrs<'v>(
                     out.rustc_flags = crate::values::str_attr_parts(eval, Some(*val))?
                 }
                 _ => unreachable!("CompileArgv keys are exactly the four matched above"),
-            }
+            },
+            // P3.8b: `data`/`compile_data` → the run action's INPUTS (§5.2 action 2). The other
+            // run-phase attrs (`version`/`pkg_name`/`rustc_env_files` → P3.8c env-file;
+            // `links`/`build_script_env`/`tools`/`rundir` → later) stay accepted-but-inert.
+            BsVerdict::Run => match key.as_str() {
+                "data" => out.data = crate::values::str_attr_parts(eval, Some(*val))?,
+                "compile_data" => out.compile_data = crate::values::str_attr_parts(eval, Some(*val))?,
+                _ => {}
+            },
+            // `Compile` (deferred) / `Ignored` → accepted no-ops here; never extracted.
+            BsVerdict::Compile | BsVerdict::Ignored => {}
         }
-        // `Compile` (deferred) / `Run` / `Ignored` → accepted no-ops here; never extracted.
     }
     Ok(out)
 }
@@ -648,13 +668,15 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    /// `cargo_build_script(name, srcs, deps=[], edition="2021", **attrs)` — P3.6 (§5.2) compiles
-    /// the build-script (action 1): `crate_root`/`srcs[0]` → a HOST `rust_binary` (`<name>_`, the
-    /// §12 `:_bs_` bin) with the single toolchain, linking `deps` as `--extern` (build-deps, NOT
-    /// run inputs). The compile-phase attr split (`crate_name`/`crate_root`/`crate_features`/
-    /// `rustc_flags`) shapes the argv; the §5.2 run-phase attrs are accepted but inert until P3.8.
-    /// `default_info` is EMPTY (§4.3: a build-script target exposes no libs — the bin is consumed
-    /// intra-target by the run action P3.8, never `--extern`'d by a dependent crate).
+    /// `cargo_build_script(name, srcs, deps=[], edition="2021", **attrs)` — the build-script's TWO
+    /// actions (§5.2): **(1) compile** `crate_root`/`srcs[0]` → a HOST `rust_binary` (`<name>_`, the
+    /// §12 `:_bs_` bin) with the single toolchain, linking `deps` as `--extern` (build-deps, P3.6);
+    /// **(2) run** the bin via the process wrapper → the §6.1 `<name>.out` flags file + `OUT_DIR`
+    /// tree, under a default-deny Cargo env the wrapper assembles (P3.8). The run env POLICY is
+    /// staged: P3.8b emits `TARGET`/`HOST`/`OPT_LEVEL`/`CARGO_FEATURE_<F>`; the env-file
+    /// (`CARGO_PKG_*`) + `CARGO_CFG_*`/cc/`DEP_*` follow. `default_info` is EMPTY (§4.3: a
+    /// build-script target exposes no libs — the bin is intra-target, the flags-file/`OUT_DIR` are
+    /// consumed via the P3.10 edge).
     fn native_cargo_build_script<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<Value<'v>>,
@@ -664,7 +686,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
-        let compile = bs_compile_attrs(eval, &name, &kw)?; // §5.2 verdict + compile-attr split
+        let compile = bs_attrs(eval, &name, &kw)?; // §5.2 verdict + compile/run attr split
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
@@ -682,14 +704,23 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             };
             let edition = edition.unwrap_or_else(|| "2021".into());
             let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
+            // All the `&mut eval` resolutions up front (compile argv + run env/inputs), before
+            // re-taking `sess` for the path `qualify`s + `record_target`.
             let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
             let tail = compile_tail(eval, &compile)?;
+            let features = crate::values::resolve_str_parts(eval, &compile.crate_features)?;
+            // §5.2 slice-1 run inputs: declared `data` + `compile_data`, resolved to files.
+            let mut data_files = Vec::new();
+            for parts in [&compile.data, &compile.compile_data] {
+                for entry in crate::values::resolve_str_parts(eval, parts)? {
+                    data_files.extend(resolve_dep(eval, &entry)?.libs);
+                }
+            }
             let sess = session(eval);
 
-            // The host build-script bin (`<name>_`, the §12 `:_bs_`); P3.8's run action consumes
-            // this exact path. An intermediate output — kept OUT of `default_info` (§4.3).
+            // --- action 1: compile the host build-script bin (`<name>_`, §12 `:_bs_`) ---
             let bin = qualify(sess, &format!("{name}_"));
-            let mut argv = vec![
+            let mut compile_argv = vec![
                 rustc(),
                 "--edition".into(),
                 edition,
@@ -699,20 +730,58 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 "-o".into(),
                 bin.clone(),
             ];
-            argv.extend(extern_flags);
-            argv.extend(tail);
+            compile_argv.extend(extern_flags);
+            compile_argv.extend(tail);
+            let mut compile_inputs = srcs.clone();
+            compile_inputs.extend(dep_rlibs);
 
-            let mut inputs = srcs;
-            inputs.extend(dep_rlibs);
+            // --- action 2: run the bin via the wrapper → §6.1 flags file + OUT_DIR tree ---
+            let flags_out = qualify(sess, &format!("{name}.out")); // §6.1 `<name>.out`
+            let out_dir = qualify(sess, &format!("{name}.out_dir")); // P2.4 tree output
+            let triple = crate::state::host_triple();
+            let mut run_argv = vec![
+                process_wrapper(),
+                "build-script".into(),
+                "--flags-out".into(),
+                flags_out.clone(),
+                "--out-dir".into(),
+                out_dir.clone(),
+            ];
+            // Cargo env POLICY (P3.8b slice): host==target triple, a default OPT_LEVEL, and one
+            // `CARGO_FEATURE_<F>` per feature (uppercased, non-alnum → `_`). The env-file
+            // (`CARGO_PKG_*`) + `CARGO_CFG_*`/cc/`DEP_*` are P3.8c / later.
+            for (k, v) in [("TARGET", triple), ("HOST", triple), ("OPT_LEVEL", "0")] {
+                run_argv.push("--env".into());
+                run_argv.push(format!("{k}={v}"));
+            }
+            for f in &features {
+                let var = f.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+                run_argv.push("--env".into());
+                run_argv.push(format!("CARGO_FEATURE_{var}=1"));
+            }
+            run_argv.push("--".into());
+            run_argv.push(bin.clone());
+            let mut run_inputs = vec![bin.clone()];
+            run_inputs.extend(srcs);
+            run_inputs.extend(data_files);
+
             record_target(sess, AnalyzedTarget {
                 name: canon_label(sess, &name),
                 deps: dep_names,
-                actions: vec![AnalyzedAction {
-                    mnemonic: "Rustc".into(),
-                    argv,
-                    inputs,
-                    outputs: vec![bin],
-                }],
+                actions: vec![
+                    AnalyzedAction {
+                        mnemonic: "Rustc".into(),
+                        argv: compile_argv,
+                        inputs: compile_inputs,
+                        outputs: vec![bin.clone()],
+                    },
+                    AnalyzedAction {
+                        mnemonic: "CargoBuildScriptRun".into(),
+                        argv: run_argv,
+                        inputs: run_inputs,
+                        outputs: vec![flags_out, out_dir],
+                    },
+                ],
                 default_info: Vec::new(),
                 providers: Default::default(),
             });
@@ -1108,5 +1177,50 @@ mod tests {
         let err = analyze("p36_unknown", &build).unwrap_err();
         assert!(err.contains("unknown attribute") && err.contains("not_a_bs_attr"), "loud error: {err}");
         assert!(err.contains("build-script attr surface"), "names the surface: {err}");
+    }
+
+    #[test]
+    fn p38b_build_script_run_action_invokes_the_wrapper_with_cargo_env() {
+        let build = format!(
+            "{LOAD}{BS_LOAD}\
+             rust_library(name = \"dep\", srcs = [\"lib.rs\"])\n\
+             cargo_build_script(name = \"t\", srcs = [\"root.rs\"], deps = [\":dep\"], \
+                 crate_features = [\"std\", \"simd-asm\"], data = [\"table.bin\"])\n"
+        );
+        let targets = analyze("p38b_run", &build).unwrap();
+        let t = targets.iter().find(|t| t.name == "//app:t").expect("bs target analyzed");
+        // The target now carries BOTH §5.2 actions: compile (1) then run (2).
+        assert_eq!(t.actions.len(), 2, "compile + run: {:?}",
+            t.actions.iter().map(|a| a.mnemonic.clone()).collect::<Vec<_>>());
+        assert_eq!(t.actions[0].mnemonic, "Rustc", "action 1 is the compile");
+        let run = &t.actions[1];
+        assert_eq!(run.mnemonic, "CargoBuildScriptRun", "action 2 is the run");
+        let a = &run.argv;
+        // argv = [wrapper, build-script, --flags-out F, --out-dir D, --env…, --, bin]
+        assert!(a[0].contains("razel-process-wrapper"), "the wrapper bin: {a:?}");
+        assert_eq!(a[1], "build-script", "the runner subcommand: {a:?}");
+        let fo = a.iter().position(|x| x == "--flags-out").expect("--flags-out");
+        assert_eq!(a[fo + 1], "app/t.out", "§6.1 <name>.out flags file: {a:?}");
+        let od = a.iter().position(|x| x == "--out-dir").expect("--out-dir");
+        assert_eq!(a[od + 1], "app/t.out_dir", "the OUT_DIR tree: {a:?}");
+        // env POLICY slice (P3.8b): TARGET/HOST = host triple, OPT_LEVEL, CARGO_FEATURE_* / feature.
+        let env_vals: Vec<String> =
+            a.windows(2).filter(|w| w[0] == "--env").map(|w| w[1].clone()).collect();
+        let triple = crate::state::host_triple();
+        assert!(env_vals.contains(&format!("TARGET={triple}")), "TARGET=host triple: {env_vals:?}");
+        assert!(env_vals.contains(&format!("HOST={triple}")), "HOST=host triple: {env_vals:?}");
+        assert!(env_vals.iter().any(|e| e.starts_with("OPT_LEVEL=")), "{env_vals:?}");
+        assert!(env_vals.contains(&"CARGO_FEATURE_STD=1".to_string()), "feature→CARGO_FEATURE_: {env_vals:?}");
+        assert!(env_vals.contains(&"CARGO_FEATURE_SIMD_ASM=1".to_string()), "non-alnum→_: {env_vals:?}");
+        // the compiled bs bin is the program after `--`.
+        let sep = a.iter().position(|x| x == "--").expect("the `--` separator");
+        assert_eq!(a[sep + 1], "app/t_", "the bs bin runs after --: {a:?}");
+        // run inputs: bin + the build-script srcs + declared data (§5.2 slice-1 static keying).
+        assert!(run.inputs.contains(&"app/t_".to_string()), "bin is a run input: {:?}", run.inputs);
+        assert!(run.inputs.contains(&"app/root.rs".to_string()), "src is a run input: {:?}", run.inputs);
+        assert!(run.inputs.contains(&"app/table.bin".to_string()), "data is a run input: {:?}", run.inputs);
+        // outputs: flags file + OUT_DIR tree; default_info stays empty (§4.3 no libs).
+        assert_eq!(run.outputs, ["app/t.out", "app/t.out_dir"], "run outputs: {:?}", run.outputs);
+        assert!(t.default_info.is_empty(), "no default-info libs: {:?}", t.default_info);
     }
 }
