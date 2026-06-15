@@ -201,6 +201,21 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   libs — the bin is intra-target, consumed by the run action P3.8; so `deps=[":build_script_build"]`
   still yields no `--extern`, keeping `p31b` green). Tests `p36_build_script_compiles_to_a_host_bin_with_externs`
   + `p36_build_script_unknown_attr_is_a_loud_error`. NEXT: P3.7 (flags-file parser).
+- `0ae893e` P3.7 — build-script **flags-file parser** (§6.1): new `build_script.rs` parses a
+  build script's stdout → structured directives (the boundary between the run action P3.8 and the
+  rustc wrapper P3.9). Recognized `rustc-*` → `FlagsRecord{kind,args}` in emission order WITH
+  duplicates (link order is significant); `rustc-flags` tokenized HERE (whitespace) so the wrapper
+  never re-parses/shell-quotes; `flags_file_jsonl` → one `{"kind","args"}` JSON object per line
+  (JSON handles tab/space/`=`/quote). Side channels for P3.8: `metadata=K=V` (+ pre-1.77
+  non-reserved single-colon `cargo:K=V`) → `dep_metadata` (`DEP_<LINKS>_K`); `warning=`→stderr;
+  `error=`→fail; `rerun-if-*` recorded (not narrowing); unknown reserved `cargo::<key>` → one
+  deviation line, never fatal. Reserved keys are colon-count-agnostic; non-reserved double-colon →
+  deviation, single-colon → metadata. The `kind`→rustc MAPPING is **P3.9**'s (the wrapper's), NOT
+  here. Parser surface `#![allow(dead_code)]` until P3.8 consumes it. 3 goldens. NEXT: P3.8 (run
+  action) — **OPEN SEAM**: who runs the bs bin + parses its stdout into the flags file? A runner
+  WRAPPER bin (argv `[runner, --out, --, bs]`, mirrors the P3.9 rustc wrapper) vs `razel-exec`
+  special-casing the `CargoBuildScriptRun` mnemonic (razel-exec does NOT dep razel-loading, so the
+  parser would need a lighter home). The plan's "argv=[bs bin]" hints at the latter. Decide at P3.8.
 
 **P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
 WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
@@ -233,7 +248,7 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.7 (build-script flags-file parser) → P3.8
+**Remaining for `razelv3-rust/p3`:** P3.8
 (`CargoBuildScriptRun` action) → P3.9 (rustc wrapper
 binary; **P3.5b** env precedence + `--env-file=` consumption rides here) → P3.10 (wire the
 build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`).
