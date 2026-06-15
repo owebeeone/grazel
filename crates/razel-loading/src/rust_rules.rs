@@ -136,6 +136,12 @@ struct CompileAttrs {
     target_compatible_with: Vec<crate::values::StrAttrPart>,
     /// P3.8b: `data` — build-script RUN inputs (§5.2 action 2); only `cargo_build_script` fills it.
     data: Vec<crate::values::StrAttrPart>,
+    /// P3.8c: build-script RUN env (§5.2/§6.2). `rustc_env_files` are env-file targets → `--env-file`
+    /// (the `CARGO_PKG_*` from `cargo_toml_env_vars`, P3.5a); literal `version`/`pkg_name` → `--env
+    /// CARGO_PKG_VERSION`/`NAME` which OVERRIDE the env-file (§6.2). `cargo_build_script` only.
+    rustc_env_files: Vec<crate::values::StrAttrPart>,
+    version: Option<String>,
+    pkg_name: Option<String>,
 }
 
 /// Apply the §5.5 verdict table to a compile rule's extra `**kwargs`: **loud-error** on any attr
@@ -254,12 +260,17 @@ fn bs_attrs<'v>(
                 }
                 _ => unreachable!("CompileArgv keys are exactly the four matched above"),
             },
-            // P3.8b: `data`/`compile_data` → the run action's INPUTS (§5.2 action 2). The other
-            // run-phase attrs (`version`/`pkg_name`/`rustc_env_files` → P3.8c env-file;
-            // `links`/`build_script_env`/`tools`/`rundir` → later) stay accepted-but-inert.
+            // P3.8b: `data`/`compile_data` → the run action's INPUTS (§5.2 action 2). P3.8c:
+            // `rustc_env_files`/`version`/`pkg_name` → the run env (§6.2). The rest
+            // (`links`/`build_script_env`/`tools`/`rundir`) stay accepted-but-inert.
             BsVerdict::Run => match key.as_str() {
                 "data" => out.data = crate::values::str_attr_parts(eval, Some(*val))?,
                 "compile_data" => out.compile_data = crate::values::str_attr_parts(eval, Some(*val))?,
+                "rustc_env_files" => {
+                    out.rustc_env_files = crate::values::str_attr_parts(eval, Some(*val))?
+                }
+                "version" => out.version = val.unpack_str().map(str::to_owned),
+                "pkg_name" => out.pkg_name = val.unpack_str().map(str::to_owned),
                 _ => {}
             },
             // `Compile` (deferred) / `Ignored` → accepted no-ops here; never extracted.
@@ -716,6 +727,12 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                     data_files.extend(resolve_dep(eval, &entry)?.libs);
                 }
             }
+            // P3.8c: `rustc_env_files` are env-file TARGETS (e.g. `cargo_toml_env_vars`, P3.5a) →
+            // their output file(s); passed `--env-file` (and staged as run inputs).
+            let mut env_files = Vec::new();
+            for entry in crate::values::resolve_str_parts(eval, &compile.rustc_env_files)? {
+                env_files.extend(resolve_dep(eval, &entry)?.libs);
+            }
             let sess = session(eval);
 
             // --- action 1: compile the host build-script bin (`<name>_`, §12 `:_bs_`) ---
@@ -747,9 +764,15 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 "--out-dir".into(),
                 out_dir.clone(),
             ];
-            // Cargo env POLICY (P3.8b slice): host==target triple, a default OPT_LEVEL, and one
-            // `CARGO_FEATURE_<F>` per feature (uppercased, non-alnum → `_`). The env-file
-            // (`CARGO_PKG_*`) + `CARGO_CFG_*`/cc/`DEP_*` are P3.8c / later.
+            // P3.8c: env-files FIRST (lower precedence than the literal `--env` below, §6.2).
+            for ef in &env_files {
+                run_argv.push("--env-file".into());
+                run_argv.push(ef.clone());
+            }
+            // Cargo env POLICY (P3.8b): host==target triple, a default OPT_LEVEL, one
+            // `CARGO_FEATURE_<F>` per feature (uppercased, non-alnum → `_`). P3.8c: literal
+            // `version`/`pkg_name` → `CARGO_PKG_*` (OVERRIDE the env-file). `CARGO_CFG_*`/cc/`DEP_*`
+            // are later. (`--env` is applied AFTER `--env-file` by the wrapper, hence the override.)
             for (k, v) in [("TARGET", triple), ("HOST", triple), ("OPT_LEVEL", "0")] {
                 run_argv.push("--env".into());
                 run_argv.push(format!("{k}={v}"));
@@ -759,11 +782,20 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 run_argv.push("--env".into());
                 run_argv.push(format!("CARGO_FEATURE_{var}=1"));
             }
+            if let Some(v) = &compile.version {
+                run_argv.push("--env".into());
+                run_argv.push(format!("CARGO_PKG_VERSION={v}"));
+            }
+            if let Some(p) = &compile.pkg_name {
+                run_argv.push("--env".into());
+                run_argv.push(format!("CARGO_PKG_NAME={p}"));
+            }
             run_argv.push("--".into());
             run_argv.push(bin.clone());
             let mut run_inputs = vec![bin.clone()];
             run_inputs.extend(srcs);
             run_inputs.extend(data_files);
+            run_inputs.extend(env_files);
 
             record_target(sess, AnalyzedTarget {
                 name: canon_label(sess, &name),
@@ -921,6 +953,9 @@ mod tests {
         std::fs::write(pkg.join("table.bin"), "data\n").unwrap();
         std::fs::write(pkg.join("host.txt"), "h\n").unwrap();
         std::fs::write(pkg.join("default.txt"), "d\n").unwrap();
+        // P3.8c: a `Cargo.toml` so a `cargo_toml_env_vars` target (the `rustc_env_files` source)
+        // can resolve; inert for tests that don't declare one.
+        std::fs::write(pkg.join("Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n").unwrap();
         std::fs::write(pkg.join("BUILD"), build).unwrap();
         let r = analyze_workspace_with(&tmp, "//app:t", GlobalFlags::default());
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1222,5 +1257,34 @@ mod tests {
         // outputs: flags file + OUT_DIR tree; default_info stays empty (§4.3 no libs).
         assert_eq!(run.outputs, ["app/t.out", "app/t.out_dir"], "run outputs: {:?}", run.outputs);
         assert!(t.default_info.is_empty(), "no default-info libs: {:?}", t.default_info);
+    }
+
+    #[test]
+    fn p38c_run_env_wires_the_env_file_and_cargo_pkg_overrides() {
+        // `rustc_env_files` → a `cargo_toml_env_vars` env-file target (P3.5a); literal version/
+        // pkg_name → CARGO_PKG_* that OVERRIDE the env-file (§6.2).
+        let build = format!(
+            "{LOAD}{BS_LOAD}load(\"@rules_rust//cargo:defs.bzl\", \"cargo_toml_env_vars\")\n\
+             cargo_toml_env_vars(name = \"cenv\", src = \"Cargo.toml\")\n\
+             cargo_build_script(name = \"t\", srcs = [\"root.rs\"], \
+                 rustc_env_files = [\":cenv\"], version = \"9.9.9\", pkg_name = \"pkgx\")\n"
+        );
+        let targets = analyze("p38c_env", &build).unwrap();
+        let t = targets.iter().find(|t| t.name == "//app:t").expect("bs target analyzed");
+        let run = &t.actions[1];
+        let a = &run.argv;
+        // the env-file is passed `--env-file <cargo_toml_env_vars output>` and staged as a run input.
+        let ef = a.iter().position(|x| x == "--env-file").expect("--env-file");
+        assert_eq!(a[ef + 1], "app/cenv", "the cargo_toml_env_vars env-file: {a:?}");
+        assert!(run.inputs.contains(&"app/cenv".to_string()), "env-file staged as input: {:?}", run.inputs);
+        // literal version/pkg_name → CARGO_PKG_* (override).
+        let env_vals: Vec<String> =
+            a.windows(2).filter(|w| w[0] == "--env").map(|w| w[1].clone()).collect();
+        assert!(env_vals.contains(&"CARGO_PKG_VERSION=9.9.9".to_string()), "version override: {env_vals:?}");
+        assert!(env_vals.contains(&"CARGO_PKG_NAME=pkgx".to_string()), "pkg_name override: {env_vals:?}");
+        // §6.2 PRECEDENCE: the `--env-file` precedes the literal `--env` overrides in argv (the
+        // wrapper applies files first, then --env), so the literal wins.
+        let first_env = a.iter().position(|x| x == "--env").unwrap();
+        assert!(ef < first_env, "env-file comes before the literal --env overrides: {a:?}");
     }
 }
