@@ -1023,6 +1023,7 @@ fn drive_tree(
             .iter()
             .map(|pkg| (pkg.clone(), load_package_entry(&session, pkg)))
             .collect();
+        crate::loaded::finalize_edges(&session, root); // P0.5: resolve loading-phase edges
         let loaded = loaded_done(&session);
         return (session, report, loaded);
     }
@@ -1084,6 +1085,7 @@ fn drive_tree(
         .cloned()
         .zip(results.into_iter().map(|r| r.unwrap_or(Ok(()))))
         .collect();
+    crate::loaded::finalize_edges(&session, root); // P0.5: resolve loading-phase edges
     let loaded = loaded_done(&session);
     (session, report, loaded)
 }

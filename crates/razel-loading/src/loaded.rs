@@ -12,12 +12,16 @@ use crate::labels::LabelV;
 use crate::selects::{
     FrozenSelectBranches, FrozenSelectExpr, SelectBranches, SelectExpr, key_string,
 };
+use crate::state::{Session, canon_label, pkg_of, session};
 use razel_ir::TargetKind;
+use starlark::collections::SmallMap;
+use starlark::eval::Evaluator;
 use starlark::values::dict::DictRef;
 use starlark::values::list::ListRef;
 use starlark::values::tuple::TupleRef;
 use starlark::values::{Heap, Value, ValueLike};
 use std::fmt::Write as _;
+use std::path::Path;
 
 /// A loading-phase attribute value — the closed, serializable, de-Starlark'd model. Captured at
 /// load BEFORE freeze; `select()`/`+` are retained UNRESOLVED (query reads them raw; the build
@@ -302,7 +306,11 @@ pub(crate) struct LoadedTarget {
     /// The build's coarse kind (action minting only); derivable from the label at load.
     pub(crate) kind: TargetKind,
     pub(crate) attrs: std::collections::BTreeMap<String, RawAttr>,
+    /// Resolved typed edges (filled by `finalize_edges` post-load; empty at capture).
     pub(crate) edges: Vec<Edge>,
+    /// Captured label refs (canonicalized at capture), pending edge-kind resolution. The
+    /// intermediate between P0.2 capture and P0.4 resolution (cleared into `edges` at finalize).
+    pub(crate) raw_refs: Vec<RawLabelRef>,
 }
 
 /// A node in the query graph — Bazel `deps()` emits file labels too, and `kind()` classifies them
@@ -391,6 +399,102 @@ pub(crate) fn resolve_edges(
         }
     }
     Ok(edges)
+}
+
+// ── P0.5: capture-at-load + finalize (the invasive wiring) — design §5.6, §11 ───────────────────
+
+/// The coarse `TargetKind` (action minting) from the rule class — derivable at load.
+fn kind_for(rule_class: &str) -> TargetKind {
+    if rule_class.contains("test") {
+        TargetKind::Test
+    } else if rule_class.contains("binary") {
+        TargetKind::Binary
+    } else {
+        TargetKind::Library
+    }
+}
+
+/// Capture a declared target into the loading-phase graph (`sess.loaded_targets`): snapshot every
+/// attr Value into `RawAttr` (P0.2), extract + canonicalize the label refs of the schema's
+/// label-valued attrs (P0.2/R1), and store a `LoadedTarget` with edges deferred to
+/// [`finalize_edges`]. Additive — the build path never reads `loaded_targets`. Called at the
+/// rule's record point, where the raw attr Values (incl. unresolved `select()`) are still intact.
+pub(crate) fn capture_loaded<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    label: &str,
+    rule_class: &str,
+    attrs: &SmallMap<String, Value<'v>>,
+) {
+    let heap = eval.heap();
+    let sess = session(eval);
+    let mut attr_map = std::collections::BTreeMap::new();
+    for (name, v) in attrs.iter() {
+        attr_map.insert(name.clone(), value_to_raw(heap, *v));
+    }
+    let mut refs = Vec::new();
+    for attr_name in label_attrs(rule_class) {
+        if let Some(raw) = attr_map.get(*attr_name) {
+            extract_label_refs(attr_name, raw, &mut refs);
+        }
+    }
+    for r in &mut refs {
+        r.label = canon_label(sess, &r.label); // canonicalize while the package context is set
+    }
+    let node = LoadedTarget {
+        label: label.to_string(),
+        repo: String::new(), // workspace targets; repo identity (§11.3) lands with @crates
+        package: pkg_of(label).unwrap_or_default(),
+        rule_class: rule_class.to_string(),
+        kind: kind_for(rule_class),
+        attrs: attr_map,
+        edges: Vec::new(),
+        raw_refs: refs,
+    };
+    sess.loaded_targets.borrow_mut().insert(label.to_string(), node);
+}
+
+/// Resolve every captured target's `raw_refs` into typed `edges` (the P0.4 pass over the whole
+/// declared set). **Lenient in P0.5:** an unresolved ref is skipped, not a loud error, because not
+/// all rule families capture yet — the strict error turns on with full rule coverage. Idempotent.
+pub(crate) fn finalize_edges(sess: &Session, root: &Path) {
+    let labels: Vec<String> = sess.loaded_targets.borrow().keys().cloned().collect();
+    for label in labels {
+        let raw_refs = match sess.loaded_targets.borrow().get(&label) {
+            Some(t) => t.raw_refs.clone(),
+            None => continue,
+        };
+        let mut edges = Vec::with_capacity(raw_refs.len());
+        for r in &raw_refs {
+            let facts = gather_facts(sess, &r.label, root);
+            if let Some(kind) = classify_kind(r.in_select_condition, &facts) {
+                edges.push(Edge { to: r.label.clone(), kind, attr: r.attr.clone() });
+            }
+        }
+        if let Some(t) = sess.loaded_targets.borrow_mut().get_mut(&label) {
+            t.edges = edges;
+        }
+    }
+}
+
+/// Classification facts for a canonical label, read from the session indexes + the captured set +
+/// (only if nothing else matched) the filesystem.
+fn gather_facts(sess: &Session, canon: &str, root: &Path) -> EdgeFacts {
+    let is_alias = sess.aliases.borrow().contains_key(canon);
+    let is_generated = sess.output_index.borrow().contains_key(canon);
+    let is_config_setting = sess.config_specs.borrow().contains_key(canon);
+    let is_declared_rule = sess.loaded_targets.borrow().contains_key(canon);
+    // Only stat the filesystem when source-file-ness is the deciding fact (avoids O(refs) stats).
+    let is_source_file =
+        !(is_alias || is_generated || is_declared_rule) && source_exists(root, canon);
+    EdgeFacts { is_alias, is_generated, is_config_setting, is_declared_rule, is_source_file }
+}
+
+/// Does `//pkg:name` name a source file on disk under `root`?
+fn source_exists(root: &Path, canon: &str) -> bool {
+    canon
+        .trim_start_matches("//")
+        .split_once(':')
+        .is_some_and(|(pkg, name)| root.join(pkg).join(name).exists())
 }
 
 #[cfg(test)]
@@ -550,6 +654,7 @@ mod tests {
             kind: TargetKind::Library,
             attrs: std::collections::BTreeMap::new(),
             edges: vec![],
+            raw_refs: vec![],
         };
         let t = QueryNode::Target(lt);
         assert_eq!(t.kind_string(), "rust_library rule");
@@ -567,6 +672,7 @@ mod tests {
             kind: TargetKind::Library,
             attrs: std::collections::BTreeMap::new(),
             edges: vec![],
+            raw_refs: vec![],
         });
         assert_eq!(alias.kind_string(), "alias rule"); // open set — falls out of rule_class
     }
@@ -619,5 +725,39 @@ mod tests {
         let bad = vec![RawLabelRef { label: ":ghost".into(), attr: "deps".into(), in_select_condition: false }];
         let err = resolve_edges(&bad, |l| l.to_string(), |_| EdgeFacts::default());
         assert!(err.is_err());
+    }
+
+    // ── P0.5: finalize over a session-backed graph ───────────────────────────────────────────
+
+    #[test]
+    fn finalize_resolves_a_deps_ref_to_a_rule_edge() {
+        use std::collections::BTreeMap;
+        let sess = crate::state::Session::new(None, crate::state::GlobalFlags::default());
+        let mk = |label: &str, refs: Vec<RawLabelRef>| LoadedTarget {
+            label: label.into(),
+            repo: String::new(),
+            package: "app".into(),
+            rule_class: "rust_library".into(),
+            kind: TargetKind::Library,
+            attrs: BTreeMap::new(),
+            edges: vec![],
+            raw_refs: refs,
+        };
+        sess.loaded_targets.borrow_mut().insert("//app:base".into(), mk("//app:base", vec![]));
+        sess.loaded_targets.borrow_mut().insert(
+            "//app:util".into(),
+            mk("//app:util", vec![RawLabelRef {
+                label: "//app:base".into(),
+                attr: "deps".into(),
+                in_select_condition: false,
+            }]),
+        );
+        // //app:base is a captured (declared) rule, so util's deps ref resolves to a Rule edge.
+        finalize_edges(&sess, std::path::Path::new("/nonexistent"));
+        let loaded = sess.loaded_targets.borrow();
+        assert_eq!(
+            loaded.get("//app:util").unwrap().edges,
+            vec![Edge { to: "//app:base".into(), kind: EdgeKind::Rule, attr: "deps".into() }]
+        );
     }
 }

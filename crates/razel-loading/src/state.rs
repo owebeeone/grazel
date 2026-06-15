@@ -183,6 +183,10 @@ pub(crate) struct Session {
     pub(crate) aliases: SyncCell<BTreeMap<String, String>>,
     /// Declared `config_setting` specs by canonical label — what `select()` matches (razelV3).
     pub(crate) config_specs: SyncCell<BTreeMap<String, ConfigSpec>>,
+    /// crate-universe plan P0.5: the loading-phase graph — canonical label → `LoadedTarget` (raw
+    /// attrs, UNRESOLVED selects, typed edges). Populated at capture (record time); edges resolved
+    /// by `loaded::finalize_edges` post-load. `razel query` reads this; the build path ignores it.
+    pub(crate) loaded_targets: SyncCell<BTreeMap<String, crate::loaded::LoadedTarget>>,
     /// Session-wide `.bzl` module cache (canonical label → frozen module). ONE evaluation per
     /// `.bzl` per Session — provider identities (`dep[MyInfo]` ptr-eq) hold across packages,
     /// and TF's macro layer evaluates once, not per-package.

@@ -75,22 +75,50 @@ fn extern_args(
     Ok((args, inputs, names))
 }
 
+/// P0.5: capture a rule's loading-phase node from its raw attr Values (before they're decomposed
+/// for analysis). Only the actual-Value attrs (`srcs`/`deps` + kwargs) go in — `name` is the
+/// label and scalar attrs like `edition` aren't label-valued (scalar capture is a Phase-1 add).
+fn capture_rule<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    label: &str,
+    rule_class: &str,
+    srcs: Option<Value<'v>>,
+    deps: Option<Value<'v>>,
+    kw: &SmallMap<String, Value<'v>>,
+) {
+    let mut attrs = SmallMap::new();
+    if let Some(v) = srcs {
+        attrs.insert("srcs".to_string(), v);
+    }
+    if let Some(v) = deps {
+        attrs.insert("deps".to_string(), v);
+    }
+    for (k, v) in kw.iter() {
+        attrs.insert(k.clone(), *v);
+    }
+    crate::loaded::capture_loaded(eval, label, rule_class, &attrs);
+}
+
 #[starlark::starlark_module]
 fn rust_rules(b: &mut GlobalsBuilder) {
     /// `rust_library(name, srcs, deps=[], edition="2021")` → one `rustc` action
     /// compiling `srcs[0]` to `lib<name>.rlib`, exported to dependents.
     fn native_rust_library<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
         #[starlark(require = named)] edition: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
-        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
+        capture_rule(eval, &label, "rust_library", srcs, deps, &_kw); // P0.5 loading-phase capture
+        let srcs = crate::values::str_attr_parts(eval, srcs)?;
+        let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+        let deps = crate::values::resolve_str_parts(eval, &deps)?;
         let sess = session(eval);
         let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
         let crate_root = srcs
@@ -139,16 +167,20 @@ fn rust_rules(b: &mut GlobalsBuilder) {
     /// compiling `srcs[0]` to the `<name>` executable, linking dep rlibs.
     fn native_rust_binary<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
         #[starlark(require = named)] edition: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
-        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
+        capture_rule(eval, &label, "rust_binary", srcs, deps, &_kw); // P0.5 loading-phase capture
+        let srcs = crate::values::str_attr_parts(eval, srcs)?;
+        let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+        let deps = crate::values::resolve_str_parts(eval, &deps)?;
         let sess = session(eval);
         let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
         let crate_root = srcs
