@@ -15,7 +15,7 @@ use crate::state::{AnalyzedAction, AnalyzedTarget, canon_label, native_decl, qua
 use crate::deps::{record_target, resolve_dep};
 use crate::values::{unpack, unpack_strs};
 use starlark::collections::SmallMap;
-use starlark::environment::{FrozenModule, GlobalsBuilder, Module};
+use starlark::environment::{FrozenModule, GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::Value;
@@ -331,23 +331,62 @@ fn rust_rules(b: &mut GlobalsBuilder) {
     }
 }
 
-/// The synthetic `@rules_rust` module: re-exports the native rules under the names
-/// real BUILD files `load()` (`rust_binary`, `rust_library`).
+/// The synthetic `@rules_rust` module: re-exports the native rules under the names real BUILD
+/// files `load()` (`rust_binary`, `rust_library`, the `cargo:defs.bzl` natives), plus the
+/// `crate_universe/private:selects.bzl` `selects` namespace. Every `@rules_rust//…` load routes
+/// here (`ruleset_modules` prefix), so one module serves `rust:defs.bzl`, `cargo:defs.bzl`, and
+/// `selects.bzl` alike.
+///
+/// `selects` is a faithful pure-Starlark port of rules_rust's vendored skylib `selects.bzl`:
+/// `with_or`/`with_or_dict` fan tuple keys out to one `select()` arm each. `config_setting_group`
+/// (P3.1b) creates `config_setting` targets — deferred with a loud error until a crate in scope
+/// needs it (cf. the skylib lib-helper policy in `shims.rs`); blake3 uses bare `select()`.
+const RUST_RULES_BZL: &str = r#"
+rust_binary = native_rust_binary
+rust_library = native_rust_library
+rust_shared_library = native_rust_shared_library
+rust_library_group = native_rust_library_group
+rust_doc = native_rust_doc
+rust_doc_test = native_rust_doc
+cargo_build_script = native_cargo_build_script
+cargo_toml_env_vars = native_cargo_toml_env_vars
+
+def _with_or_dict(input_dict, no_match_error = ""):
+    output_dict = {}
+    for (key_set, value) in input_dict.items():
+        if type(key_set) == type(()):
+            for key in key_set:
+                if key in output_dict:
+                    fail("key " + str(key) + " is used multiple times in " + str(input_dict))
+                output_dict[key] = value
+        else:
+            if key_set in output_dict:
+                fail("key " + str(key_set) + " is used multiple times in " + str(input_dict))
+            output_dict[key_set] = value
+    return output_dict
+
+def _with_or(input_dict, no_match_error = ""):
+    return select(_with_or_dict(input_dict, no_match_error), no_match_error = no_match_error)
+
+def _config_setting_group(**kwargs):
+    fail("selects.config_setting_group is not yet modeled in razel (no crate in scope needs it; lands when one does)")
+
+selects = struct(
+    with_or = _with_or,
+    with_or_dict = _with_or_dict,
+    config_setting_group = _config_setting_group,
+)
+"#;
+
 pub(crate) fn module() -> Result<FrozenModule, String> {
-    let globals = GlobalsBuilder::standard().with(rust_rules).build();
+    // StructType for `selects = struct(...)`; `rule_globals` for `select()` (used by `with_or`).
+    let globals = GlobalsBuilder::extended_by(&[LibraryExtension::StructType])
+        .with(crate::dialect::rule_globals)
+        .with(rust_rules)
+        .build();
     Module::with_temp_heap(|module| {
-        let ast = AstModule::parse(
-            "@rules_rust",
-            "rust_binary = native_rust_binary\nrust_library = native_rust_library\n\
-             rust_shared_library = native_rust_shared_library\n\
-             rust_library_group = native_rust_library_group\nrust_doc = native_rust_doc\n\
-             rust_doc_test = native_rust_doc\n\
-             cargo_build_script = native_cargo_build_script\n\
-             cargo_toml_env_vars = native_cargo_toml_env_vars\n"
-                .to_owned(),
-            &Dialect::Extended,
-        )
-        .map_err(|e| format!("{e}"))?;
+        let ast = AstModule::parse("@rules_rust", RUST_RULES_BZL.to_owned(), &Dialect::Extended)
+            .map_err(|e| format!("{e}"))?;
         {
             let mut eval = Evaluator::new(&module);
             eval.eval_module(ast, &globals)

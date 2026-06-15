@@ -1276,6 +1276,75 @@ mod tests {
     }
 
     #[test]
+    // crate-universe P3.1b: the FULL per-crate generated-BUILD load surface (blake3's three loads):
+    // `cargo:defs.bzl`, `rust:defs.bzl`, and `crate_universe/private:selects.bzl` all resolve, and
+    // a `rust_library` whose `target_compatible_with` is a bare `select(...)` loads (the select is
+    // captured, not resolved at load). Mirrors the real BUILD.bazel in
+    // bazel-razel/external/rules_rust++crate+crates__blake3-1.8.2/.
+    fn p31b_per_crate_build_loads_with_selects() {
+        let tmp = std::env::temp_dir().join(format!("razel-p31b-{}", std::process::id()));
+        let pkg = tmp.join("c");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(pkg.join("Cargo.toml"), "").unwrap();
+        std::fs::write(pkg.join("lib.rs"), "").unwrap();
+        std::fs::write(pkg.join("build.rs"), "").unwrap();
+        std::fs::write(
+            pkg.join("BUILD"),
+            "load(\"@rules_rust//cargo:defs.bzl\", \"cargo_build_script\", \"cargo_toml_env_vars\")\n\
+             load(\"@rules_rust//rust:defs.bzl\", \"rust_library\")\n\
+             load(\"@rules_rust//crate_universe/private:selects.bzl\", \"selects\")\n\
+             cargo_toml_env_vars(name = \"cargo_toml_env_vars\", src = \"Cargo.toml\")\n\
+             rust_library(\n\
+                 name = \"blake3\",\n\
+                 srcs = glob([\"**/*.rs\"], allow_empty = True),\n\
+                 deps = [\":build_script_build\"],\n\
+                 edition = \"2021\",\n\
+                 target_compatible_with = select({\n\
+                     \"@rules_rust//rust/platform:x86_64-apple-darwin\": [],\n\
+                     \"//conditions:default\": [\"@platforms//:incompatible\"],\n\
+                 }),\n\
+             )\n\
+             cargo_build_script(name = \"_bs\", srcs = glob([\"**/*.rs\"], allow_empty = True), crate_root = \"build.rs\", deps = [])\n\
+             alias(name = \"build_script_build\", actual = \":_bs\")\n",
+        )
+        .unwrap();
+        let (_session, report, _) =
+            drive_tree(&tmp, GlobalFlags::default(), &["c".to_string()], Vec::new(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(report.iter().all(|(_, r)| r.is_ok()), "blake3 per-crate load surface: {report:?}");
+    }
+
+    #[test]
+    // crate-universe P3.1b: `selects.with_or` is a real (faithful) body, not just a present symbol —
+    // tuple keys fan out to one select arm each, and the result is a usable (deferred) select.
+    fn p31b_selects_with_or_builds_a_select() {
+        let tmp = std::env::temp_dir().join(format!("razel-p31bw-{}", std::process::id()));
+        let pkg = tmp.join("c");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(pkg.join("a.txt"), "").unwrap();
+        // Same-package config_settings keep the select resolvable (no external repo); the tuple
+        // key `(":x", ":y")` is the point — `with_or` must fan it out to one arm each. Under the
+        // default config neither matches, so srcs resolves to the default `["a.txt"]`.
+        std::fs::write(
+            pkg.join("BUILD"),
+            "load(\"@rules_rust//crate_universe/private:selects.bzl\", \"selects\")\n\
+             config_setting(name = \"x\", values = {\"compilation_mode\": \"dbg\"})\n\
+             config_setting(name = \"y\", values = {\"compilation_mode\": \"opt\"})\n\
+             filegroup(name = \"fg\", srcs = selects.with_or({\n\
+                 (\":x\", \":y\"): [],\n\
+                 \"//conditions:default\": [\"a.txt\"],\n\
+             }))\n",
+        )
+        .unwrap();
+        let (_session, report, _) =
+            drive_tree(&tmp, GlobalFlags::default(), &["c".to_string()], Vec::new(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(report.iter().all(|(_, r)| r.is_ok()), "selects.with_or: {report:?}");
+    }
+
+    #[test]
     fn starlark_rule_analyzes_by_running_its_impl() {
         let src = r#"
 def _impl(ctx):

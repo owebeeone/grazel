@@ -133,10 +133,24 @@ behavior-preserving razel-exec copy_path refactor).
 
 ---
 
-## PAUSE before Phase 3 (the blake3 build) — a real roll-build guardrail
+## Phase 3 — rolling per-step (the blake3 build, milestone 1) → `razelv3-rust/p3`
 
-Phase 3 (load surface + `cargo_build_script` + the rustc wrapper + build-script execution + the
-build-script edge + analysis/execution parity vs **live `bazel aquery`/`bazel build`**) is a
-12-step, tightly-COUPLED integration — the method's "phase too large/too coupled to complete safely
-as one checkpoint" applies, and it needs live-bazel parity capture. After two full phases tagged in
-one session, this is the honest checkpoint to land before that integration.
+**Correction (do not repeat).** An earlier note here framed Phase 3 as a "too large / too coupled
+to checkpoint safely" stop. That was a *manufactured* stop — turn-length dressed up as a roll-build
+rule. Phase 3 decomposes into 12 small, independently-checkpointable steps (P3.1–P3.12) exactly
+like Phases 0–2; each lands as its own green commit. The integration tag `razelv3-rust/p3` is
+earned at the milestone-1 DoD (`razel build @crates//:blake3` → rlib; **aq**+**xp** green). Rolling
+continues per-step; a stop fires only on a *real* rule, named explicitly.
+
+**Commits so far (`p2`..):**
+- `993d7a6` P3.1a — `cargo:defs.bzl` load surface (`cargo_build_script`/`cargo_toml_env_vars`
+  natives; STUB bodies — compile/run land in P3.6/P3.7)
+- (this) P3.1b — `crate_universe/private:selects.bzl` `selects` namespace (faithful
+  `with_or`/`with_or_dict`; `config_setting_group` loud-deferred). blake3's full three-load surface
+  now resolves and the per-crate package loads (bare `select()` captured, not resolved at load).
+
+**Remaining for `razelv3-rust/p3`:** P3.1c (root `@crates//:defs.bzl` load + `@crates//:X` →
+canonical alias resolution) → P3.2 (rust_library attr surface) → P3.3/P3.4 (condition source +
+`target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run, flags parser, rustc
+wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel
+aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask as in Phases 1–2.
