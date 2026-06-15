@@ -1253,6 +1253,28 @@ mod tests {
         assert!(has("//q1:uses_gen_out", EdgeKind::GeneratedFile, "//q1:out.txt"), "ref to a genrule out is a GeneratedFile edge");
     }
 
+    // P3.1: the @rules_rust//cargo:defs.bzl load surface — a per-crate-style BUILD loading
+    // cargo_build_script + cargo_toml_env_vars resolves and loads (stub targets).
+    #[test]
+    fn p31_cargo_defs_load_surface() {
+        let tmp = std::env::temp_dir().join(format!("razel-p31-{}", std::process::id()));
+        let pkg = tmp.join("c");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(
+            pkg.join("BUILD"),
+            "load(\"@rules_rust//cargo:defs.bzl\", \"cargo_build_script\", \"cargo_toml_env_vars\")\n\
+             cargo_toml_env_vars(name = \"env\", src = \"Cargo.toml\")\n\
+             cargo_build_script(name = \"bs\", srcs = [\"build.rs\"], deps = [])\n",
+        )
+        .unwrap();
+        let (_session, report, _) =
+            drive_tree(&tmp, GlobalFlags::default(), &["c".to_string()], Vec::new(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+        // the package evaluated: the cargo: loads resolved and the rules were defined.
+        assert!(report.iter().all(|(_, r)| r.is_ok()), "cargo:defs.bzl load surface: {report:?}");
+    }
+
     #[test]
     fn starlark_rule_analyzes_by_running_its_impl() {
         let src = r#"

@@ -296,6 +296,39 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         });
         Ok(NoneType)
     }
+
+    /// P3.1: `cargo_build_script` load surface — a STUB target for now (records it so the package
+    /// loads and the `:build_script_build` alias/deps resolve); the compile + run pipeline + flags
+    /// file land in P3.6/P3.7.
+    fn native_cargo_build_script<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
+            let sess = session(eval);
+            record_target(sess, AnalyzedTarget { name: canon_label(sess, &name), ..Default::default() });
+            Ok(())
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// P3.1: `cargo_toml_env_vars` load surface — a STUB target for now; the `CARGO_PKG_*` env-file
+    /// it emits lands in P3.5.
+    fn native_cargo_toml_env_vars<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
+            let sess = session(eval);
+            record_target(sess, AnalyzedTarget { name: canon_label(sess, &name), ..Default::default() });
+            Ok(())
+        }))?;
+        Ok(NoneType)
+    }
 }
 
 /// The synthetic `@rules_rust` module: re-exports the native rules under the names
@@ -308,7 +341,9 @@ pub(crate) fn module() -> Result<FrozenModule, String> {
             "rust_binary = native_rust_binary\nrust_library = native_rust_library\n\
              rust_shared_library = native_rust_shared_library\n\
              rust_library_group = native_rust_library_group\nrust_doc = native_rust_doc\n\
-             rust_doc_test = native_rust_doc\n"
+             rust_doc_test = native_rust_doc\n\
+             cargo_build_script = native_cargo_build_script\n\
+             cargo_toml_env_vars = native_cargo_toml_env_vars\n"
                 .to_owned(),
             &Dialect::Extended,
         )
