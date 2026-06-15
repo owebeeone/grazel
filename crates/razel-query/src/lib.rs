@@ -9,4 +9,6 @@
 //! Built across the plan steps: P1.1 parser → P1.2 load-only resolver → P1.3 adjacency + evaluator
 //! → P1.4 predicates/output → P1.5 somepath/allpaths → P1.6 `cmd_query` → P1.7 `qg` goldens.
 
-// P1.1+ land the modules here (parse, graph, eval, output).
+mod parse; // P1.1: the §12 expression parser → AST
+
+// P1.2+ land the graph, evaluator, and output modules here.
