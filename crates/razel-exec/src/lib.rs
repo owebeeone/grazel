@@ -49,11 +49,7 @@ impl Cache {
             return Ok(false);
         }
         for o in outputs {
-            let to = exec_root.join(o);
-            if let Some(p) = to.parent() {
-                fs::create_dir_all(p)?;
-            }
-            fs::copy(kd.join(o), to)?;
+            copy_path(&kd.join(o), &exec_root.join(o))?;
         }
         Ok(true)
     }
@@ -62,14 +58,40 @@ impl Cache {
     pub fn store(&self, key: &Digest, outputs: &[String], exec_root: &Path) -> io::Result<()> {
         let kd = self.key_dir(key);
         for o in outputs {
-            let to = kd.join(o);
-            if let Some(p) = to.parent() {
-                fs::create_dir_all(p)?;
-            }
-            fs::copy(exec_root.join(o), to)?;
+            copy_path(&exec_root.join(o), &kd.join(o))?;
         }
         Ok(())
     }
+}
+
+/// Copy an output path — a FILE (`fs::copy`) or a whole DIRECTORY tree (recursive). P2.4: the
+/// `cargo_build_script` `OUT_DIR` and extracted `.crate` trees are directory outputs the executor
+/// must round-trip, not just single files (design §5.2/§10).
+fn copy_path(from: &Path, to: &Path) -> io::Result<()> {
+    if from.is_dir() {
+        copy_dir_recursive(from, to)
+    } else {
+        if let Some(p) = to.parent() {
+            fs::create_dir_all(p)?;
+        }
+        fs::copy(from, to)?;
+        Ok(())
+    }
+}
+
+/// Recursively copy `from`'s subtree into `to` (created).
+fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
 }
 
 /// Spawn the action's `argv` in `exec_root` with a default-deny env (only `action.env`).
@@ -138,6 +160,26 @@ mod tests {
 
     fn path_env() -> BTreeMap<String, String> {
         BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())])
+    }
+
+    #[test]
+    fn cache_round_trips_a_directory_output() {
+        // P2.4: a DIRECTORY output (cargo_build_script OUT_DIR / extracted .crate tree) must
+        // round-trip through the cache, nested files included — not just single files.
+        let exec = tempfile::tempdir().unwrap();
+        let out = exec.path().join("out_dir");
+        std::fs::create_dir_all(out.join("sub")).unwrap();
+        std::fs::write(out.join("a.o"), b"aaa").unwrap();
+        std::fs::write(out.join("sub/b.o"), b"bbb").unwrap();
+
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let key = Digest::of(b"treekey");
+        cache.store(&key, &["out_dir".into()], exec.path()).unwrap();
+
+        let exec2 = tempfile::tempdir().unwrap();
+        assert!(cache.restore(&key, &["out_dir".into()], exec2.path()).unwrap());
+        assert_eq!(std::fs::read(exec2.path().join("out_dir/a.o")).unwrap(), b"aaa");
+        assert_eq!(std::fs::read(exec2.path().join("out_dir/sub/b.o")).unwrap(), b"bbb");
     }
 
     #[test]
