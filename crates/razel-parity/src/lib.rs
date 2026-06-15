@@ -194,6 +194,32 @@ fn parse_command_line(block: &str) -> Vec<String> {
         .collect()
 }
 
+/// Canonicalize a rustc action's argv to the **bare rustc args** — the wrapper-prefix normalizer
+/// (RazelRustParityPlan A1). Both Bazel and razel run rustc through a process wrapper, expressed
+/// differently in the action graph; this strips that indirection so the comparison is the rustc
+/// invocation itself:
+/// 1. if argv[0] is a process wrapper (Bazel's `…/process_wrapper`, razel's `razel-process-wrapper`),
+///    drop everything up to AND including the first standalone `--`;
+/// 2. then drop a leading rustc-binary token (Bazel's `…/rustc` after the `--`, or razel's bare
+///    rustc path) — razel's wrapped form already carries it as `--rustc=…` before the `--`.
+/// A no-op for non-wrapped, non-rustc argv (cc `clang`, java `javac`), so it is safe to apply to any
+/// action; callers apply it to the `Rustc` mnemonic. Idempotent. Apply to BOTH sides pre-`diff`.
+pub fn canonicalize_rust_argv(argv: &[String]) -> Vec<String> {
+    let is_wrapper = |t: &str| {
+        t == "razel-process-wrapper" || t.ends_with("process_wrapper") || t.ends_with("process-wrapper")
+    };
+    let mut start = 0;
+    if argv.first().is_some_and(|t| is_wrapper(t.as_str())) {
+        if let Some(i) = argv.iter().position(|t| t.as_str() == "--") {
+            start = i + 1;
+        }
+    }
+    if argv.get(start).is_some_and(|t| t.as_str() == "rustc" || t.as_str().ends_with("/rustc")) {
+        start += 1;
+    }
+    argv[start..].to_vec()
+}
+
 /// A discrepancy on a paired action (same `key`, differing argv/inputs). Carries the delta so a
 /// failure is self-explanatory (F8): the first differing argv index + the symmetric source-input sets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,5 +495,44 @@ mod tests {
             outputs: vec!["a.o".into()],
         }];
         assert!(diff(&razel, &golden, &[]).is_match());
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn canonicalize_strips_bazel_and_razel_wrapper_prefixes_to_the_bare_rustc_args() {
+        // Bazel: `…/process_wrapper <wrapper flags> -- …/rustc <args>` → the args.
+        let bazel = argv(&[
+            "bazel-out/<cfg>/bin/external/<repo>/util/process_wrapper/process_wrapper",
+            "--env-file", "e", "--arg-file", "f", "--",
+            "bazel-out/<cfg>/bin/external/<repo>/rust_toolchain/bin/rustc",
+            "--crate-name=x", "--edition=2021",
+        ]);
+        // razel (build-script edge): `razel-process-wrapper rustc --rustc=… … -- <args>` → the args
+        // (the rustc binary rode as `--rustc=`, before the `--`).
+        let razel_wrapped = argv(&[
+            "razel-process-wrapper", "rustc", "--rustc=/t/rustc", "--flags-file=f",
+            "--env=OUT_DIR=d", "--", "--crate-name=x", "--edition=2021",
+        ]);
+        // razel (plain crate): bare `rustc <args>` → the args.
+        let razel_bare = argv(&["/usr/bin/rustc", "--crate-name=x", "--edition=2021"]);
+        let want = argv(&["--crate-name=x", "--edition=2021"]);
+        assert_eq!(canonicalize_rust_argv(&bazel), want, "bazel wrapper stripped");
+        assert_eq!(canonicalize_rust_argv(&razel_wrapped), want, "razel wrapper stripped");
+        assert_eq!(canonicalize_rust_argv(&razel_bare), want, "bare rustc binary dropped");
+    }
+
+    #[test]
+    fn canonicalize_is_a_noop_for_non_rust_and_idempotent() {
+        // A cc compile (no wrapper, argv[0] != rustc) is untouched.
+        let cc = argv(&["external/<repo>/bin/clang", "-c", "a.cc"]);
+        assert_eq!(canonicalize_rust_argv(&cc), cc, "cc argv untouched");
+        // Idempotent on an already-canonical rustc arg list.
+        let bare = argv(&["--crate-name=x", "--edition=2021"]);
+        assert_eq!(canonicalize_rust_argv(&bare), bare);
+        let once = canonicalize_rust_argv(&argv(&["/usr/bin/rustc", "--crate-name=x"]));
+        assert_eq!(canonicalize_rust_argv(&once), once, "idempotent");
     }
 }
