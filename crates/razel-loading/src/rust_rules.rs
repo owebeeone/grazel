@@ -113,31 +113,44 @@ fn rust_attr_verdict(attr: &str) -> Option<Verdict> {
     })
 }
 
-/// The P3.2a compile-affecting argv attrs, captured at DECLARE time (resolved at analysis time —
-/// `crate_features`/`rustc_flags` may be `select()`s). `crate_name`/`crate_root` are scalars;
-/// a `select()` on either is not modeled in P3.2a (eager `unpack_str`, `None` → the default).
+/// The compile-affecting attrs we extract so far, captured at DECLARE time (list attrs resolve at
+/// analysis time — `crate_features`/`rustc_flags`/`compile_data` may be `select()`s).
+/// `crate_name`/`crate_root` are scalars; a `select()` on either is not modeled (eager
+/// `unpack_str`, `None` → the default). Grows per step: P3.2a = argv set; P3.2b = `compile_data`
+/// (→ inputs); the env family (`rustc_env`/`version`/`pkg_name`/`rustc_env_files`) lands in P3.5.
 #[derive(Default)]
-struct CompileArgv {
+struct CompileAttrs {
     crate_name: Option<String>,
     crate_root: Option<String>,
     crate_features: Vec<crate::values::StrAttrPart>,
     rustc_flags: Vec<crate::values::StrAttrPart>,
+    compile_data: Vec<crate::values::StrAttrPart>,
 }
 
 /// Apply the §5.5 verdict table to a compile rule's extra `**kwargs`: **loud-error** on any attr
-/// not in the table, and extract the [`Verdict::CompileArgv`] set. The other accepted buckets
-/// (`CompileEnv`/`Delegated`/`Ignored`) are no-ops here — they're recorded via `capture_rule` and
-/// stay argv-inert in P3.2a. `rule` names the rule for the error.
+/// not in the table, then extract the compile-affecting set (`CompileArgv`/`CompileEnv`) that's
+/// implemented so far. `Delegated`/`Ignored` are accepted no-ops — recorded via `capture_rule`,
+/// never extracted. Accept (the verdict) is decoupled from implement (extraction grows per step —
+/// P2#3); an accepted-but-not-yet-extracted attr (e.g. `rustc_env` → P3.5) is simply inert here.
+/// `rule` names the rule for the error.
 fn compile_attrs<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     rule: &str,
     name: &str,
     kw: &SmallMap<String, Value<'v>>,
-) -> anyhow::Result<CompileArgv> {
-    let mut out = CompileArgv::default();
+) -> anyhow::Result<CompileAttrs> {
+    let mut out = CompileAttrs::default();
     for (key, val) in kw.iter() {
-        match rust_attr_verdict(key) {
-            Some(Verdict::CompileArgv) => match key.as_str() {
+        let Some(verdict) = rust_attr_verdict(key) else {
+            anyhow::bail!(
+                "{rule} `{name}`: unknown attribute `{key}` — not in the rust rule attr surface \
+                 (§5.5). Add it to the verdict table with an explicit verdict (it must not be \
+                 silently accepted)."
+            );
+        };
+        match verdict {
+            // Compile-affecting → extract the ones implemented so far; the rest stay inert.
+            Verdict::CompileArgv | Verdict::CompileEnv => match key.as_str() {
                 "crate_name" => out.crate_name = val.unpack_str().map(str::to_owned),
                 "crate_root" => out.crate_root = val.unpack_str().map(str::to_owned),
                 "crate_features" => {
@@ -146,14 +159,13 @@ fn compile_attrs<'v>(
                 "rustc_flags" => {
                     out.rustc_flags = crate::values::str_attr_parts(eval, Some(*val))?
                 }
-                _ => unreachable!("CompileArgv key not extracted: {key}"),
+                "compile_data" => {
+                    out.compile_data = crate::values::str_attr_parts(eval, Some(*val))? // P3.2b → inputs
+                }
+                _ => {} // env family — accepted, extraction in P3.5 (argv/env-inert here)
             },
-            Some(_) => {} // CompileEnv / Delegated / Ignored — accepted, recorded, argv-inert here.
-            None => anyhow::bail!(
-                "{rule} `{name}`: unknown attribute `{key}` — not in the rust rule attr surface \
-                 (§5.5). Add it to the verdict table with an explicit verdict (it must not be \
-                 silently accepted)."
-            ),
+            // Accepted + recorded (via `capture_rule`); semantics in a later step or never.
+            Verdict::Delegated | Verdict::Ignored => {}
         }
     }
     Ok(out)
@@ -164,7 +176,7 @@ fn compile_attrs<'v>(
 /// applied inline by each rule, since they replace existing argv tokens.)
 fn compile_tail<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
-    compile: &CompileArgv,
+    compile: &CompileAttrs,
 ) -> anyhow::Result<Vec<String>> {
     let mut tail = Vec::new();
     for f in crate::values::resolve_str_parts(eval, &compile.crate_features)? {
@@ -172,6 +184,20 @@ fn compile_tail<'v>(
     }
     tail.extend(crate::values::resolve_str_parts(eval, &compile.rustc_flags)?);
     Ok(tail)
+}
+
+/// P3.2b: resolve `compile_data` to the rustc action's extra INPUTS at analysis time. Each entry
+/// resolves through [`resolve_dep`] — a source file → its path, a target (e.g. a generated file or
+/// a build-script output) → its outputs — so data files are staged in the sandbox at compile time.
+fn data_inputs<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    compile: &CompileAttrs,
+) -> anyhow::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for entry in crate::values::resolve_str_parts(eval, &compile.compile_data)? {
+        out.extend(resolve_dep(eval, &entry)?.libs);
+    }
+    Ok(out)
 }
 
 #[starlark::starlark_module]
@@ -209,6 +235,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
         let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
         let tail = compile_tail(eval, &compile)?;
+        let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
 
         let rlib = qualify(sess, &format!("lib{name}.rlib"));
@@ -229,6 +256,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
+        inputs.extend(data);
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_names,
@@ -279,6 +307,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
         let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
         let tail = compile_tail(eval, &compile)?;
+        let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
 
         let out = qualify(sess, &name);
@@ -297,6 +326,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
+        inputs.extend(data);
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_names,
@@ -530,14 +560,15 @@ mod tests {
         std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
         std::fs::write(pkg.join("lib.rs"), "pub fn x() {}\n").unwrap();
         std::fs::write(pkg.join("root.rs"), "pub fn y() {}\n").unwrap();
+        std::fs::write(pkg.join("table.bin"), "data\n").unwrap();
         std::fs::write(pkg.join("BUILD"), build).unwrap();
         let r = analyze_workspace_with(&tmp, "//app:t", GlobalFlags::default());
         let _ = std::fs::remove_dir_all(&tmp);
         r
     }
 
-    /// The Rustc argv of `//app:t`.
-    fn argv_of(targets: &[AnalyzedTarget]) -> Vec<String> {
+    /// The Rustc action of `//app:t`.
+    fn action_of(targets: &[AnalyzedTarget]) -> &crate::state::AnalyzedAction {
         targets
             .iter()
             .find(|t| t.name == "//app:t")
@@ -545,8 +576,12 @@ mod tests {
             .actions
             .first()
             .expect("a Rustc action")
-            .argv
-            .clone()
+    }
+    fn argv_of(targets: &[AnalyzedTarget]) -> Vec<String> {
+        action_of(targets).argv.clone()
+    }
+    fn inputs_of(targets: &[AnalyzedTarget]) -> Vec<String> {
+        action_of(targets).inputs.clone()
     }
 
     #[test]
@@ -583,6 +618,26 @@ mod tests {
         let base_argv = argv_of(&analyze("inert_base", &base).unwrap());
         let extra_argv = argv_of(&analyze("inert_extra", &with_extra).unwrap());
         assert_eq!(base_argv, extra_argv, "delegated/ignored attrs must be argv-inert in P3.2a");
+    }
+
+    #[test]
+    fn p32b_compile_data_is_a_compile_input_not_argv() {
+        let build = format!(
+            "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], compile_data = [\"table.bin\"])\n"
+        );
+        let targets = analyze("compile_data", &build).unwrap();
+        // compile_data → a compile-time INPUT (staged in the sandbox).
+        assert!(
+            inputs_of(&targets).contains(&"app/table.bin".to_string()),
+            "compile_data is a compile input: {:?}",
+            inputs_of(&targets)
+        );
+        // …and it shapes inputs only — never an argv token (not a flag, not the crate root).
+        assert!(
+            !argv_of(&targets).contains(&"app/table.bin".to_string()),
+            "compile_data is not an argv token: {:?}",
+            argv_of(&targets)
+        );
     }
 
     #[test]
