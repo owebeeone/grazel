@@ -184,7 +184,12 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   (`SyncCell<BTreeSet>` — chosen over an `AnalyzedTarget` field: 49 literals across 15 files).
 - `9f66a43` P3.4b — `analyze_workspace_with` loud-errors when an EXPLICIT (named top) or a
   transitive DEP target is incompatible (§5.4). Provably inert otherwise (the set is empty unless
-  `target_compatible_with` is unsatisfiable). P3.4 split a/b/c.
+  `target_compatible_with` is unsatisfiable). P3.4 split a/b/c (c deferred → P4.4).
+- `a863cb9` P3.5a — `cargo_toml_env_vars` emits the `CARGO_PKG_*` env-file (§6.2): reads the
+  crate's `Cargo.toml` `[package]` (minimal scan, no `toml` dep; `pkg_file_abs` resolves
+  workspace/external like `resolve_dep`) → a `FileWrite` action, content baked at analysis. P3.5
+  split a/b: the env PRECEDENCE + consumption (literal `rustc_env`/`version`/`pkg_name` override;
+  `rustc_env_files` last-wins) rides the rustc wrapper (P3.9, `--env-file=`) — P3.5b.
 
 **P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
 WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
@@ -217,7 +222,11 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.4c (wildcard-skip — the seam decision above) → P3.5
+**Remaining for `razelv3-rust/p3`:** P3.6 (`cargo_build_script` compile → host `rust_binary`) →
+P3.7 (build-script flags-file parser) → P3.8 (`CargoBuildScriptRun` action) → P3.9 (rustc wrapper
+binary; **P3.5b** env precedence + `--env-file=` consumption rides here) → P3.10 (wire the
+build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`).
+Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
 build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`).
