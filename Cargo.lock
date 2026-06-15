@@ -1381,6 +1381,14 @@ name = "razel-parity"
 version = "0.1.0"
 
 [[package]]
+name = "razel-process-wrapper"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "razel-query"
 version = "0.1.0"
 dependencies = [

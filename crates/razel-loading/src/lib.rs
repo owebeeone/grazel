@@ -39,7 +39,6 @@ mod values; // C3a: the provider-schema registry (source of truth for schemas/fo
 mod fetch; // Fetch R1: WORKSPACE spec extraction (RazelFetchPlan §3)
 mod js_rules; // S3a: the razel-native js rulepack (@razel_js// — gryth's grammar)
 mod py_rules;
-mod build_script; // crate-universe P3.7 (§6.1): the build-script stdout -> flags-file parser
 mod rust_rules;
 mod sh_rules;
 mod workspace; // S1 (V3sh1): E-mode boundary walk + BUILD.razel XOR + boundary guard

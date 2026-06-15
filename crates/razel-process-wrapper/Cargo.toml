@@ -1,0 +1,16 @@
+[package]
+name = "razel-process-wrapper"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# crate-universe P3.8 (§5.2): the exec-time process wrapper (rules_rust `process_wrapper`
+# analogue). Subcommands: `build-script` (P3.8 — run a cargo build script, capture stdout → the
+# §6.1 flags file) and `rustc` (P3.9 — apply a flags file to a rustc invocation). Deliberately
+# LIGHT (serde only, no starlark) so it stays a thin per-action exec-time binary.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

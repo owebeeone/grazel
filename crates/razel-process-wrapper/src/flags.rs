@@ -1,41 +1,38 @@
-//! crate-universe P3.7 (§6.1): the build-script **flags-file parser** — the boundary between the
-//! build-script run action (§5.2 step 2) and the rustc wrapper (step 3). Parses a build script's
-//! stdout into emission-ordered, duplicate-preserving directive records; the recognized `rustc-*`
-//! directives serialize to the JSONL flags file (`{"kind","args"}` per line) the wrapper (P3.9)
-//! maps to rustc flags. Pure + golden-tested, no I/O.
+//! crate-universe P3.7 (§6.1): the build-script **flags-file schema + parser** — the boundary
+//! between the build-script run subcommand (P3.8, the WRITER) and the rustc subcommand (P3.9, the
+//! READER). Co-locating both here (per the P3.8 seam decision) keeps ONE definition of the
+//! flags-file contract. Parses a build script's stdout into emission-ordered, duplicate-preserving
+//! directive records; the recognized `rustc-*` directives serialize to the JSONL flags file
+//! (`{"kind","args"}` per line). Pure + golden-tested, no I/O.
 //!
 //! Grammar (§6.1): one directive per line, `cargo:KEY=VALUE` (pre-1.77) OR `cargo::KEY=VALUE`
 //! (1.77+). Non-`cargo:` lines are ordinary script output and ignored.
-//!
-//! NOTE: the parser SURFACE (records + side channels + JSONL) is consumed by the build-script run
-//! action in P3.8 — until then nothing in non-test code calls it, hence the scoped allow.
-#![allow(dead_code)] // P3.7 parser surface; the run action (P3.8) is its consumer.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One flags-file line: a recognized `rustc-*` directive (emission order + duplicates preserved).
-/// `args` is already tokenized — notably `rustc-flags` is split HERE (§6.1), so the wrapper never
-/// re-tokenizes or shell-quotes. Serializes to one JSON object per line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct FlagsRecord {
+/// `args` is already tokenized — notably `rustc-flags` is split HERE (§6.1), so the rustc reader
+/// never re-tokenizes or shell-quotes. (De)serializes to one JSON object per line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlagsRecord {
     pub kind: String,
     pub args: Vec<String>,
 }
 
 /// A recorded `rerun-if-*` directive (§5.2 slice-1: recorded, NOT yet narrowing the watch set; the
-/// run action P3.8 folds `rerun-if-env-changed` keys into its env allowlist / cache key).
+/// run action folds `rerun-if-env-changed` keys into its env allowlist / cache key).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Rerun {
+pub enum Rerun {
     Changed(String),    // rerun-if-changed=<path>
     EnvChanged(String), // rerun-if-env-changed=<var>
 }
 
 /// The structured result of parsing a build script's stdout (§6.1). `flags` is the flags file; the
-/// rest are side channels the run action (P3.8) consumes: `warnings`→stderr, `error`→fail the run,
+/// rest are side channels the run subcommand consumes: `warnings`→stderr, `error`→fail the run,
 /// `dep_metadata`→republished as `DEP_<LINKS>_<K>`, `rerun`→cache key, `deviations`→one parity-log
 /// line each.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct BuildScriptParse {
+pub struct BuildScriptParse {
     pub flags: Vec<FlagsRecord>,
     pub dep_metadata: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -58,7 +55,7 @@ const SINGLE_ARG_FLAGS: &[&str] = &[
 /// Parse build-script stdout → [`BuildScriptParse`] (§6.1). Pure; emission order + duplicates
 /// preserved. For a RESERVED key, single- vs double-colon is irrelevant (both → the directive); for
 /// a non-reserved key, double-colon → a recorded deviation, single-colon → `links` metadata.
-pub(crate) fn parse_build_script_output(stdout: &str) -> BuildScriptParse {
+pub fn parse_build_script_output(stdout: &str) -> BuildScriptParse {
     let mut out = BuildScriptParse::default();
     for raw in stdout.lines() {
         let line = raw.trim_end(); // tolerate trailing CRLF / whitespace
@@ -83,7 +80,7 @@ pub(crate) fn parse_build_script_output(stdout: &str) -> BuildScriptParse {
         if SINGLE_ARG_FLAGS.contains(&key) {
             out.flags.push(FlagsRecord { kind: key.to_string(), args: vec![value.to_string()] });
         } else if key == "rustc-flags" {
-            // §6.1: tokenize HERE (whitespace, no shell quoting) so the wrapper never re-parses.
+            // §6.1: tokenize HERE (whitespace, no shell quoting) so the reader never re-parses.
             out.flags.push(FlagsRecord {
                 kind: key.to_string(),
                 args: value.split_whitespace().map(str::to_string).collect(),
@@ -91,7 +88,7 @@ pub(crate) fn parse_build_script_output(stdout: &str) -> BuildScriptParse {
         } else if key == "warning" {
             out.warnings.push(value.to_string());
         } else if key == "error" {
-            // First error wins; the run action fails the moment any `error=` is present (§6.1).
+            // First error wins; the run fails the moment any `error=` is present (§6.1).
             out.error.get_or_insert_with(|| value.to_string());
         } else if key == "rerun-if-changed" {
             out.rerun.push(Rerun::Changed(value.to_string()));
@@ -118,7 +115,7 @@ pub(crate) fn parse_build_script_output(stdout: &str) -> BuildScriptParse {
 
 /// Serialize the flags records to the JSONL flags file (§6.1): one `{"kind","args"}` object per
 /// line, in emission order. JSON escaping handles values containing tabs/spaces/`=`/quotes.
-pub(crate) fn flags_file_jsonl(flags: &[FlagsRecord]) -> String {
+pub fn flags_file_jsonl(flags: &[FlagsRecord]) -> String {
     let mut s = String::new();
     for rec in flags {
         // serde_json never fails for this all-string shape; stay non-panicking defensively.
@@ -126,6 +123,22 @@ pub(crate) fn flags_file_jsonl(flags: &[FlagsRecord]) -> String {
         s.push('\n');
     }
     s
+}
+
+/// Read a JSONL flags file back into records (the rustc subcommand's reader, P3.9). Blank lines are
+/// skipped; a malformed line is an error (the contract is machine-written, never hand-edited).
+pub fn read_flags_jsonl(jsonl: &str) -> Result<Vec<FlagsRecord>, String> {
+    let mut out = Vec::new();
+    for (n, line) in jsonl.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        out.push(
+            serde_json::from_str::<FlagsRecord>(line)
+                .map_err(|e| format!("flags file line {}: {e}", n + 1))?,
+        );
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -163,10 +176,10 @@ cargo::rustc-cfg=feature=\"avx\"\n"; // a DUPLICATE kind — must be preserved
         // Single-arg directives keep the whole value as ONE arg (no tokenization)…
         assert_eq!(p.flags[0].args, ["feature=\"simd\""]);
         assert_eq!(p.flags[1].args, ["BUILD_TS=123"], "rustc-env value (KEY=val) stays one arg");
-        // …rustc-flags is tokenized at parse time (whitespace) so the wrapper never re-parses.
+        // …rustc-flags is tokenized at parse time (whitespace) so the reader never re-parses.
         let rf = p.flags.iter().find(|r| r.kind == "rustc-flags").unwrap();
         assert_eq!(rf.args, ["-l", "dylib=foo", "-L", "/bar"]);
-        // JSONL: one object per line, ≥1 line per kind, JSON-escaped values.
+        // JSONL: one object per line, ≥1 line per kind, JSON-escaped values; round-trips.
         let jsonl = flags_file_jsonl(&p.flags);
         assert_eq!(jsonl.lines().count(), 8, "one JSON line per record: {jsonl}");
         assert_eq!(
@@ -174,6 +187,7 @@ cargo::rustc-cfg=feature=\"avx\"\n"; // a DUPLICATE kind — must be preserved
             r#"{"kind":"rustc-cfg","args":["feature=\"simd\""]}"#,
             "JSON object shape + escaping: {jsonl}"
         );
+        assert_eq!(read_flags_jsonl(&jsonl).unwrap(), p.flags, "JSONL round-trips");
     }
 
     #[test]
