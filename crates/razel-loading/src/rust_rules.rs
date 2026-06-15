@@ -53,6 +53,45 @@ fn process_wrapper() -> String {
     std::env::var("RAZEL_PROCESS_WRAPPER").unwrap_or_else(|_| "razel-process-wrapper".into())
 }
 
+/// P3.8d (§5.2): the `CARGO_CFG_*` build-script env cargo derives from the target, synthesized from
+/// the configured (host==target) triple `<arch>-<vendor>-<sys>[-<env>]`. Covers the cfgs blake3's
+/// `build.rs` keys SIMD off (`TARGET_ARCH`/`OS`/`ENV`/`FEATURE`) plus the standard set.
+/// `TARGET_FEATURE` is a slice-1 per-arch BASELINE (the always-on features) — refined against the
+/// P3.12 execution-parity golden, where the exact feature set is observable.
+fn cargo_cfg_env(triple: &str) -> Vec<(String, String)> {
+    let mut p = triple.split('-');
+    let arch = p.next().unwrap_or("");
+    let vendor = p.next().unwrap_or(""); // "apple" | "unknown"
+    let sys = p.next().unwrap_or(""); // "darwin" | "linux" | …
+    let abi = p.next().unwrap_or(""); // "gnu" | "" …
+    let (os, env) = match sys {
+        "darwin" => ("macos", ""),
+        "linux" => ("linux", if abi.is_empty() { "gnu" } else { abi }),
+        other => (other, abi),
+    };
+    // The always-on features rustc reports for the base target (no `-C target-feature` tuning).
+    let feature = match arch {
+        "x86_64" => "fxsr,sse,sse2",
+        "aarch64" => "neon",
+        _ => "",
+    };
+    [
+        ("CARGO_CFG_TARGET_ARCH", arch),
+        ("CARGO_CFG_TARGET_OS", os),
+        ("CARGO_CFG_TARGET_FAMILY", "unix"),
+        ("CARGO_CFG_TARGET_VENDOR", vendor),
+        ("CARGO_CFG_TARGET_ENV", env),
+        ("CARGO_CFG_TARGET_POINTER_WIDTH", "64"),
+        ("CARGO_CFG_TARGET_ENDIAN", "little"),
+        ("CARGO_CFG_TARGET_FEATURE", feature),
+        ("CARGO_CFG_UNIX", ""), // a boolean cfg → present with an empty value (cargo's form)
+        ("CARGO_CFG_PANIC", "unwind"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
 /// The crate name a dependent uses for `--extern` / `use`: the target segment of a
 /// canonical label (`//lib:greet` → `greet`, bare `greet` → `greet`).
 fn crate_name_of(canon: &str) -> String {
@@ -782,6 +821,11 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 run_argv.push("--env".into());
                 run_argv.push(format!("CARGO_FEATURE_{var}=1"));
             }
+            // P3.8d: the `CARGO_CFG_*` set cargo derives from the (host==target) triple.
+            for (k, v) in cargo_cfg_env(triple) {
+                run_argv.push("--env".into());
+                run_argv.push(format!("{k}={v}"));
+            }
             if let Some(v) = &compile.version {
                 run_argv.push("--env".into());
                 run_argv.push(format!("CARGO_PKG_VERSION={v}"));
@@ -935,6 +979,7 @@ pub(crate) fn module() -> Result<FrozenModule, String> {
 mod tests {
     //! P3.2a §5.5 verdict-table gate. Analysis-only (no rustc): asserts on the captured Rustc
     //! argv, never executes — so it runs without a rust toolchain.
+    use super::cargo_cfg_env;
     use crate::rules::analyze_workspace_with;
     use crate::state::{AnalyzedTarget, GlobalFlags};
 
@@ -1286,5 +1331,45 @@ mod tests {
         // wrapper applies files first, then --env), so the literal wins.
         let first_env = a.iter().position(|x| x == "--env").unwrap();
         assert!(ef < first_env, "env-file comes before the literal --env overrides: {a:?}");
+    }
+
+    #[test]
+    fn p38d_cargo_cfg_env_derives_from_the_triple() {
+        let linux: std::collections::BTreeMap<String, String> =
+            cargo_cfg_env("x86_64-unknown-linux-gnu").into_iter().collect();
+        assert_eq!(linux["CARGO_CFG_TARGET_ARCH"], "x86_64");
+        assert_eq!(linux["CARGO_CFG_TARGET_OS"], "linux");
+        assert_eq!(linux["CARGO_CFG_TARGET_VENDOR"], "unknown");
+        assert_eq!(linux["CARGO_CFG_TARGET_ENV"], "gnu");
+        assert_eq!(linux["CARGO_CFG_TARGET_FEATURE"], "fxsr,sse,sse2", "x86_64 baseline features");
+        assert_eq!(linux["CARGO_CFG_UNIX"], "", "boolean cfg → present, empty value");
+
+        let mac: std::collections::BTreeMap<String, String> =
+            cargo_cfg_env("aarch64-apple-darwin").into_iter().collect();
+        assert_eq!(mac["CARGO_CFG_TARGET_ARCH"], "aarch64");
+        assert_eq!(mac["CARGO_CFG_TARGET_OS"], "macos", "darwin → macos");
+        assert_eq!(mac["CARGO_CFG_TARGET_VENDOR"], "apple");
+        assert_eq!(mac["CARGO_CFG_TARGET_ENV"], "", "darwin has no target_env");
+        assert_eq!(mac["CARGO_CFG_TARGET_FEATURE"], "neon", "aarch64 baseline feature");
+    }
+
+    #[test]
+    fn p38d_run_action_carries_the_cargo_cfg_env() {
+        let build = format!(
+            "{BS_LOAD}cargo_build_script(name = \"t\", srcs = [\"root.rs\"])\n"
+        );
+        let targets = analyze("p38d_cfg", &build).unwrap();
+        let run = &targets.iter().find(|t| t.name == "//app:t").unwrap().actions[1];
+        let env_vals: Vec<String> =
+            run.argv.windows(2).filter(|w| w[0] == "--env").map(|w| w[1].clone()).collect();
+        // The run action emits the CARGO_CFG_* set for the host (host==target).
+        let triple = crate::state::host_triple();
+        let want: std::collections::BTreeMap<String, String> = cargo_cfg_env(triple).into_iter().collect();
+        assert!(
+            env_vals.contains(&format!("CARGO_CFG_TARGET_ARCH={}", want["CARGO_CFG_TARGET_ARCH"])),
+            "CARGO_CFG_TARGET_ARCH for the host triple: {env_vals:?}"
+        );
+        assert!(env_vals.iter().any(|e| e.starts_with("CARGO_CFG_TARGET_OS=")), "{env_vals:?}");
+        assert!(env_vals.iter().any(|e| e.starts_with("CARGO_CFG_TARGET_FEATURE=")), "{env_vals:?}");
     }
 }
