@@ -161,6 +161,7 @@ fn extern_args(
 ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>, Vec<crate::deps::BuildScriptRunInfo>)> {
     let (mut args, mut inputs, mut names, mut build_scripts) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut dep_dirs: Vec<String> = Vec::new(); // unique rlib dirs → -Ldependency (A3)
     for d in &deps {
         let dep = resolve_dep(eval, d)?;
         if let Some(bs) = dep.build_script {
@@ -169,13 +170,21 @@ fn extern_args(
             continue;
         }
         let crate_name = crate_name_of(&dep.canon);
-        // A rust_library exports exactly one rlib in default_info → dep.libs.
+        // A rust_library exports exactly one rlib in default_info → dep.libs. rules_rust's faithful
+        // form is `--extern=<name>=<rlib>` (joined) + a `-Ldependency=<dir>` per rlib directory (A3).
         for rlib in &dep.libs {
-            args.push("--extern".into());
-            args.push(format!("{crate_name}={rlib}"));
+            args.push(format!("--extern={crate_name}={rlib}"));
             inputs.push(rlib.clone());
+            if let Some((dir, _)) = rlib.rsplit_once('/')
+                && !dep_dirs.iter().any(|x| x == dir)
+            {
+                dep_dirs.push(dir.to_string());
+            }
         }
         names.push(dep.canon);
+    }
+    for dir in dep_dirs {
+        args.push(format!("-Ldependency={dir}")); // after the --externs, rules_rust's order
     }
     Ok((args, inputs, names, build_scripts))
 }
@@ -1322,10 +1331,10 @@ mod tests {
         assert!(argv.first().is_some_and(|a| a.ends_with("rustc")), "rustc compile: {argv:?}");
         assert!(argv.contains(&"--crate-type=bin".to_string()), "bin crate-type: {argv:?}");
         assert!(argv.contains(&"--emit=link=app/t_".to_string()), "host build-script bin output: {argv:?}");
-        // `deps` → `--extern` (build-deps link the host bin), NOT run inputs; the dep rlib is hashed.
+        // `deps` → `--extern=` (joined, build-deps link the host bin), NOT run inputs; rlib hashed.
         assert!(
-            argv.windows(2).any(|w| w[0] == "--extern" && w[1].starts_with("dep=app/libdep-")),
-            "build-dep is an --extern (hashed rlib): {argv:?}"
+            argv.iter().any(|a| a.starts_with("--extern=dep=app/libdep-")),
+            "build-dep is an --extern (joined, hashed rlib): {argv:?}"
         );
         // `crate_root` picks root.rs as the positional; default crate_name = the target name.
         assert!(argv.contains(&"app/root.rs".to_string()), "crate_root positional: {argv:?}");

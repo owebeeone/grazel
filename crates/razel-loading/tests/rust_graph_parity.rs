@@ -54,56 +54,71 @@ fn rustc_inputs(inputs: &[String]) -> Vec<String> {
     v
 }
 
-#[test]
-fn rust_build_script_graph_matches_the_golden() {
+/// Analyze a rust corpus `target` (parity posture: `bazel_build_compat` → outputs in the
+/// `bazel-out/<cfg>/bin/` tree so action keys pair with `bazel aquery`'s paths), render its action
+/// graph normalized + Rustc-canonicalized (argv + inputs), and diff it against the captured golden
+/// (documented deviations only). Both sides go through `rustc_argv`/`rustc_inputs`.
+fn assert_rust_parity(target: &str, golden_text: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../parity");
-    // Parity posture (A2): drive razel as Bazel does — outputs in the `bazel-out/<cfg>/bin/` tree
-    // (so the action keys can pair with the golden, which is `bazel aquery`'s bazel-out paths).
     let flags = GlobalFlags { bazel_build_compat: true, ..Default::default() };
-    // Analyze the crate; its build-script dep (`:build_script_build`) is pulled in via the §4.3 edge,
-    // so the action set is `withbs`'s rustc (wrapper-routed) + the build script's compile + run.
-    let targets = analyze_workspace_with(&root, "//corpus/rust/build_script:withbs", flags)
-        .expect("razel analyzes the build_script corpus case");
-
-    // Render → normalize (cfg/repo/hash/sdk tokens) → canonicalize the Rustc argv (strip the
-    // process-wrapper prefix so the comparison is the rustc invocation itself, A1).
+    let targets = analyze_workspace_with(&root, target, flags)
+        .unwrap_or_else(|e| panic!("razel analyzes {target}: {e}"));
     let n = |s: &str| razel_parity::normalize(s).trim_end().to_string();
+    let render_inputs = |raw: Vec<String>, rustc: bool| {
+        let mut v = if rustc { rustc_inputs(&raw) } else { raw };
+        v.sort();
+        v
+    };
     let razel: Vec<razel_parity::Action> = targets
         .iter()
         .flat_map(|t| t.actions.iter())
         .map(|a| {
             let rustc = a.mnemonic == "Rustc";
-            let raw_inputs: Vec<String> = a.inputs.iter().map(|s| n(s)).collect();
-            let mut inputs = if rustc { rustc_inputs(&raw_inputs) } else { raw_inputs };
-            inputs.sort();
             let mut outputs: Vec<String> = a.outputs.iter().map(|s| n(s)).collect();
             outputs.sort();
             let argv: Vec<String> = a.argv.iter().map(|s| n(s)).collect();
-            let argv = if rustc { rustc_argv(&argv) } else { argv };
-            razel_parity::Action { mnemonic: a.mnemonic.clone(), argv, inputs, outputs }
+            razel_parity::Action {
+                mnemonic: a.mnemonic.clone(),
+                argv: if rustc { rustc_argv(&argv) } else { argv },
+                inputs: render_inputs(a.inputs.iter().map(|s| n(s)).collect(), rustc),
+                outputs,
+            }
         })
         .collect();
-
-    // The golden, with the SAME Rustc canonicalization on its side.
-    let golden: Vec<razel_parity::Action> = razel_parity::parse_golden(include_str!(
-        "../../../parity/corpus/rust/build_script/golden.txt"
-    ))
-    .into_iter()
-    .map(|a| {
-        let rustc = a.mnemonic == "Rustc";
-        razel_parity::Action {
-            argv: if rustc { rustc_argv(&a.argv) } else { a.argv.clone() },
-            inputs: if rustc { rustc_inputs(&a.inputs) } else { a.inputs.clone() },
-            mnemonic: a.mnemonic,
-            outputs: a.outputs,
-        }
-    })
-    .collect();
-
+    let golden: Vec<razel_parity::Action> = razel_parity::parse_golden(golden_text)
+        .into_iter()
+        .map(|a| {
+            let rustc = a.mnemonic == "Rustc";
+            razel_parity::Action {
+                argv: if rustc { rustc_argv(&a.argv) } else { a.argv.clone() },
+                inputs: if rustc { rustc_inputs(&a.inputs) } else { a.inputs.clone() },
+                mnemonic: a.mnemonic,
+                outputs: a.outputs,
+            }
+        })
+        .collect();
     let report = razel_parity::diff(&razel, &golden, OMIT);
     assert!(
         report.is_match(),
-        "RazelRustParityPlan: razel's rust graph must match the Bazel golden (documented deviations \
-         only). RED until A6 — the diff below is the work-list:\n{report:#?}"
+        "{target}: razel's rust graph must match the Bazel golden (documented deviations only):\n{report:#?}"
+    );
+}
+
+#[test]
+fn rust_build_script_graph_matches_the_golden() {
+    // The §4.3 build-script edge: the crate's rustc (wrapper-routed) + the build-script bin compile.
+    assert_rust_parity(
+        "//corpus/rust/build_script:withbs",
+        include_str!("../../../parity/corpus/rust/build_script/golden.txt"),
+    );
+}
+
+#[test]
+fn rust_transitive_graph_matches_the_golden() {
+    // The baseline (A6): a transitive rust_library chain (util → base) — exercises `--extern` (the
+    // hashed dep rlib) + `-Ldependency`, the path the build-script case doesn't cover.
+    assert_rust_parity(
+        "//corpus/rust/transitive:util",
+        include_str!("../../../parity/corpus/rust/transitive/golden.txt"),
     );
 }
