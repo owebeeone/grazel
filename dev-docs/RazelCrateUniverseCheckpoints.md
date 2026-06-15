@@ -190,6 +190,17 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   workspace/external like `resolve_dep`) → a `FileWrite` action, content baked at analysis. P3.5
   split a/b: the env PRECEDENCE + consumption (literal `rustc_env`/`version`/`pkg_name` override;
   `rustc_env_files` last-wins) rides the rustc wrapper (P3.9, `--env-file=`) — P3.5b.
+- `4b3bd0d` P3.6 — `cargo_build_script` **compile (action 1)** (§5.2): the native (was a P3.1
+  stub) now emits the build-script compile — `crate_root`/`srcs[0]` → a HOST `rust_binary`
+  (`<name>_`, the §12 `:_bs_` bin) via `rustc`, linking `deps` as `--extern` (build-deps, NOT run
+  inputs). Its OWN attr surface (distinct from §5.5's `rust_library`): `BsVerdict` table +
+  `bs_compile_attrs` split attrs by phase — compile (`crate_name`/`crate_root`/`crate_features`/
+  `rustc_flags`) shapes the argv now; run-phase (`version`/`pkg_name`/`data`/`links`/… → P3.8) and
+  deferred-compile (`proc_macro_deps`/`rustc_env`/`aliases`) attrs are accepted-but-argv-inert;
+  unknown → loud error. `default_info` stays **EMPTY** (§4.3: a build-script target exposes no
+  libs — the bin is intra-target, consumed by the run action P3.8; so `deps=[":build_script_build"]`
+  still yields no `--extern`, keeping `p31b` green). Tests `p36_build_script_compiles_to_a_host_bin_with_externs`
+  + `p36_build_script_unknown_attr_is_a_loud_error`. NEXT: P3.7 (flags-file parser).
 
 **P3.4c — OPEN SEAM DECISION (wildcard-skip; razel-loading → razel-cli).** §5.4's last rung: a
 WILDCARD build (`//...`) must SKIP incompatible targets, not error. The wildcard loop is
@@ -222,8 +233,8 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.6 (`cargo_build_script` compile → host `rust_binary`) →
-P3.7 (build-script flags-file parser) → P3.8 (`CargoBuildScriptRun` action) → P3.9 (rustc wrapper
+**Remaining for `razelv3-rust/p3`:** P3.7 (build-script flags-file parser) → P3.8
+(`CargoBuildScriptRun` action) → P3.9 (rustc wrapper
 binary; **P3.5b** env precedence + `--env-file=` consumption rides here) → P3.10 (wire the
 build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel aquery`/`bazel build`).
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
@@ -235,9 +246,13 @@ build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel a
 **not** `--workspace` (touching `razel-loading` rebuilds ~24 downstream crates, ~7m; bare
 `--workspace` adds doc-tests, ~16m). Loading-layer step = `cargo test -p razel-loading --lib` +
 the 2 carve-out sentinels (`--test graph_parity --test java_graph_parity`), ~27s — skips the
-network test (`fetch_extract`) + ~28 other integration binaries. Full `-p razel-loading --tests`
-before a non-trivial commit; `--workspace --lib --tests` only at a phase tag. (`xtask gates` +
-`xtask perfgate` unchanged; `tfload` never a gate.)
+network test (`fetch_extract`) + ~28 other integration binaries. **`--lib --tests` is too slow even
+as a pre-commit tier** (Gianni, 2026-06-15, P3.6): linking ~30 integration binaries takes minutes,
+and for a step whose surface is fully covered by lib tests (e.g. a new `rust_rules` native exercised
+by `p3*` lib tests) it adds no signal. Commit on the tight tier when lib tests cover the change;
+reserve `-p razel-loading --tests` for steps that actually touch the integration-test surface;
+`--workspace --lib --tests` only at a phase tag. (`xtask gates` + `xtask perfgate` unchanged;
+`tfload` never a gate.)
 (condition source + `target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run,
 flags parser, rustc wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs
 live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask.
