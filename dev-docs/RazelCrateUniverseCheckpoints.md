@@ -142,15 +142,32 @@ like Phases 0–2; each lands as its own green commit. The integration tag `raze
 earned at the milestone-1 DoD (`razel build @crates//:blake3` → rlib; **aq**+**xp** green). Rolling
 continues per-step; a stop fires only on a *real* rule, named explicitly.
 
+P3.1 itself decomposes into a/b/c/d/e (load surface → selects → canonical mapping → alias-follow →
+canonicalization wiring) — finer than the plan's single P3.1, each a green commit.
+
 **Commits so far (`p2`..):**
 - `993d7a6` P3.1a — `cargo:defs.bzl` load surface (`cargo_build_script`/`cargo_toml_env_vars`
   natives; STUB bodies — compile/run land in P3.6/P3.7)
-- (this) P3.1b — `crate_universe/private:selects.bzl` `selects` namespace (faithful
+- `1b53f6c` P3.1b — `crate_universe/private:selects.bzl` `selects` namespace (faithful
   `with_or`/`with_or_dict`; `config_setting_group` loud-deferred). blake3's full three-load surface
-  now resolves and the per-crate package loads (bare `select()` captured, not resolved at load).
+  resolves and the per-crate package loads (bare `select()` captured, not resolved at load).
+- `81a9478` P3.1c — apparent→canonical `@crates` repo mapping (`CrateLock::canonical_repo`,
+  accept-both-forms §11.3); prefix derived from the extension key; verified vs the real lock.
+- `7bb2e32` P3.1d — build follows an alias top-label to its terminal `actual`
+  (`analyze_workspace_with`); `@crates//:blake3` → `@crates__blake3-1.8.2//:blake3` (apparent).
+- (infra, `6f38a03`) tfload uses 6 threads; **not** a gate — `perfgate` (synthetic, ≤20s) is the
+  per-step perf gate.
 
-**Remaining for `razelv3-rust/p3`:** P3.1c (root `@crates//:defs.bzl` load + `@crates//:X` →
-canonical alias resolution) → P3.2 (rust_library attr surface) → P3.3/P3.4 (condition source +
-`target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run, flags parser, rustc
-wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs live `bazel
-aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask as in Phases 1–2.
+**P3.1e — OPEN SEAM DECISION (canonical-identity representation).** The design's canonical identity
+is the **double-`@`** form (`@@rules_rust++crate+crates//:x`, §11.3), but `canon_label` keeps the
+repo as-written and `load_package` strips a single `@` (`@@` is a separate main-repo path). So
+making `@crates` identities canonical is either (A) `@@`-everywhere — teach the central label
+parsers the `@@` canonical form (faithful now; central-path regression risk), or (B) single-`@`
+canonical repo name internally (`@rules_rust++crate+crates//:x`, resolves the real canonical-named
+external dir with the existing parsers) + emit `@@` only in the P3.11 parity normalizer (lower-risk;
+defers `@@` to where parity lives). Both reach the right dir. Pending Gianni's steer before wiring.
+
+**Remaining for `razelv3-rust/p3`:** P3.1e (above) → P3.2 (rust_library attr surface) → P3.3/P3.4
+(condition source + `target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run,
+flags parser, rustc wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs
+live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask.
