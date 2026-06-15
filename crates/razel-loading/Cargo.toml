@@ -17,6 +17,7 @@ razel-cc-toolchain = { version = "0.1.0", path = "../razel-cc-toolchain" }
 razel-rulepack = { version = "0.1.0", path = "../razel-rulepack" }
 serde = { version = "1", features = ["derive"] } # crate-universe P2.1: MODULE.bazel.lock reader
 serde_json = "1"
+sha2 = "0.10" # crate-universe P2.3/P2.6: sha256 of the lock's FILE inputs + .crate downloads
 starlark = "0.14.2"
 
 [dev-dependencies]
