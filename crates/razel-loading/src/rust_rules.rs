@@ -75,6 +75,105 @@ fn extern_args(
     Ok((args, inputs, names))
 }
 
+/// §5.5 verdict for an attribute of the rust compile rules (`rust_library`/`rust_binary`): the
+/// single source of truth for **accept vs loud-error**, kept separate from "implement semantics"
+/// (P2#3). An attr absent from [`rust_attr_verdict`] is a loud error — "accept" is a deliberate,
+/// enumerated choice, never a silent fall-through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    /// Compile-affecting and shapes the `rustc` argv **now** (P3.2a).
+    CompileArgv,
+    /// Compile-affecting via env vars / extra inputs / extern-aliasing — accepted + captured now,
+    /// its argv/action effect lands in **P3.2b** (argv-inert here, by design).
+    CompileEnv,
+    /// Accepted + captured into the `LoadedTarget`; semantics DELEGATED to a later named step
+    /// (`proc_macro_deps`→P4.1, `target_compatible_with`→P3.4, `link_deps` `DEP_*`→P4.5).
+    /// Argv-inert until then — a regression test pins that so it can't silently stay a no-op.
+    Delegated,
+    /// Recorded parity deviation: accepted, never affects the action graph (a Bazel-only concern).
+    Ignored,
+}
+
+/// §5.5 verdict table. `name`/`srcs`/`deps`/`edition` are bound as named params (they never reach
+/// `**kwargs`), so they're handled by the signature, not here.
+fn rust_attr_verdict(attr: &str) -> Option<Verdict> {
+    Some(match attr {
+        // compile-affecting NOW — shape the rustc argv (P3.2a)
+        "crate_name" | "crate_root" | "crate_features" | "rustc_flags" => Verdict::CompileArgv,
+        // compile-affecting via env/inputs/aliasing — accepted now, argv effect in P3.2b
+        "rustc_env" | "rustc_env_files" | "rustc_env_file" | "compile_data" | "version"
+        | "pkg_name" | "aliases" => Verdict::CompileEnv,
+        // accepted + recorded, semantics delegated to the named step (argv-inert)
+        "proc_macro_deps" => Verdict::Delegated, // → P4.1
+        "target_compatible_with" => Verdict::Delegated, // → P3.4
+        "link_deps" => Verdict::Delegated,       // → P4.5
+        // ignored — recorded parity deviation
+        "data" | "tags" | "visibility" => Verdict::Ignored,
+        _ => return None,
+    })
+}
+
+/// The P3.2a compile-affecting argv attrs, captured at DECLARE time (resolved at analysis time —
+/// `crate_features`/`rustc_flags` may be `select()`s). `crate_name`/`crate_root` are scalars;
+/// a `select()` on either is not modeled in P3.2a (eager `unpack_str`, `None` → the default).
+#[derive(Default)]
+struct CompileArgv {
+    crate_name: Option<String>,
+    crate_root: Option<String>,
+    crate_features: Vec<crate::values::StrAttrPart>,
+    rustc_flags: Vec<crate::values::StrAttrPart>,
+}
+
+/// Apply the §5.5 verdict table to a compile rule's extra `**kwargs`: **loud-error** on any attr
+/// not in the table, and extract the [`Verdict::CompileArgv`] set. The other accepted buckets
+/// (`CompileEnv`/`Delegated`/`Ignored`) are no-ops here — they're recorded via `capture_rule` and
+/// stay argv-inert in P3.2a. `rule` names the rule for the error.
+fn compile_attrs<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    rule: &str,
+    name: &str,
+    kw: &SmallMap<String, Value<'v>>,
+) -> anyhow::Result<CompileArgv> {
+    let mut out = CompileArgv::default();
+    for (key, val) in kw.iter() {
+        match rust_attr_verdict(key) {
+            Some(Verdict::CompileArgv) => match key.as_str() {
+                "crate_name" => out.crate_name = val.unpack_str().map(str::to_owned),
+                "crate_root" => out.crate_root = val.unpack_str().map(str::to_owned),
+                "crate_features" => {
+                    out.crate_features = crate::values::str_attr_parts(eval, Some(*val))?
+                }
+                "rustc_flags" => {
+                    out.rustc_flags = crate::values::str_attr_parts(eval, Some(*val))?
+                }
+                _ => unreachable!("CompileArgv key not extracted: {key}"),
+            },
+            Some(_) => {} // CompileEnv / Delegated / Ignored — accepted, recorded, argv-inert here.
+            None => anyhow::bail!(
+                "{rule} `{name}`: unknown attribute `{key}` — not in the rust rule attr surface \
+                 (§5.5). Add it to the verdict table with an explicit verdict (it must not be \
+                 silently accepted)."
+            ),
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve the P3.2a compile-argv tail at ANALYSIS time: `--cfg=feature="x"` per `crate_features`
+/// (rules_rust's form), then `rustc_flags` verbatim. (`crate_name`/`crate_root` overrides are
+/// applied inline by each rule, since they replace existing argv tokens.)
+fn compile_tail<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    compile: &CompileArgv,
+) -> anyhow::Result<Vec<String>> {
+    let mut tail = Vec::new();
+    for f in crate::values::resolve_str_parts(eval, &compile.crate_features)? {
+        tail.push(format!("--cfg=feature=\"{f}\""));
+    }
+    tail.extend(crate::values::resolve_str_parts(eval, &compile.rustc_flags)?);
+    Ok(tail)
+}
+
 #[starlark::starlark_module]
 fn rust_rules(b: &mut GlobalsBuilder) {
     /// `rust_library(name, srcs, deps=[], edition="2021")` → one `rustc` action
@@ -90,6 +189,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
         crate::loaded::capture_rule(eval, &label, "rust_library", &[("srcs", srcs), ("deps", deps)], &_kw);
+        let compile = compile_attrs(eval, "rust_library", &name, &_kw)?; // P3.2a §5.5 verdict
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
@@ -97,12 +197,18 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let deps = crate::values::resolve_str_parts(eval, &deps)?;
         let sess = session(eval);
         let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
-        let crate_root = srcs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("rust_library `{name}` needs at least one src"))?
-            .clone();
+        // P3.2a: `crate_root` attr (if set) picks the root src; else srcs[0].
+        let crate_root = match &compile.crate_root {
+            Some(cr) => qualify(sess, cr),
+            None => srcs
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("rust_library `{name}` needs at least one src"))?
+                .clone(),
+        };
         let edition = edition.unwrap_or_else(|| "2021".into());
+        let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
         let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+        let tail = compile_tail(eval, &compile)?;
         let sess = session(eval);
 
         let rlib = qualify(sess, &format!("lib{name}.rlib"));
@@ -113,12 +219,13 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             "--crate-type".into(),
             "lib".into(),
             "--crate-name".into(),
-            name.clone(),
+            crate_name,
             crate_root,
             "-o".into(),
             rlib.clone(),
         ];
         argv.extend(extern_flags);
+        argv.extend(tail);
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
@@ -152,6 +259,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         // E0c: record now, analyze in the demand-driven pass (forward refs resolve).
         let label = canon_label(session(eval), &name);
         crate::loaded::capture_rule(eval, &label, "rust_binary", &[("srcs", srcs), ("deps", deps)], &_kw);
+        let compile = compile_attrs(eval, "rust_binary", &name, &_kw)?; // P3.2a §5.5 verdict
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
@@ -159,12 +267,18 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let deps = crate::values::resolve_str_parts(eval, &deps)?;
         let sess = session(eval);
         let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
-        let crate_root = srcs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("rust_binary `{name}` needs at least one src"))?
-            .clone();
+        // P3.2a: `crate_root` attr (if set) picks the root src; else srcs[0].
+        let crate_root = match &compile.crate_root {
+            Some(cr) => qualify(sess, cr),
+            None => srcs
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("rust_binary `{name}` needs at least one src"))?
+                .clone(),
+        };
         let edition = edition.unwrap_or_else(|| "2021".into());
+        let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
         let (extern_flags, dep_rlibs, dep_names) = extern_args(eval, deps.clone())?;
+        let tail = compile_tail(eval, &compile)?;
         let sess = session(eval);
 
         let out = qualify(sess, &name);
@@ -173,12 +287,13 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             "--edition".into(),
             edition,
             "--crate-name".into(),
-            name.clone(),
+            crate_name,
             crate_root,
             "-o".into(),
             out.clone(),
         ];
         argv.extend(extern_flags);
+        argv.extend(tail);
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
@@ -394,4 +509,87 @@ pub(crate) fn module() -> Result<FrozenModule, String> {
         }
         module.freeze().map_err(|e| format!("{e:?}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! P3.2a §5.5 verdict-table gate. Analysis-only (no rustc): asserts on the captured Rustc
+    //! argv, never executes — so it runs without a rust toolchain.
+    use crate::rules::analyze_workspace_with;
+    use crate::state::{AnalyzedTarget, GlobalFlags};
+
+    const LOAD: &str = "load(\"@rules_rust//rust:defs.bzl\", \"rust_library\")\n";
+
+    /// Analyze a one-package workspace whose `app/BUILD` is `build`; `tag` keeps the temp dir
+    /// unique across tests sharing this process id.
+    fn analyze(tag: &str, build: &str) -> Result<Vec<AnalyzedTarget>, String> {
+        let tmp = std::env::temp_dir().join(format!("razel-p32-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let pkg = tmp.join("app");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(pkg.join("lib.rs"), "pub fn x() {}\n").unwrap();
+        std::fs::write(pkg.join("root.rs"), "pub fn y() {}\n").unwrap();
+        std::fs::write(pkg.join("BUILD"), build).unwrap();
+        let r = analyze_workspace_with(&tmp, "//app:t", GlobalFlags::default());
+        let _ = std::fs::remove_dir_all(&tmp);
+        r
+    }
+
+    /// The Rustc argv of `//app:t`.
+    fn argv_of(targets: &[AnalyzedTarget]) -> Vec<String> {
+        targets
+            .iter()
+            .find(|t| t.name == "//app:t")
+            .expect("//app:t analyzed")
+            .actions
+            .first()
+            .expect("a Rustc action")
+            .argv
+            .clone()
+    }
+
+    #[test]
+    fn p32_compile_affecting_attrs_shape_the_argv() {
+        let build = format!(
+            "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\", \"root.rs\"], \
+             crate_name = \"custom\", crate_root = \"root.rs\", \
+             crate_features = [\"alpha\", \"beta\"], rustc_flags = [\"-Cdebuginfo=0\"])\n"
+        );
+        let argv = argv_of(&analyze("compile", &build).unwrap());
+        // crate_name overrides the default (`t`).
+        let i = argv.iter().position(|a| a == "--crate-name").unwrap();
+        assert_eq!(argv[i + 1], "custom", "crate_name overrides --crate-name: {argv:?}");
+        // crate_root picks root.rs as the positional (not srcs[0] = lib.rs).
+        assert!(argv.contains(&"app/root.rs".to_string()), "crate_root is the positional: {argv:?}");
+        assert!(!argv.contains(&"app/lib.rs".to_string()), "lib.rs is not the root: {argv:?}");
+        // crate_features → one `--cfg=feature="x"` per feature (rules_rust's form).
+        assert!(argv.contains(&"--cfg=feature=\"alpha\"".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--cfg=feature=\"beta\"".to_string()), "{argv:?}");
+        // rustc_flags appended verbatim.
+        assert!(argv.contains(&"-Cdebuginfo=0".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn p32_delegated_and_ignored_attrs_are_accepted_but_argv_inert() {
+        // The regression pin: every delegated/ignored attr is accepted (no error) AND must leave
+        // the argv byte-identical — so a delegation can't silently turn into a no-op effect.
+        let base = format!("{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"])\n");
+        let with_extra = format!(
+            "{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], \
+             proc_macro_deps = [], target_compatible_with = [], link_deps = [], \
+             data = [], tags = [\"manual\"], visibility = [\"//visibility:public\"])\n"
+        );
+        let base_argv = argv_of(&analyze("inert_base", &base).unwrap());
+        let extra_argv = argv_of(&analyze("inert_extra", &with_extra).unwrap());
+        assert_eq!(base_argv, extra_argv, "delegated/ignored attrs must be argv-inert in P3.2a");
+    }
+
+    #[test]
+    fn p32_unknown_attr_is_a_loud_error() {
+        let build = format!("{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"], bogus_attr = 1)\n");
+        let err = analyze("unknown", &build).unwrap_err();
+        assert!(err.contains("unknown attribute"), "loud error: {err}");
+        assert!(err.contains("bogus_attr"), "names the attr: {err}");
+    }
 }
