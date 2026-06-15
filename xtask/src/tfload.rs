@@ -75,6 +75,18 @@ pub(crate) fn discover_packages(ws: &Path, sample: usize) -> Vec<String> {
     packages
 }
 
+/// Thread count for tfload's parallel read+parse (and the cache-path eval): `RAZEL_LOAD_THREADS`
+/// if set, else **6** (capped at the host's parallelism). A fixed reference keeps load timings
+/// comparable across machines and bounds tfload's footprint. The default-path eval stays
+/// sequential regardless — per-eval-stack Session state is shared across workers (unsound at
+/// threads>1, parked until P4a; see the note in `tfload`).
+fn tfload_threads() -> usize {
+    std::env::var("RAZEL_LOAD_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(6).min(6))
+}
+
 pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     let ws = root.join("../third-party/tensorflow");
     // RAZEL_TFLOAD_SAMPLE=N: sweep every Nth package — the fast inner loop (seconds, not
@@ -111,9 +123,7 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
     }
     let total = packages.len();
     // Load+parse / execute split: the pure half parallelizes; eval consumes the AST cache.
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(8);
+    let threads = tfload_threads();
     let t0 = std::time::Instant::now();
     let asts = prepare_build_asts(&ws, &packages, threads, false);
     let parse_ms = t0.elapsed().as_millis();
@@ -194,12 +204,7 @@ pub(crate) fn tfload(root: &Path) -> Result<(), String> {
             // corrupt entry → fall through and re-analyze
         }
         // MISS: analyze, then serialize the facts to the cache.
-        let load_threads = std::env::var("RAZEL_LOAD_THREADS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(6)
-            });
+        let load_threads = tfload_threads();
         let t1 = std::time::Instant::now();
         let (report, _loaded, targets) =
             load_tree_report_with_targets(&ws, flags, &packages, asts, load_threads);
