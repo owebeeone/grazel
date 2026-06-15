@@ -52,6 +52,7 @@ pub use workspace::{e_mode_guard, find_workspace_root, resolve_build_file};
 // crate-universe Part B: the loading-phase graph types `razel-query` reads (P1.2).
 pub use loaded::{Edge, EdgeKind, LoadedTarget, QueryNode, RawAttr, RawLabelRef};
 pub use patterns::{discover_packages, load_query_graph, packages_for_pattern};
+pub use razel_ir::TargetKind; // re-exported: `LoadedTarget.kind` is a `TargetKind`
 
 /// Match a `glob` pattern against a path. Supports `*` (within a segment) and `**`
 /// (across segments). A documented subset of Bazel glob — enough for `*.cc`, `a/*.h`,
