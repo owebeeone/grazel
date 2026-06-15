@@ -352,6 +352,31 @@ fn dds_boundary_violations(cargo_toml: &str) -> Vec<String> {
     out
 }
 
+/// P1.0 (RazelCrateUniversePlan, R3): `razel-query` reads the loading graph and NEVER analyzes,
+/// so its manifest must not depend on the build driver / analysis / execution / engine crates.
+/// A DENYLIST (not an allowlist) so `regex` + other leaf utils are fine.
+fn query_boundary_violations(cargo_toml: &str) -> Vec<String> {
+    const FORBIDDEN: &[&str] =
+        &["razel-build", "razel-analysis", "razel-exec", "razel-engine"];
+    let mut in_deps = false;
+    let mut out = Vec::new();
+    for line in cargo_toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_deps = t.contains("dependencies]");
+            continue;
+        }
+        if !in_deps || t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let name = t.split([' ', '=']).next().unwrap_or("");
+        if FORBIDDEN.contains(&name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 // ── Phase 2.1c: no language name leaks into the engine core (RazelHookSeam C3c) ─────────────
 // The generic loader engine must not hardcode a language/provider — adding a language is a
 // registration (provider registry / toolchain registry / ruleset table), not a core edit. We ban
@@ -416,6 +441,11 @@ fn gates() -> ExitCode {
     let boundary: Vec<String> = std::fs::read_to_string(root.join("crates/razel-dds/Cargo.toml"))
         .map(|c| dds_boundary_violations(&c))
         .unwrap_or_default();
+    // P1.0: razel-query reads the loading graph, never analyzes — no build/analysis/exec/engine dep.
+    let query_boundary: Vec<String> =
+        std::fs::read_to_string(root.join("crates/razel-query/Cargo.toml"))
+            .map(|c| query_boundary_violations(&c))
+            .unwrap_or_default();
     // S0: the grazel arrow — no razel-* crate depends on grazel-*/iroh (§1d).
     let mut arrow = Vec::new();
     if let Ok(rd) = std::fs::read_dir(root.join("crates")) {
@@ -429,9 +459,14 @@ fn gates() -> ExitCode {
         }
     }
 
-    if violations.is_empty() && boundary.is_empty() && lang.is_empty() && arrow.is_empty() {
+    if violations.is_empty()
+        && boundary.is_empty()
+        && query_boundary.is_empty()
+        && lang.is_empty()
+        && arrow.is_empty()
+    {
         eprintln!(
-            "xtask gates: OK — no ambient state anywhere in crates/ (AD2); razel-dds boundary intact (core+wire only); no language name in the engine core (C3c); grazel arrow intact (no razel-*→grazel-*/iroh dep — S0)"
+            "xtask gates: OK — no ambient state anywhere in crates/ (AD2); razel-dds boundary intact (core+wire only); razel-query reads-only (no analysis dep — P1.0); no language name in the engine core (C3c); grazel arrow intact (no razel-*→grazel-*/iroh dep — S0)"
         );
         return ExitCode::SUCCESS;
     }
@@ -444,16 +479,20 @@ fn gates() -> ExitCode {
     for b in &boundary {
         eprintln!("  BOUNDARY razel-dds must not depend on `{b}` — the DDS spine is core+wire only");
     }
+    for b in &query_boundary {
+        eprintln!("  QUERY-BOUNDARY razel-query must not depend on `{b}` — query never analyzes (P1.0)");
+    }
     for (krate, dep) in &arrow {
         eprintln!(
             "  ARROW {krate} must not depend on `{dep}` — razel never grows a grazel/iroh dep (S0, §1d)"
         );
     }
     eprintln!(
-        "\nxtask gates: FAIL — {} ambient-state + {} language-in-core + {} boundary + {} arrow violation(s).",
+        "\nxtask gates: FAIL — {} ambient-state + {} language-in-core + {} boundary + {} query-boundary + {} arrow violation(s).",
         violations.len(),
         lang.len(),
         boundary.len(),
+        query_boundary.len(),
         arrow.len()
     );
     ExitCode::from(1)
@@ -462,6 +501,14 @@ fn gates() -> ExitCode {
 #[cfg(test)]
 mod gate_tests {
     use super::*;
+
+    #[test]
+    fn query_boundary_denies_the_analysis_path_but_allows_leaf_utils() {
+        let bad = "[dependencies]\nrazel-loading = { path = \"..\" }\nrazel-build = { path = \"..\" }\n";
+        assert_eq!(query_boundary_violations(bad), vec!["razel-build".to_string()]);
+        let ok = "[dependencies]\nrazel-loading = { path = \"..\" }\nrazel-core = { path = \"..\" }\nregex = \"1\"\n";
+        assert!(query_boundary_violations(ok).is_empty());
+    }
 
     #[test]
     fn language_leak_gate_catches_core_hardcodes_but_allows_registration() {
