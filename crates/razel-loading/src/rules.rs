@@ -1009,7 +1009,7 @@ pub fn load_tree_report_with_targets(
     (report, loaded, targets)
 }
 
-fn drive_tree(
+pub(crate) fn drive_tree(
     root: &Path,
     flags: GlobalFlags,
     packages: &[String],

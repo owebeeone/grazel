@@ -27,7 +27,7 @@ use std::path::Path;
 /// load BEFORE freeze; `select()`/`+` are retained UNRESOLVED (query reads them raw; the build
 /// resolves them). Design §11.1.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum RawAttr {
+pub enum RawAttr {
     Str(String),
     Int(i64),
     Bool(bool),
@@ -50,7 +50,7 @@ impl RawAttr {
     /// deterministic, so `attr()` goldens are reproducible. Each `RawAttr` renders the same way
     /// wherever it appears (a `Str` is always quoted, a `Label` always bare), so dict keys and
     /// select conditions compose without special-casing.
-    pub(crate) fn canonical(&self) -> String {
+    pub fn canonical(&self) -> String {
         let mut s = String::new();
         self.write_canonical(&mut s);
         s
@@ -143,7 +143,7 @@ fn write_quoted(out: &mut String, s: &str) {
 /// heap escapes into the result; no resolution (that is the build's job). Mirrors the downcast
 /// shape of `selects::resolve_attr_value` (live + frozen `SelectBranches`/`SelectExpr`), but
 /// CAPTURES the structure instead of resolving it.
-pub(crate) fn value_to_raw<'v>(heap: Heap<'v>, v: Value<'v>) -> RawAttr {
+pub fn value_to_raw<'v>(heap: Heap<'v>, v: Value<'v>) -> RawAttr {
     // 1. an unresolved `select({...})` — capture its arms + the `//conditions:default` arm.
     let branches: Option<Vec<(Value<'v>, Value<'v>)>> =
         if let Some(sb) = v.downcast_ref::<SelectBranches<'v>>() {
@@ -215,17 +215,17 @@ pub(crate) fn value_to_raw<'v>(heap: Heap<'v>, v: Value<'v>) -> RawAttr {
 /// came from + whether it is a `select()` CONDITION (not a value). NO edge KIND yet — that is
 /// P0.4, which needs the package's `output_index`/`aliases`/`config_specs` to classify.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct RawLabelRef {
-    pub(crate) label: String,
-    pub(crate) attr: String,
-    pub(crate) in_select_condition: bool,
+pub struct RawLabelRef {
+    pub label: String,
+    pub attr: String,
+    pub in_select_condition: bool,
 }
 
 /// **R1 (the schema-aware fix):** native attrs arrive as plain strings, so a value-only walk
 /// can't tell a label from a string. This is the per-`rule_class` set of LABEL-valued attrs;
 /// only these are walked for label refs (so `tags`/`crate_features`/`edition` contribute none).
 /// Extend as rules land — for a Starlark-defined rule this comes from its `attr.label*` decls.
-pub(crate) fn label_attrs(rule_class: &str) -> &'static [&'static str] {
+pub fn label_attrs(rule_class: &str) -> &'static [&'static str] {
     match rule_class {
         "filegroup" => &["srcs", "data"],
         "alias" => &["actual"],
@@ -244,7 +244,7 @@ pub(crate) fn label_attrs(rule_class: &str) -> &'static [&'static str] {
 /// containers + `Concat` recurse; `select()` CONDITION labels are flagged (and arms/default
 /// recurse); a `Dict` walks KEYS only (label-keyed attrs like `aliases` map label → rename
 /// string — the value is not a label). `None`/scalars contribute nothing.
-pub(crate) fn extract_label_refs(attr: &str, raw: &RawAttr, out: &mut Vec<RawLabelRef>) {
+pub fn extract_label_refs(attr: &str, raw: &RawAttr, out: &mut Vec<RawLabelRef>) {
     let push = |out: &mut Vec<RawLabelRef>, label: String, cond: bool| {
         out.push(RawLabelRef { label, attr: attr.to_string(), in_select_condition: cond });
     };
@@ -273,16 +273,16 @@ pub(crate) fn extract_label_refs(attr: &str, raw: &RawAttr, out: &mut Vec<RawLab
 /// A typed label-edge in the loading-phase graph. `kind` is assigned by the P0.4 resolution pass
 /// (it needs the package's `output_index`/`aliases`/`config_specs`); `attr` is the provenance.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Edge {
-    pub(crate) to: String,
-    pub(crate) kind: EdgeKind,
-    pub(crate) attr: String,
+pub struct Edge {
+    pub to: String,
+    pub kind: EdgeKind,
+    pub attr: String,
 }
 
 /// The edge-kind taxonomy (design §11.2). `deps()`/`rdeps()` traverse the union; `--implicit_deps`
 /// gates `Implicit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EdgeKind {
+pub enum EdgeKind {
     Rule,
     Alias,
     SourceFile,
@@ -295,28 +295,28 @@ pub(crate) enum EdgeKind {
 /// A loading-phase rule node: raw attrs (UNRESOLVED `select()`s), the query-facing `rule_class`,
 /// and the typed label-edges. Serializable + `Send` (no Starlark heap escapes). Design §11.1.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LoadedTarget {
+pub struct LoadedTarget {
     /// Identity: the bzlmod-canonical label (§11.3).
-    pub(crate) label: String,
-    pub(crate) repo: String,
-    pub(crate) package: String,
+    pub label: String,
+    pub repo: String,
+    pub package: String,
     /// The registered rule macro the target was declared with ("rust_library", "alias", …) — the
     /// QUERY-facing kind, NOT the coarse `TargetKind`.
-    pub(crate) rule_class: String,
+    pub rule_class: String,
     /// The build's coarse kind (action minting only); derivable from the label at load.
-    pub(crate) kind: TargetKind,
-    pub(crate) attrs: std::collections::BTreeMap<String, RawAttr>,
+    pub kind: TargetKind,
+    pub attrs: std::collections::BTreeMap<String, RawAttr>,
     /// Resolved typed edges (filled by `finalize_edges` post-load; empty at capture).
-    pub(crate) edges: Vec<Edge>,
+    pub edges: Vec<Edge>,
     /// Captured label refs (canonicalized at capture), pending edge-kind resolution. The
     /// intermediate between P0.2 capture and P0.4 resolution (cleared into `edges` at finalize).
-    pub(crate) raw_refs: Vec<RawLabelRef>,
+    pub raw_refs: Vec<RawLabelRef>,
 }
 
 /// A node in the query graph — Bazel `deps()` emits file labels too, and `kind()` classifies them
 /// (design §11.1). `attr()`/`labels()` apply only to `Target`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum QueryNode {
+pub enum QueryNode {
     Target(LoadedTarget),
     SourceFile { label: String },
     /// An output label → the rule that generates it.
@@ -327,7 +327,7 @@ pub(crate) enum QueryNode {
 
 impl QueryNode {
     /// The canonical label of this node.
-    pub(crate) fn label(&self) -> &str {
+    pub fn label(&self) -> &str {
         match self {
             QueryNode::Target(t) => &t.label,
             QueryNode::SourceFile { label }
@@ -338,7 +338,7 @@ impl QueryNode {
 
     /// The `kind()` / `--output=label_kind` string (design §12), an OPEN set: a rule node prints
     /// `"<rule_class> rule"`, a source file `"source file"`, a generated file `"generated file"`.
-    pub(crate) fn kind_string(&self) -> String {
+    pub fn kind_string(&self) -> String {
         match self {
             QueryNode::Target(t) => format!("{} rule", t.rule_class),
             QueryNode::SourceFile { .. } => "source file".to_string(),
@@ -354,18 +354,18 @@ impl QueryNode {
 /// (P0.5 fills these from the session `aliases`/`output_index`/`config_specs` + the declared-label
 /// set + a source-file check; here they keep the precedence pure + testable.)
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct EdgeFacts {
-    pub(crate) is_alias: bool,
-    pub(crate) is_generated: bool,
-    pub(crate) is_config_setting: bool,
-    pub(crate) is_declared_rule: bool,
-    pub(crate) is_source_file: bool,
+pub struct EdgeFacts {
+    pub is_alias: bool,
+    pub is_generated: bool,
+    pub is_config_setting: bool,
+    pub is_declared_rule: bool,
+    pub is_source_file: bool,
 }
 
 /// The R4 PRECEDENCE — an alias is *also* a declared rule, so order is load-bearing:
 /// alias → generated → (config_setting only via a select condition) → declared rule → source
 /// file → unresolved (`None`, the caller errors). Pure.
-pub(crate) fn classify_kind(in_select_condition: bool, f: &EdgeFacts) -> Option<EdgeKind> {
+pub fn classify_kind(in_select_condition: bool, f: &EdgeFacts) -> Option<EdgeKind> {
     if f.is_alias {
         Some(EdgeKind::Alias)
     } else if f.is_generated {
@@ -385,7 +385,7 @@ pub(crate) fn classify_kind(in_select_condition: bool, f: &EdgeFacts) -> Option<
 /// declaring repo/package (§11.3); `gather` returns the [`EdgeFacts`] for a canonical label. An
 /// unresolved ref is a LOUD error (precedence step 6). Parameterized by closures so the session
 /// backing is supplied at P0.5 and the logic stays unit-testable.
-pub(crate) fn resolve_edges(
+pub fn resolve_edges(
     refs: &[RawLabelRef],
     canon: impl Fn(&str) -> String,
     gather: impl Fn(&str) -> EdgeFacts,
@@ -419,7 +419,7 @@ fn kind_for(rule_class: &str) -> TargetKind {
 /// label-valued attrs (P0.2/R1), and store a `LoadedTarget` with edges deferred to
 /// [`finalize_edges`]. Additive — the build path never reads `loaded_targets`. Called at the
 /// rule's record point, where the raw attr Values (incl. unresolved `select()`) are still intact.
-pub(crate) fn capture_loaded<'v>(
+pub fn capture_loaded<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     label: &str,
     rule_class: &str,
@@ -455,7 +455,7 @@ pub(crate) fn capture_loaded<'v>(
 
 /// Convenience over [`capture_loaded`]: build the attr map from a rule's named attrs (skipping
 /// `None`) plus its kwargs, then capture. Shared by the native rule families (rust/cc/dialect).
-pub(crate) fn capture_rule<'v>(
+pub fn capture_rule<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     label: &str,
     rule_class: &str,
@@ -477,7 +477,7 @@ pub(crate) fn capture_rule<'v>(
 /// Resolve every captured target's `raw_refs` into typed `edges` (the P0.4 pass over the whole
 /// declared set). **Lenient in P0.5:** an unresolved ref is skipped, not a loud error, because not
 /// all rule families capture yet — the strict error turns on with full rule coverage. Idempotent.
-pub(crate) fn finalize_edges(sess: &Session, root: &Path) {
+pub fn finalize_edges(sess: &Session, root: &Path) {
     let labels: Vec<String> = sess.loaded_targets.borrow().keys().cloned().collect();
     for label in labels {
         let raw_refs = match sess.loaded_targets.borrow().get(&label) {

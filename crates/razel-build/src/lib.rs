@@ -92,7 +92,7 @@ pub fn expand_pattern(root: &Path, pattern: &str, flags: GlobalFlags) -> Result<
         return Ok(vec![pattern.to_string()]); // concrete — no discovery
     }
     let body = pattern.strip_prefix("//").unwrap_or(pattern);
-    let pkgs = discover_packages(root, flags.strict_bazel);
+    let pkgs = razel_loading::discover_packages(root, flags.strict_bazel);
     let matched: Vec<String> = if body == "..." || body == "...:all" {
         pkgs
     } else if let Some(pfx) = body
@@ -119,35 +119,8 @@ pub fn expand_pattern(root: &Path, pattern: &str, flags: GlobalFlags) -> Result<
     Ok(labels)
 }
 
-/// Recursively discover packages — directories with a resolvable BUILD file — under `root`,
-/// as workspace-relative "/"-joined paths (the root package is `""`). Skips output, VCS,
-/// external, and `bazel-*` convenience-symlink dirs.
-fn discover_packages(root: &Path, strict_bazel: bool) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![(root.to_path_buf(), String::new())];
-    while let Some((dir, rel)) = stack.pop() {
-        if resolve_build_file(&dir, strict_bazel).ok().flatten().is_some() {
-            out.push(rel.clone());
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.')
-                || name.starts_with("bazel-")
-                || name.starts_with("razel-") // razel-out / razel-bin / razel-testlogs
-                || matches!(name.as_str(), "external" | "node_modules" | "target")
-            {
-                continue;
-            }
-            let p = e.path();
-            if p.is_dir() && !p.is_symlink() {
-                let child = if rel.is_empty() { name } else { format!("{rel}/{name}") };
-                stack.push((p, child));
-            }
-        }
-    }
-    out
-}
+// `discover_packages` moved to `razel_loading::patterns` (P1.2 / R1#1) so query enumerates without
+// the build driver; `expand_pattern` above calls it via `razel_loading::discover_packages`.
 
 /// A target surfaced by the impact query: its canonical label + coarse kind.
 #[derive(Debug, Clone, PartialEq, Eq)]

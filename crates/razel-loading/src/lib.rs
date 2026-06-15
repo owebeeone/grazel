@@ -20,6 +20,7 @@ mod host; // razelV3: compiled-in host repos (@bazel_tools etc.)
 mod labels;
 mod loaded; // crate-universe plan P0.1+: the loading-phase RawAttr / LoadedTarget / QueryNode model
 mod native_cc;
+mod patterns; // crate-universe P1.2: load-only pattern resolver (discover / expand / load the graph)
 mod provider_values;
 mod registry;
 pub mod rules;
@@ -48,6 +49,9 @@ pub use state::{
     convenience_symlinks,
 };
 pub use workspace::{e_mode_guard, find_workspace_root, resolve_build_file};
+// crate-universe Part B: the loading-phase graph types `razel-query` reads (P1.2).
+pub use loaded::{Edge, EdgeKind, LoadedTarget, QueryNode, RawAttr, RawLabelRef};
+pub use patterns::{discover_packages, load_query_graph, packages_for_pattern};
 
 /// Match a `glob` pattern against a path. Supports `*` (within a segment) and `**`
 /// (across segments). A documented subset of Bazel glob — enough for `*.cc`, `a/*.h`,
