@@ -13,10 +13,12 @@ mod eval; // P1.3: evaluate an Expr over the query graph → a label set
 mod graph; // P1.3: the query graph (own adjacency over §11 edges) + deps/rdeps/patterns
 mod output; // P1.4: --output=label / label_kind formatting
 mod parse; // P1.1: the §12 expression parser → AST
+mod run; // P1.6: the `razel query` entry (parse → load → eval → format)
 
 pub use eval::eval;
 pub use graph::{LabelSet, QueryGraph};
 pub use output::{Output, format};
 pub use parse::{Expr, parse};
+pub use run::run;
 
-// P1.5+ land path operators (somepath/allpaths) and the cmd_query entry.
+// P1.7: the qg golden harness lands alongside the corpus.

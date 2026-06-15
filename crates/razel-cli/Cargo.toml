@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 razel-wire = { path = "../razel-wire" }
 razel-build = { path = "../razel-build" }
+razel-query = { path = "../razel-query" } # the `razel query` engine (Part B)
 razel-exec = { path = "../razel-exec" }
 razel-core = { path = "../razel-core" }
 razel-daemon = { path = "../razel-daemon" }

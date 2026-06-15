@@ -52,6 +52,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("test") => cmd_test(&args[1..]),
         Some("clean") => cmd_clean(&args[1..]),
         Some("affected") => cmd_affected(&args[1..]),
+        Some("query") => cmd_query(&args[1..]),
         Some("subscribe") => cmd_subscribe(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
         Some("daemon") => cmd_daemon(&args[1..]),
@@ -958,6 +959,76 @@ fn cmd_affected(args: &[String]) -> ExitCode {
         print_impact(&impact);
     }
     ExitCode::SUCCESS
+}
+
+fn cmd_query(args: &[String]) -> ExitCode {
+    let mut output = razel_query::Output::Label;
+    // §12 default is --implicit_deps; slice 1 emits the same explicit graph either way (no native
+    // implicit labels yet), so the flag is plumbed but the result is unaffected today.
+    let mut implicit = true;
+    let mut workspace = std::path::PathBuf::from(".");
+    let mut expr: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if let Some(v) = a.strip_prefix("--output=") {
+            match razel_query::Output::parse(v) {
+                Ok(m) => output = m,
+                Err(e) => {
+                    eprintln!("razel query: {e}");
+                    return ExitCode::from(EX_USAGE);
+                }
+            }
+        } else if a == "--noimplicit_deps" {
+            implicit = false;
+        } else if a == "--implicit_deps" {
+            implicit = true;
+        } else if a == "-C" || a == "--workspace" {
+            i += 1;
+            match args.get(i) {
+                Some(w) => workspace = std::path::PathBuf::from(w),
+                None => {
+                    eprintln!("razel query: `{a}` needs a path");
+                    return ExitCode::from(EX_USAGE);
+                }
+            }
+        } else if let Some(v) = a.strip_prefix("--workspace=") {
+            workspace = std::path::PathBuf::from(v);
+        } else if a.starts_with("--") {
+            eprintln!("razel query: unknown flag `{a}`");
+            return ExitCode::from(EX_USAGE);
+        } else if expr.is_none() {
+            expr = Some(a.clone());
+        } else {
+            eprintln!("razel query: unexpected argument `{a}` (expected one expression)");
+            return ExitCode::from(EX_USAGE);
+        }
+        i += 1;
+    }
+    let Some(expr) = expr else {
+        eprintln!("razel query: missing query expression");
+        return ExitCode::from(EX_USAGE);
+    };
+    if workspace.is_relative() {
+        workspace = match std::fs::canonicalize(&workspace) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("razel query: cannot resolve workspace {}: {e}", workspace.display());
+                return ExitCode::FAILURE;
+            }
+        };
+    }
+    // Results → stdout; diagnostics → stderr (the established stream discipline).
+    match razel_query::run(&workspace, GlobalFlags::default(), &expr, output, implicit) {
+        Ok(out) => {
+            print!("{out}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("razel query: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn print_impact(i: &ImpactSet) {
