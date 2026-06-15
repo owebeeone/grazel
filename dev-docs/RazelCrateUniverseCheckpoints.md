@@ -166,6 +166,12 @@ canonicalization wiring) — finer than the plan's single P3.1, each a green com
   Delegated (`proc_macro_deps`→P4.1, `target_compatible_with`→P3.4, `link_deps`→P4.5);
   Ignored (`data`/`tags`/`visibility`); unknown → loud error. Regression pin: delegated/ignored
   attrs leave the argv byte-identical. (P3.2 split a/b per the plan's "compile set first" hint.)
+- `c2aaf1f` P3.2b — `compile_data` → Rustc action **inputs** (each entry via `resolve_dep`:
+  source file → path, target → outputs). `compile_attrs` now drives extraction off the verdict;
+  the env family (`rustc_env`/`version`/`pkg_name`/`rustc_env_files`) is accepted but **inert
+  until P3.5** (it needs an `AnalyzedAction.env` field + the env-file format + precedence — P3.5's
+  scope; the executor already carries per-action env). `aliases` (extern rename) deferred to a
+  near step alongside the dep-aliasing path. Gate: `compile_data` is an input, not an argv token.
 
 **P3.1e — SEAM DECISION RESOLVED: double-`@` everywhere (option A).** Gianni's steer was
 "double-`@` canonical everywhere now" — the design's true identity, faithful, no deferral to a
@@ -184,8 +190,11 @@ parity normalizer. Wiring:
   single-`@` for now; they earn `@@`-tolerance as P3.2+ real-crate tests exercise them
   (verify-first, no speculative edits).
 
-**Remaining for `razelv3-rust/p3`:** P3.2b (env-family + `aliases` extraction — make the
-CompileEnv bucket live) → P3.3/P3.4
+**Remaining for `razelv3-rust/p3`:** P3.3 (condition source from the triple) / P3.4
+(`target_compatible_with`) → P3.5 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/
+`version`/`pkg_name`/`rustc_env_files` env family + `aliases` live) → P3.6–P3.10 (build-script
+compile/run, flags parser, rustc wrapper, build-script edge) → P3.11/P3.12 (analysis + execution
+parity vs live `bazel aquery`/`bazel build`).
 (condition source + `target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run,
 flags parser, rustc wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs
 live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask.
