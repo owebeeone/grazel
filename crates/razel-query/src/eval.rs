@@ -4,7 +4,37 @@
 
 use crate::graph::{LabelSet, QueryGraph};
 use crate::parse::Expr;
+use razel_loading::RawAttr;
 use std::collections::BTreeMap;
+
+/// Compile a query regex (Rust `regex` dialect — an allowlisted deviation from Bazel's Java
+/// regex, §13). Matches are UNANCHORED (substring), like Bazel's `kind`/`filter`.
+fn compile(re: &str) -> Result<regex::Regex, String> {
+    regex::Regex::new(re).map_err(|e| format!("invalid regex `{re}`: {e}"))
+}
+
+/// The raw label literals of an attr value — `labels()`'s narrower view (`includeSelectKeys=false`,
+/// §12): `Str`/`Label` leaves + list/tuple/concat/dict-keys + select ARM VALUES (NOT the condition
+/// labels) + the default. Raw (unresolved), as captured.
+fn attr_labels(raw: &RawAttr, out: &mut Vec<String>) {
+    match raw {
+        RawAttr::Str(s) => out.push(s.clone()),
+        RawAttr::Label(l) => out.push(l.clone()),
+        RawAttr::List(xs) | RawAttr::Tuple(xs) | RawAttr::Concat(xs) => {
+            xs.iter().for_each(|x| attr_labels(x, out))
+        }
+        RawAttr::Dict(pairs) => pairs.iter().for_each(|(k, _)| attr_labels(k, out)),
+        RawAttr::Select { arms, default } => {
+            for (_cond, v) in arms {
+                attr_labels(v, out);
+            }
+            if let Some(d) = default {
+                attr_labels(d, out);
+            }
+        }
+        RawAttr::Int(_) | RawAttr::Bool(_) | RawAttr::None => {}
+    }
+}
 
 /// Evaluate `expr` over `graph`, with `--implicit_deps` = `implicit`.
 pub fn eval(graph: &QueryGraph, expr: &Expr, implicit: bool) -> Result<LabelSet, String> {
@@ -59,8 +89,43 @@ impl Eval<'_> {
                 }
                 r
             }
-            Expr::Kind(..) | Expr::Filter(..) | Expr::Attr(..) | Expr::Labels(..) => {
-                Err("predicate (kind/filter/attr/labels) not yet implemented (P1.4)".into())
+            Expr::Kind(re, x) => {
+                let set = self.go(x)?;
+                let re = compile(re)?;
+                Ok(set
+                    .into_iter()
+                    .filter(|l| self.graph.kind(l).is_some_and(|k| re.is_match(k)))
+                    .collect())
+            }
+            Expr::Filter(re, x) => {
+                let set = self.go(x)?;
+                let re = compile(re)?;
+                Ok(set.into_iter().filter(|l| re.is_match(l)).collect())
+            }
+            Expr::Attr(name, re, x) => {
+                let set = self.go(x)?;
+                let re = compile(re)?;
+                Ok(set
+                    .into_iter()
+                    .filter(|l| {
+                        self.graph
+                            .target(l)
+                            .and_then(|t| t.attrs.get(name))
+                            .is_some_and(|a| re.is_match(&a.canonical()))
+                    })
+                    .collect())
+            }
+            Expr::Labels(attr, x) => {
+                let set = self.go(x)?;
+                let mut out = LabelSet::new();
+                for l in set {
+                    if let Some(a) = self.graph.target(&l).and_then(|t| t.attrs.get(attr)) {
+                        let mut v = Vec::new();
+                        attr_labels(a, &mut v);
+                        out.extend(v);
+                    }
+                }
+                Ok(out)
             }
             Expr::SomePath(..) | Expr::AllPaths(..) => {
                 Err("path operators (somepath/allpaths) not yet implemented (P1.5)".into())
@@ -128,9 +193,28 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_ops_error_clearly() {
+    fn predicates_kind_filter_attr_labels() {
+        let mut m = BTreeMap::new();
+        m.insert("//a:base".into(), target("//a:base", "a", "rust_library", &[]));
+        let mut lib = target("//a:lib", "a", "rust_library", &["//a:base"]);
+        lib.attrs.insert("deps".into(), RawAttr::List(vec![RawAttr::Str("//a:base".into())]));
+        m.insert("//a:lib".into(), lib);
+        m.insert("//a:bin".into(), target("//a:bin", "a", "rust_binary", &["//a:lib"]));
+        let g = QueryGraph::new(m);
+        let run = |s: &str| {
+            eval(&g, &parse(s).unwrap(), false).unwrap().into_iter().collect::<Vec<_>>()
+        };
+        assert_eq!(run("kind(\"rust_binary rule\", //...)"), ["//a:bin"]);
+        assert_eq!(run("kind(library, //...)"), ["//a:base", "//a:lib"]); // partial match
+        assert_eq!(run("filter(base, //...)"), ["//a:base"]);
+        assert_eq!(run("labels(deps, //a:lib)"), ["//a:base"]); // the raw dep label
+        assert_eq!(run("attr(deps, base, //...)"), ["//a:lib"]); // deps canonical contains "base"
+    }
+
+    #[test]
+    fn path_ops_still_deferred() {
         let g = graph();
-        assert!(eval(&g, &parse("kind(rust, //...)").unwrap(), false).unwrap_err().contains("P1.4"));
-        assert!(eval(&g, &parse("somepath(//a:bin, //a:base)").unwrap(), false).unwrap_err().contains("P1.5"));
+        let err = eval(&g, &parse("somepath(//a:bin, //a:base)").unwrap(), false).unwrap_err();
+        assert!(err.contains("P1.5"));
     }
 }
