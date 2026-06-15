@@ -73,7 +73,41 @@ corpus fixture lands with the query goldens (P1.7).
 
 ---
 
-## Next: Phase 1 — `razel query` over the workspace (q1–q3)
+## `razelv3-rust/p1-engine` — Phase 1 query engine (q1–q3 behavior)
 
-P1.0 boundary gate → P1.1 parser → P1.2 load-only resolver (move into `razel-loading`) → P1.3
-adjacency+eval → P1.4 predicates → P1.5 somepath/allpaths → P1.6 `cmd_query` → P1.7 `qg` goldens.
+**Scope.** The complete `razel query` engine over the §11 graph (P1.0–P1.7): a new `razel-query`
+crate (boundary-gated — no analysis/exec dep), the §12 parser, the load-only pattern resolver,
+the query graph + evaluator, all v1 operators (deps/rdeps/kind/filter/attr/labels/somepath/
+allpaths + set ops + let/$var), `--output=label|label_kind`, and the `cmd_query` CLI verb. NOT
+the full Phase-1 DoD: the `qg` goldens are **razel-authored behavior sentinels**, not live
+`bazel query` parity (see below).
+
+**Commits (`p0..p1-engine`):**
+- `e790f77` P1.0 — `razel-query` crate + boundary gate
+- `abbf28c` P1.1 — §12 expression parser
+- `9154846` P1.2 — load-only pattern resolver (moved into `razel-loading`; loaded types `pub`)
+- `ab1bd84` P1.3 — query graph adjacency + core evaluator
+- `d681653` P1.4 — predicates (kind/filter/attr/labels) + output
+- `7829f5c` P1.5 — somepath / allpaths
+- `543f19f` P1.6 — `cmd_query` CLI verb
+- (this) P1.7 — `qg` harness + q1–q3 sentinels
+
+**Verification.** ~30 razel-query unit tests + the q1/q2/q3 `qg` harness (9 cases) green;
+`razel query` works end-to-end through the binary (deps/kind/label_kind + deferred-verb errors);
+`cargo xtask gates` green (query stays analysis-free); full `cargo test --workspace` green except
+the 2 carve-out reds.
+
+**Rollback.** `git reset --hard razelv3-rust/p0` (Phase 1 is additive — a new crate + a CLI verb;
+the only shared-crate change is the `discover_packages` move, behavior-identical).
+
+**Remaining for full Phase 1 (`razelv3-rust/p1`):** LIVE `bazel query` golden capture — the
+design's true `qg` (razel vs bazel). It needs `bazel` + a corpus both can query, and rides the
+goldens xtask (like the aquery goldens); the `labels()` raw-vs-canonical question settles there.
+Also the implicit-deps parity rung (Phase 6).
+
+---
+
+## Next: Phase 2 — `@crates` lock reader + repo materialization (Track A)
+
+P2.1 lock reader → P2.2 recordedInputs → P2.3 stale-lock → P2.4 tree-output capture → P2.5 root
+`@crates` → P2.6 `RepoFetch` (stale-gated) → P2.7 interim cache.

@@ -19,6 +19,7 @@ pub use eval::eval;
 pub use graph::{LabelSet, QueryGraph};
 pub use output::{Output, format};
 pub use parse::{Expr, parse};
+pub use razel_loading::GlobalFlags; // re-exported for callers of `run`
 pub use run::run;
 
 // P1.7: the qg golden harness lands alongside the corpus.
