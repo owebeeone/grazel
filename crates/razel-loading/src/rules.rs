@@ -937,6 +937,20 @@ pub fn analyze_workspace_with(
             flags.crate_lock = Some(std::sync::Arc::new(lock));
         }
     }
+    // RazelRustParityPlan B1 (§2.2/§5.6): with the `@crates` lock seeded, materialize the world
+    // (root repo + each per-crate generated `BUILD.bazel`, inline — NO `.crate` fetch; analysis is
+    // lock-only) into a workspace-local dir and resolve external repos against it — so an
+    // `@crates//:blake3` build finds the vendored BUILDs instead of `not vendored`. SKIPPED when a
+    // caller already pointed `fetched_external_base` at vendored dirs (the parity/unit tests). A
+    // non-`@crates` workspace has no lock (`read_lock` requires a root `@crates` repo) → inert here.
+    if flags.fetched_external_base.is_none()
+        && let Some(lock) = flags.crate_lock.clone()
+    {
+        let base = root.join(".razel-crates");
+        crate::materialize::materialize_crates_world(&lock, &base)
+            .map_err(|e| format!("materialize @crates world for `{top_label}`: {e}"))?;
+        flags.fetched_external_base = Some(base);
+    }
     let session = Session::new(Some(root.to_path_buf()), flags);
     let top_canon = canon_label(&session, top_label);
     let top_pkg = pkg_of(&top_canon)

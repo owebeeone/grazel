@@ -25,6 +25,7 @@ bazel-*
 /razel-testlogs
 .claude/
 .razel-cache/
+.razel-crates/
 
 # Compiled Rust artifacts left in the tree (e.g. parity corpus build outputs)
 *.rlib
