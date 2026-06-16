@@ -897,7 +897,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             // All the `&mut eval` resolutions up front (compile argv + run env/inputs), before
             // re-taking `sess` for the path `qualify`s + `record_target`. (Build-deps of the bs bin
             // are normal crates, not build scripts → `_bs` edge unused here.)
-            let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
+            let (extern_flags, dep_rlibs, mut dep_names, _bs) = extern_args(eval, deps.clone())?;
             let (feature_cfgs, rustc_flags) = compile_extras(eval, &compile)?;
             let features = crate::values::resolve_str_parts(eval, &compile.crate_features)?;
             // §5.2 slice-1 run inputs: declared `data` + `compile_data`, resolved to files.
@@ -908,10 +908,14 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 }
             }
             // P3.8c: `rustc_env_files` are env-file TARGETS (e.g. `cargo_toml_env_vars`, P3.5a) →
-            // their output file(s); passed `--env-file` (and staged as run inputs).
+            // their output file(s); passed `--env-file` (and staged as run inputs). B4: each is a
+            // dep of the build-script run — add its canon to `deps` so `collect_order` BUILDS the
+            // env-file before the run (else the `--env-file` is missing → the run ENOENTs at exec).
             let mut env_files = Vec::new();
             for entry in crate::values::resolve_str_parts(eval, &compile.rustc_env_files)? {
-                env_files.extend(resolve_dep(eval, &entry)?.libs);
+                let dep = resolve_dep(eval, &entry)?;
+                env_files.extend(dep.libs);
+                dep_names.push(dep.canon);
             }
             let sess = session(eval);
 
