@@ -1,0 +1,19 @@
+# P4.2 — serde_derive (rust_proc_macro) EXTERNAL-closure analysis-parity golden (§9.2).
+#
+# serde_derive is a TRANSITIVE proc-macro dep (@crates//:serde → serde_derive), NOT a direct alias,
+# so its canonical `@@rules_rust++crate+crates__serde_derive-1.0.228//:serde_derive` label is used.
+# Like blake3, it's an external `@crates` crate from razel's OWN dogfood lock — captured from the repo
+# root (where `@crates` is declared), fetched (sha256-verified) by the network-gated parity test.
+#
+# CAPTURE (manual + reproducible — `capture-goldens` only reaches self-contained corpus BUILD cases):
+#   bazel --output_base=/tmp/razel-parity-ob \
+#     aquery 'deps(@@rules_rust++crate+crates__serde_derive-1.0.228//:serde_derive)' --output=text > raw.txt
+#   # extract serde_derive's OWN action blocks (Target = crates__serde_derive-1.0.228), then:
+#   cargo xtask normalize-golden <scoped> parity/corpus/rust/crate_serde_derive/golden.txt
+# Re-capture if the root lock bumps serde_derive off 1.0.228.
+bazel_version        = "9.1.1"
+rules_rust_version   = "0.70.0"
+serde_derive_version = "1.0.228"
+platform             = "darwin_arm64"
+norm_version         = 3
+query                = "aquery 'deps(serde_derive)' --output=text  (filtered to crates__serde_derive-1.0.228)"

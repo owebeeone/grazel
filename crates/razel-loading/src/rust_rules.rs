@@ -345,11 +345,18 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             "--codegen=strip=none".into(),
             "--emit=dep-info,link".into(),
             "--color=always".into(),
+            // §5.3: rules_rust passes `--target=<host triple>` even for the HOST proc-macro compile
+            // (host==target here) — observed in the serde_derive golden.
+            format!("--target={}", crate::state::host_triple()),
         ];
         argv.extend(feature_cfgs);
         argv.push(format!("--edition={edition}"));
         argv.push("-Cembed-bitcode=no".into());
         argv.extend(extern_flags);
+        // §5.3: a proc-macro links the implicit `proc_macro` sysroot crate (rules_rust emits a bare
+        // `--extern proc_macro`, no path — rustc resolves it from the toolchain). Only proc-macros.
+        argv.push("--extern".into());
+        argv.push("proc_macro".into());
         argv.extend(rustc_flags);
         let (argv, bs_inputs) = apply_build_script_edge("rust_proc_macro", &name, argv, &build_scripts)?;
 
