@@ -1384,8 +1384,11 @@ version = "0.1.0"
 name = "razel-process-wrapper"
 version = "0.1.0"
 dependencies = [
+ "razel-build",
+ "razel-exec",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

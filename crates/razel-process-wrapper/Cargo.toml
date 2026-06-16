@@ -14,3 +14,12 @@ publish = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Test-only: the A7 execution-parity (xp) gate drives a full razel build of the local build-script
+# corpus case THROUGH this wrapper (resolved via CARGO_BIN_EXE_razel-process-wrapper) and asserts
+# the produced rlib + flags-file. razel-build does NOT depend on this crate (the wrapper is resolved
+# at exec by name/path), so this dev-only edge introduces no dependency cycle.
+[dev-dependencies]
+razel-build = { path = "../razel-build" }
+razel-exec = { path = "../razel-exec" }
+tempfile = "3"
