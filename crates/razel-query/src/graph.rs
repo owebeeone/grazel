@@ -165,9 +165,9 @@ impl QueryGraph {
         LabelSet::new()
     }
 
-    /// Match a target pattern against the loaded rule targets → the label set. `//...`, `//pkg/...`,
-    /// `//pkg:all`, and a concrete `//pkg:name` (exact). (Files aren't matched by patterns — Bazel
-    /// patterns name targets; files enter the set via `deps`.)
+    /// Match a target pattern against the loaded graph → the label set. `//...`, `//pkg/...`,
+    /// `//pkg:all` (RULE targets), `//pkg:*` / `//pkg:all-targets` (rules PLUS source/generated
+    /// files AND the `BUILD` file — Bazel's `:*` semantics), and a concrete `//pkg:name` (exact).
     pub fn match_pattern(&self, pattern: &str) -> LabelSet {
         let body = pattern.strip_prefix("//").unwrap_or(pattern);
         if body == "..." || body == "...:all" {
@@ -180,6 +180,21 @@ impl QueryGraph {
                 .filter(|t| t.package == pfx || t.package.starts_with(&format!("{pfx}/")))
                 .map(|t| t.label.clone())
                 .collect();
+        }
+        // `:*` / `:all-targets` — every target in the package: rule targets AND the source/generated
+        // file targets (which live in `kinds`, not `targets`) AND the synthetic `BUILD` file (Bazel
+        // lists it). `:all` (below) is the rule-only subset.
+        if let Some(pkg) = body.strip_suffix(":*").or_else(|| body.strip_suffix(":all-targets")) {
+            let mut s: LabelSet = self
+                .kinds
+                .keys()
+                .filter(|l| {
+                    l.strip_prefix("//").and_then(|b| b.split_once(':')).map(|(p, _)| p) == Some(pkg)
+                })
+                .cloned()
+                .collect();
+            s.insert(format!("//{pkg}:BUILD"));
+            return s;
         }
         if let Some(pkg) = body.strip_suffix(":all") {
             return self
@@ -273,6 +288,12 @@ mod tests {
         assert_eq!(g.match_pattern("//app:all"), set(&["//app:base", "//app:bin", "//app:lib"]));
         assert_eq!(g.match_pattern("//app:lib"), set(&["//app:lib"]));
         assert_eq!(g.match_pattern("//app/..."), g.match_pattern("//app:all"));
+        // `:*` / `:all-targets` add the source files + the BUILD file (Bazel's all-targets).
+        assert_eq!(
+            g.match_pattern("//app:*"),
+            set(&["//app:BUILD", "//app:base", "//app:bin", "//app:lib", "//app:lib.rs"])
+        );
+        assert_eq!(g.match_pattern("//app:all-targets"), g.match_pattern("//app:*"));
     }
 
     #[test]
