@@ -21,6 +21,10 @@ use crate::flags::{self, FlagsRecord};
 pub struct RustcOpts {
     pub rustc: String,
     pub flags_file: Option<PathBuf>,
+    /// P4.5 (§5.5/§6): TRANSITIVE build-script flags-files contributing native-LINK directives only
+    /// (a `rust_binary`'s final link inherits the `-l`/`-L`/`-Clink-arg` of every build script in its
+    /// closure). Distinct from `flags_file` (the OWN intra-target edge, which also applies cfg/env).
+    pub link_flags_files: Vec<PathBuf>,
     pub env_files: Vec<PathBuf>,
     pub env: Vec<(String, String)>,
     pub rustc_args: Vec<String>,
@@ -44,6 +48,7 @@ impl RustcOpts {
             match flag {
                 "--rustc" => o.rustc = val.to_string(),
                 "--flags-file" => o.flags_file = Some(PathBuf::from(val)),
+                "--link-flags-file" => o.link_flags_files.push(PathBuf::from(val)),
                 "--env-file" => o.env_files.push(PathBuf::from(val)),
                 "--env" => {
                     let (k, v) = val
@@ -107,6 +112,39 @@ pub fn apply_flags(flags: &[FlagsRecord]) -> (Vec<String>, Vec<(String, String)>
     (args, env)
 }
 
+/// P4.5 (§5.5/§6): the native-LINK subset of [`apply_flags`] — `rustc-link-lib`/`-search`/`-arg`
+/// only. A TRANSITIVE build-script flags-file (a dep's, via `--link-flags-file`) contributes its
+/// link directives to a consuming FINAL link, but its `rustc-cfg`/`rustc-env` are intra-target (they
+/// configured the PRODUCING crate's own compile) and MUST NOT leak into the consumer. (The OWN
+/// build-script edge still rides `--flags-file`, which applies cfg+env+link to the same crate.)
+pub fn link_args_only(flags: &[FlagsRecord]) -> Vec<String> {
+    let mut args = Vec::new();
+    for f in flags {
+        match f.kind.as_str() {
+            "rustc-link-lib" => {
+                for a in &f.args {
+                    args.push("-l".into());
+                    args.push(a.clone());
+                }
+            }
+            "rustc-link-search" => {
+                for a in &f.args {
+                    args.push("-L".into());
+                    args.push(a.clone());
+                }
+            }
+            "rustc-link-arg" | "rustc-cdylib-link-arg" => {
+                for a in &f.args {
+                    args.push("-C".into());
+                    args.push(format!("link-arg={a}"));
+                }
+            }
+            _ => {} // cfg/env/flags are intra-target — never propagated to a consumer's link
+        }
+    }
+    args
+}
+
 /// Run the real rustc through the wrapper: read+apply the flags file (if any), assemble the env
 /// (baseline < `--env-file` < `rustc-env` from flags < explicit `--env`), append the mapped flags
 /// to the original rustc argv, and exec. Empty/absent flags file → a pure passthrough.
@@ -116,7 +154,16 @@ pub fn run_rustc(opts: &RustcOpts) -> io::Result<i32> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
         _ => Vec::new(),
     };
-    let (extra_args, rustc_env) = apply_flags(&records);
+    let (mut extra_args, rustc_env) = apply_flags(&records);
+    // P4.5 (§5.5/§6): TRANSITIVE build-script flags-files — link directives only (a consuming final
+    // link inherits the closure's `-l`/`-L`/`-Clink-arg`; their cfg/env stay intra-target).
+    for p in &opts.link_flags_files {
+        if p.exists() {
+            let recs = flags::read_flags_jsonl(&std::fs::read_to_string(p)?)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            extra_args.extend(link_args_only(&recs));
+        }
+    }
     // baseline < env-files < build-script `rustc-env` < explicit `--env` (literal `rustc_env` is the
     // highest authority, §6.2). `rustc-env` rides as the next-to-last layer via `base_env`.
     let mut env = crate::env::base_env(&crate::env::platform_baseline(), &opts.env_files, &rustc_env)?;
@@ -214,5 +261,59 @@ mod tests {
     fn p39_empty_flags_is_a_no_op_passthrough() {
         let (args, env) = apply_flags(&[]);
         assert!(args.is_empty() && env.is_empty(), "no flags → nothing appended");
+    }
+
+    #[test]
+    fn p45_from_args_collects_repeated_link_flags_files() {
+        // P4.5: `--link-flags-file` is repeatable (a final link inherits the WHOLE closure's build
+        // scripts) and distinct from the single own `--flags-file`.
+        let args: Vec<String> = [
+            "--rustc=/t/rustc",
+            "--flags-file=/o/_bs.out",
+            "--link-flags-file=/o/dep1/_bs.out",
+            "--link-flags-file=/o/dep2/_bs.out",
+            "--",
+            "--crate-name",
+            "app",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let o = RustcOpts::from_args(&args).unwrap();
+        assert_eq!(o.flags_file, Some(PathBuf::from("/o/_bs.out")), "own edge is the single --flags-file");
+        assert_eq!(
+            o.link_flags_files,
+            [PathBuf::from("/o/dep1/_bs.out"), PathBuf::from("/o/dep2/_bs.out")],
+            "transitive link-flags-files collected in order"
+        );
+    }
+
+    #[test]
+    fn p45_link_args_only_keeps_link_directives_and_drops_cfg_env() {
+        // P4.5 (§5.5/§6): a TRANSITIVE build-script flags-file contributes ONLY native-link
+        // directives to a consuming final link; its `rustc-cfg`/`rustc-env`/`rustc-flags` are
+        // intra-target (they configured the PRODUCING crate) and must NOT leak into the consumer.
+        let flags = vec![
+            rec("rustc-cfg", &["have_libz"]),         // intra-target — dropped
+            rec("rustc-env", &["DEP_Z_INCLUDE=/x"]),  // intra-target — dropped
+            rec("rustc-flags", &["--cfg", "leak"]),   // intra-target — dropped
+            rec("rustc-link-lib", &["static=z"]),
+            rec("rustc-link-search", &["native=/opt/lib"]),
+            rec("rustc-link-arg", &["-Wl,-rpath,/x"]),
+            rec("rustc-cdylib-link-arg", &["-undefined"]),
+        ];
+        let args = link_args_only(&flags);
+        assert_eq!(
+            args,
+            [
+                "-l", "static=z",
+                "-L", "native=/opt/lib",
+                "-C", "link-arg=-Wl,-rpath,/x",
+                "-C", "link-arg=-undefined",
+            ],
+            "link-only: {args:?}"
+        );
+        assert!(!args.iter().any(|a| a.contains("have_libz") || a.contains("DEP_Z") || a == "leak"),
+            "cfg/env/flags must not leak: {args:?}");
     }
 }
