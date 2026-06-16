@@ -581,6 +581,16 @@ live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the gold
     design's deferred long tail); inert for non-links crates → byte-identical parity.
   - All P4.5 steps: byte-identical for the existing cases (blake3/getrandom/serde_derive goldens +
     rust_graph_parity green throughout).
-- **REMAINING:** P4.6 — full `@crates` scale (the resolved graph builds end-to-end; aq green across it,
-  documented deviations only) + retire the P2.7 interim cache for the pure RepoFetch path (§9.4).
-  *(= Milestone 4.)*
+- `a57a258` **P4.6 — full `@crates` scale + retire the interim cache** (§9.4, Milestone 4):
+  (1) RETIRED the P2.7 interim cache (`read_from_bazel_external` + `copy_tree` + test + export) — it
+  was already dead (only its own test called it; `materialize_one_repo` → `fetch_crate` is the live
+  path), so by rung 4 the pure `RepoFetch` path is the one under the goldens. (2) FULL scale proven:
+  `probe_starlark_closure_analyzes` (#[ignore], network) — `@crates//:starlark` (razel's heaviest dep)
+  resolves end-to-end to **266 targets** on the pure fetch path (proc-macros + build scripts + per-cfg
+  selects), zero unmodeled attr/select/dep. The three aq goldens (blake3 rlib / serde_derive proc-macro
+  / getrandom richer-per-cfg) stay the parity gate; engine is crate-agnostic, so 266-clean + diverse
+  goldens is the scale signal. lib 80/0, goldens 3/3.
+
+**Phase 4 DoD — REACHED.** Milestones 2–4: proc-macro (P4.1/P4.2) + richer per-cfg select (P4.3) +
+libc/getrandom & incompatible negative (P4.4) + link_deps native-link/DEP_* propagation (P4.5) + full
+`@crates` build on the pure fetch path with analysis parity green (P4.6). Phase tag: `razelv3-rust/p4`.
