@@ -18,7 +18,7 @@ use razel_core::{Digest, FileId, TargetId};
 use razel_exec::{Cache, build_action};
 use razel_ir::TargetKind;
 use razel_loading::{
-    analyze_bazel_with, analyze_starlark, analyze_workspace_with, load_tree_report_with_targets,
+    analyze_bazel_with, analyze_starlark, analyze_workspace_resolved, load_tree_report_with_targets,
 };
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
 pub use razel_loading::{
@@ -70,13 +70,11 @@ pub fn build_workspace_with(
     flags: GlobalFlags,
 ) -> Result<BuildReport, String> {
     let jobs = flags.jobs;
-    execute_jobs(
-        &analyze_workspace_with(root, top_label, flags)?,
-        top_label,
-        root,
-        cache,
-        jobs,
-    )
+    // B4: an external-repo top label is an ALIAS (`@crates//:blake3`) whose analysis keys the target
+    // under its RESOLVED canonical name (`@@rules_rust++crate+crates__blake3-1.8.2//:blake3`). Start
+    // execution from that resolved name — `collect_order` would otherwise not find the apparent alias.
+    let (targets, resolved) = analyze_workspace_resolved(root, top_label, flags)?;
+    execute_jobs(&targets, &resolved, root, cache, jobs)
 }
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;

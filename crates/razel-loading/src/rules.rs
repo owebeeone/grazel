@@ -937,8 +937,20 @@ pub fn analyze_workspace(root: &Path, top_label: &str) -> Result<Vec<AnalyzedTar
 pub fn analyze_workspace_with(
     root: &Path,
     top_label: &str,
-    mut flags: GlobalFlags,
+    flags: GlobalFlags,
 ) -> Result<Vec<AnalyzedTarget>, String> {
+    analyze_workspace_resolved(root, top_label, flags).map(|(targets, _)| targets)
+}
+
+/// Like [`analyze_workspace_with`] but ALSO returns the requested target's RESOLVED canonical name —
+/// the alias chain walked to its terminal `actual` (`@crates//:blake3` → `@@rules_rust++crate+crates__
+/// blake3-1.8.2//:blake3`). The build path needs this to `collect_order` from the name the analysis
+/// actually keyed the target under (the apparent alias is NOT a target name) — RazelRustParityPlan B4.
+pub fn analyze_workspace_resolved(
+    root: &Path,
+    top_label: &str,
+    mut flags: GlobalFlags,
+) -> Result<(Vec<AnalyzedTarget>, String), String> {
     // P3.1e: seed the `@crates` lock so `@crates` labels canonicalize (§11.3). Read-if-present —
     // a non-`@crates` workspace has no lock (or no `@crates` labels), so this is inert there; an
     // already-seeded `crate_lock` (a caller/test) wins. A malformed lock stays `None`: a real
@@ -991,7 +1003,7 @@ pub fn analyze_workspace_with(
             bad.name
         ));
     }
-    Ok(targets)
+    Ok((targets, canon))
 }
 
 /// The TREE-LOAD driver (L6 coverage metric): load every given package in ONE session
