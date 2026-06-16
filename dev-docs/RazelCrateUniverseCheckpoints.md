@@ -390,11 +390,26 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
   razel's system rustc + no cc-toolchain rust links) + the ` (TreeArtifact)` annotation strip
   (norm_version 3) + the build-script flags-file inputs (the (b) JSONL-vs-split deviation, flowing into
   the crate's consumption). The `p32`-era unit tests were updated off the lean argv (the entrenchment).
-- **REMAINING:** **A7** — local EXECUTION parity (`razel build //corpus/rust/build_script:withbs` → the
-  rlib + the build-script flags-file; xp diff). Needs the `razel-process-wrapper` bin RESOLVABLE at
-  exec (the run/rustc actions reference it by name) + actually running rustc/the build script — a
-  distinct execution-integration step (vs the analysis parity just landed). Then **Phase B** (external
-  `@crates//:blake3` — B1 resolve, B2 closure, B3 aq, B4 xp + cc env).
+- `2b1dbd5` **A7.1** — `razel-exec` output capture is now **dir-aware + skip-absent** (the shared
+  `copy_path` in capture/store/restore): the `OUT_DIR` / extracted-`.crate` TREE outputs round-trip,
+  and an unproduced declared output (the macOS `.dSYM` a `debuginfo=0` build omits — declared only to
+  match Bazel's graph) is a no-op, not a hard `os error 2`. Symmetric with the build driver digesting
+  only inputs that exist; a skipped output that is actually consumed fails loudly downstream.
+- `6d31921` **A7.2 — MILESTONE A′: rust EXECUTION parity GREEN** (xp). `razel-process-wrapper/tests/
+  exec_parity.rs` drives a full `razel build //corpus/rust/build_script:withbs` with the REAL toolchain
+  (system rustc routed through the wrapper, resolved via `CARGO_BIN_EXE_razel-process-wrapper`) into a
+  temp workspace and diffs the execution surface vs Bazel's: (1) the `withbs` rlib is produced (valid
+  `ar` archive); (2) the build script's `cargo::rustc-cfg=buildscript_ran` reaches the crate's rustc as
+  `--cfg buildscript_ran`, matching Bazel's `build_script_build.flags` (`golden.flags`, captured via
+  `bazel build`). razel emits ONE §6.1 JSONL `.out`; Bazel splits it into `.flags`/`.env`/… — the (b)
+  format deviation — so the diff is at the DIRECTIVE level (the wrapper's `apply_flags`). Cold cache
+  runs all 3 actions. Verified empirically: the system rustc shim runs under the sandbox's stripped env
+  (no HOME needed); the wrapper's empty-unix-env is fine for the rlib (no link) + the self-contained
+  build-script bin. **Phase A COMPLETE** (analysis A1–A6 + execution A7).
+- **REMAINING:** **Phase B** — external `@crates//:blake3` (B1 resolve "unknown target: blake3" — wire
+  the `@crates` repo/alias into the build path; B2 the full closure analyzes; B3 blake3 aq parity; B4
+  blake3 xp parity + the cc `CC`/`AR`/`CFLAGS` env, the deferred P3.8d leg 2). The local case (analysis
+  + execution) is fully gated; Phase B is the external-crate integration.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
