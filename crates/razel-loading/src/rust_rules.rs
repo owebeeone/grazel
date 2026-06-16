@@ -152,6 +152,43 @@ fn crate_name_of(canon: &str) -> String {
         .to_string()
 }
 
+/// RazelRustParityPlan B3: the TRANSITIVE rlib-dir closure for `-Ldependency`. rules_rust passes a
+/// `-Ldependency=<dir>` for EVERY crate in the transitive closure (not just direct deps), so rustc can
+/// locate transitively-needed `.rmeta` during type-check. Walk the ALREADY-analyzed dep graph
+/// (`results[canon].deps`), collecting each rust target's rlib output dir; deduped + SORTED
+/// (deterministic — rustc treats search-path ORDER as irrelevant, so the parity diff compares the SET).
+fn transitive_rlib_dirs(sess: &crate::state::Session, roots: &[String]) -> Vec<String> {
+    let results = sess.results.borrow();
+    let mut seen = std::collections::HashSet::new();
+    let mut dirs: Vec<String> = Vec::new();
+    let mut stack: Vec<String> = roots.to_vec();
+    while let Some(canon) = stack.pop() {
+        if !seen.insert(canon.clone()) {
+            continue;
+        }
+        let Some(t) = results.get(&canon) else { continue };
+        // Only CRATES (rlib outputs) are `-Ldependency` deps and are recursed: a `cargo_build_script`
+        // (`_bs`, a bin output) is the intra-target build-script EDGE, not a crate dep — recursing
+        // through it would wrongly pull in BUILD-only deps (e.g. `version_check`) that Bazel's
+        // crate-compile `-Ldependency` excludes. No rlib → skip (don't collect, don't recurse).
+        let Some(dir) = t
+            .default_info
+            .iter()
+            .find(|l| l.ends_with(".rlib"))
+            .and_then(|l| l.rsplit_once('/'))
+            .map(|(d, _)| d.to_string())
+        else {
+            continue;
+        };
+        if !dirs.iter().any(|d| d == &dir) {
+            dirs.push(dir);
+        }
+        stack.extend(t.deps.iter().cloned());
+    }
+    dirs.sort();
+    dirs
+}
+
 /// Resolve `deps` to `(--extern crate=rlib args, dep rlib inputs, dep canon names, build-script
 /// edges)`. P3.10 (§4.3): a `cargo_build_script` dep is the intra-target build-script edge — it is
 /// NEVER passed as `--extern` (it's not an rlib); it's collected for the rustc-wrapper routing.
@@ -161,7 +198,7 @@ fn extern_args(
 ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>, Vec<crate::deps::BuildScriptRunInfo>)> {
     let (mut args, mut inputs, mut names, mut build_scripts) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut dep_dirs: Vec<String> = Vec::new(); // unique rlib dirs → -Ldependency (A3)
+    let mut rlib_deps: Vec<String> = Vec::new(); // the `--extern`'d deps → roots for the -Ldependency fold
     for d in &deps {
         let dep = resolve_dep(eval, d)?;
         if let Some(bs) = dep.build_script {
@@ -171,20 +208,19 @@ fn extern_args(
         }
         let crate_name = crate_name_of(&dep.canon);
         // A rust_library exports exactly one rlib in default_info → dep.libs. rules_rust's faithful
-        // form is `--extern=<name>=<rlib>` (joined) + a `-Ldependency=<dir>` per rlib directory (A3).
+        // form is `--extern=<name>=<rlib>` (joined).
         for rlib in &dep.libs {
             args.push(format!("--extern={crate_name}={rlib}"));
             inputs.push(rlib.clone());
-            if let Some((dir, _)) = rlib.rsplit_once('/')
-                && !dep_dirs.iter().any(|x| x == dir)
-            {
-                dep_dirs.push(dir.to_string());
-            }
         }
+        rlib_deps.push(dep.canon.clone());
         names.push(dep.canon);
     }
-    for dir in dep_dirs {
-        args.push(format!("-Ldependency={dir}")); // after the --externs, rules_rust's order
+    // RazelRustParityPlan B3: rules_rust passes a `-Ldependency=<dir>` for EVERY crate in the
+    // TRANSITIVE rlib closure (not just direct deps) so rustc can locate transitively-needed `.rmeta`
+    // at type-check (+ the rlibs at link) — also required for B4 execution. After the `--extern`s.
+    for dir in transitive_rlib_dirs(session(eval), &rlib_deps) {
+        args.push(format!("-Ldependency={dir}"));
     }
     Ok((args, inputs, names, build_scripts))
 }

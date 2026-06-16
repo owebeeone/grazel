@@ -32,7 +32,21 @@ const B3_OMIT: &[&str] = &[
 ];
 
 fn b3_rustc_argv(argv: &[String]) -> Vec<String> {
-    razel_parity::strip_rust_deviation_flags(&razel_parity::canonicalize_rust_argv(argv))
+    let mut v = razel_parity::strip_rust_deviation_flags(&razel_parity::canonicalize_rust_argv(argv));
+    // `-Ldependency` search paths are ORDER-INSENSITIVE to rustc (RR-sanctioned parity relaxation):
+    // compare them as a SET by sorting the `-Ldependency=` tokens in place (non-`-L` tokens keep their
+    // position). Applied to BOTH sides, so razel's transitive fold matches Bazel's traversal regardless
+    // of order — only the SET of dep dirs must agree.
+    let mut sorted: Vec<String> =
+        v.iter().filter(|t| t.starts_with("-Ldependency=")).cloned().collect();
+    sorted.sort();
+    let mut it = sorted.into_iter();
+    for t in v.iter_mut() {
+        if t.starts_with("-Ldependency=") {
+            *t = it.next().expect("same count");
+        }
+    }
+    v
 }
 
 /// Drop the build-script flag-file inputs (the (b) JSONL-vs-split deviation) — same as Phase A.
