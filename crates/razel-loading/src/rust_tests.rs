@@ -261,6 +261,39 @@ mod tests {
     }
 
     #[test]
+    fn p45_rust_binary_inherits_transitive_build_script_link_flags_rlib_does_not() {
+        // P4.5 (§5.5/§6): a build script's native-LINK directives propagate to the consuming FINAL
+        // link (`rust_binary`) — its rustc carries `--link-flags-file=<the build script's flags-file>`
+        // so the wrapper applies `-l`/`-L`/`-Clink-arg` at link (P4.5a). An intermediate `rust_library`
+        // (rlib) applies only its OWN build-script edge (`--flags-file`), NOT the transitive final-link
+        // channel — it merely PUBLISHES + propagates (rules_rust's posture: not applied at the rlib).
+        let build = "load(\"@rules_rust//rust:defs.bzl\", \"rust_library\", \"rust_binary\")\n\
+             load(\"@rules_rust//cargo:defs.bzl\", \"cargo_build_script\")\n\
+             cargo_build_script(name = \"z_bs\", srcs = [\"root.rs\"], links = \"z\")\n\
+             rust_library(name = \"lib_z\", srcs = [\"lib.rs\"], deps = [\":z_bs\"])\n\
+             rust_binary(name = \"t\", srcs = [\"root.rs\"], deps = [\":lib_z\"])\n";
+        let targets = analyze("p45link", build).unwrap();
+        // t (rust_binary, the FINAL link) inherits z_bs's link directives via --link-flags-file.
+        let t_argv = argv_of(&targets);
+        assert!(
+            t_argv.iter().any(|a| a.starts_with("--link-flags-file=") && a.contains("z_bs.out")),
+            "rust_binary final link inherits the transitive build-script link channel: {t_argv:?}"
+        );
+        // lib_z (rust_library, an rlib) applies its OWN build-script edge (--flags-file) but NOT the
+        // transitive final-link channel (--link-flags-file).
+        let lib_z = targets.iter().find(|t| t.name == "//app:lib_z").expect("//app:lib_z analyzed");
+        let lz = &lib_z.actions[0].argv;
+        assert!(
+            lz.iter().any(|a| a.starts_with("--flags-file=") && a.contains("z_bs.out")),
+            "rlib applies its OWN build-script edge: {lz:?}"
+        );
+        assert!(
+            !lz.iter().any(|a| a.starts_with("--link-flags-file=")),
+            "rlib does NOT apply the transitive final-link channel: {lz:?}"
+        );
+    }
+
+    #[test]
     fn p35a_cargo_toml_env_vars_emits_the_cargo_pkg_env_file() {
         let tmp = std::env::temp_dir().join(format!("razel-p35a-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

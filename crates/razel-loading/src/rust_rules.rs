@@ -108,14 +108,16 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         argv.push("-Cembed-bitcode=no".into());
         argv.extend(extern_flags); // build-script dep is the edge, not an --extern
         argv.extend(rustc_flags); // `rustc_flags` (e.g. --cap-lints) at the end (Bazel's order)
-        // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper.
-        let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, argv, &build_scripts)?;
+        // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper. P4.5: an
+        // rlib is NOT a final link — it passes NO transitive link-flags-files (`&[]`); it only
+        // PUBLISHES its own build script's flags-file (below) for a downstream binary to link.
+        let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, argv, &build_scripts, &[])?;
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
         inputs.extend(data);
         inputs.extend(bs_inputs);
-        record_target(sess, AnalyzedTarget {
+        let mut t = AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_names,
             actions: vec![AnalyzedAction {
@@ -126,7 +128,14 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             }],
             default_info: vec![rlib],
             providers: Default::default(),
-        });
+        };
+        // P4.5 (§5.5/§6): publish this crate's OWN build-script flags-file into `RustLinkInfo` so its
+        // native-link directives FOLD transitively to a consuming `rust_binary`'s final link.
+        let bs_flags: Vec<String> = build_scripts.iter().map(|bs| bs.flags_file.clone()).collect();
+        if !bs_flags.is_empty() {
+            t.set_set("RustLinkInfo", "bs_flags", bs_flags);
+        }
+        record_target(sess, t);
         Ok(())
         }))?;
         Ok(NoneType)
@@ -181,6 +190,10 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps)?;
         let tail = compile_tail(eval, &compile)?;
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
+        // P4.5 (§5.5/§6): a `rust_binary` is the FINAL link — it inherits the native-link directives
+        // of EVERY build script in its (regular-)dep closure (NOT proc-macro deps: those are host
+        // dylibs). The `RustLinkInfo` fold gives the flags-files; applied link-only (`--link-flags-file`).
+        let link_flags_files = transitive_link_flags_files(eval, &deps)?;
         let sess = session(eval);
 
         let out = out_path(sess, &name);
@@ -196,8 +209,9 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         ];
         argv.extend(extern_flags);
         argv.extend(tail);
-        // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper.
-        let (argv, bs_inputs) = apply_build_script_edge("rust_binary", &name, argv, &build_scripts)?;
+        // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper. P4.5: the
+        // transitive build-script link channel does too (final link inherits the closure's libs).
+        let (argv, bs_inputs) = apply_build_script_edge("rust_binary", &name, argv, &build_scripts, &link_flags_files)?;
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
@@ -358,7 +372,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         argv.push("--extern".into());
         argv.push("proc_macro".into());
         argv.extend(rustc_flags);
-        let (argv, bs_inputs) = apply_build_script_edge("rust_proc_macro", &name, argv, &build_scripts)?;
+        // P4.5: a proc-macro is a HOST dylib, not a target final link — no transitive link channel.
+        let (argv, bs_inputs) = apply_build_script_edge("rust_proc_macro", &name, argv, &build_scripts, &[])?;
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);

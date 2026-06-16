@@ -63,29 +63,62 @@ pub(crate) fn apply_build_script_edge(
     name: &str,
     argv: Vec<String>,
     build_scripts: &[crate::deps::BuildScriptRunInfo],
+    link_flags_files: &[String],
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    match build_scripts {
-        [] => Ok((argv, Vec::new())),
-        [bs] => {
-            let mut it = argv.into_iter();
-            let rustc_path =
-                it.next().ok_or_else(|| anyhow::anyhow!("{rule} `{name}`: empty rustc argv"))?;
-            let mut wrapped = vec![
-                process_wrapper(),
-                "rustc".into(),
-                format!("--rustc={rustc_path}"),
-                format!("--flags-file={}", bs.flags_file),
-                format!("--env=OUT_DIR={}", bs.out_dir),
-                "--".into(),
-            ];
-            wrapped.extend(it);
-            Ok((wrapped, vec![bs.flags_file.clone(), bs.out_dir.clone()]))
-        }
+    // The OWN intra-target edge (§4.3, ≤1 in slice-1) supplies `--flags-file` (cfg+env+link to THIS
+    // crate's compile) + the `OUT_DIR`. P4.5 (§5.5/§6): `link_flags_files` are the TRANSITIVE
+    // build-script flags-files of the dep closure — passed `--link-flags-file` (LINK directives only,
+    // P4.5a) so a `rust_binary`'s final link inherits the closure's native libs. Only `rust_binary`
+    // passes these (an rlib is not a final link); library/proc-macro pass `&[]`.
+    let own = match build_scripts {
+        [] => None,
+        [bs] => Some(bs),
         _ => anyhow::bail!(
             "{rule} `{name}`: multiple build-script deps are not supported yet (slice-1 — the rustc \
              wrapper takes a single --flags-file)"
         ),
+    };
+    if own.is_none() && link_flags_files.is_empty() {
+        return Ok((argv, Vec::new())); // no edge, no transitive link channel → argv unchanged
     }
+    let mut it = argv.into_iter();
+    let rustc_path =
+        it.next().ok_or_else(|| anyhow::anyhow!("{rule} `{name}`: empty rustc argv"))?;
+    let mut wrapped = vec![process_wrapper(), "rustc".into(), format!("--rustc={rustc_path}")];
+    let mut inputs = Vec::new();
+    if let Some(bs) = own {
+        wrapped.push(format!("--flags-file={}", bs.flags_file));
+        wrapped.push(format!("--env=OUT_DIR={}", bs.out_dir));
+        inputs.push(bs.flags_file.clone());
+        inputs.push(bs.out_dir.clone());
+    }
+    for f in link_flags_files {
+        wrapped.push(format!("--link-flags-file={f}"));
+        inputs.push(f.clone());
+    }
+    wrapped.push("--".into());
+    wrapped.extend(it);
+    Ok((wrapped, inputs))
+}
+
+/// P4.5 (§5.5/§6): the TRANSITIVE set of build-script flags-file paths in `deps`' closure. Each
+/// `rust_library` publishes its OWN build script's flags-file via `RustLinkInfo.bs_flags` (folded
+/// transitively), so a consuming FINAL link (`rust_binary`) inherits the whole closure's native-link
+/// directives. Deduped + SORTED (link-search order is a SET to rustc — deterministic action key).
+pub(crate) fn transitive_link_flags_files(
+    eval: &mut Evaluator<'_, '_, '_>,
+    deps: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut files: Vec<String> = Vec::new();
+    for d in deps {
+        for f in crate::deps::resolve_dep(eval, d)?.field("rust_link_bs_flags") {
+            if !files.contains(&f) {
+                files.push(f);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 

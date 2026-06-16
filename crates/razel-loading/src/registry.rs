@@ -110,6 +110,13 @@ pub(crate) fn builtin_registry() -> ProviderRegistry {
     // directly off the dep (a proc-macro is `--extern`'d as a host dylib, not a target rlib); it must
     // NOT propagate transitively (a crate's consumers aren't proc-macros).
     r.register("RustProcMacro", "marker", FieldSpec { kind: FieldKind::Set, dep_fold: None });
+    // P4.5 (§5.5/§6): the `links`-crate native-link channel. A `rust_library` publishes its OWN
+    // build script's flags-file here; UNLIKE the own-only `BuildScriptRun` edge this FOLDS
+    // transitively (`FoldPolicy::Plain`), so a consuming FINAL link (`rust_binary`) inherits the
+    // whole closure's `rustc-link-lib`/`-search`/`-arg` (applied link-only via `--link-flags-file`,
+    // P4.5a). NOT applied at an intermediate rlib compile (rules_rust's posture) — only `rust_binary`
+    // reads the fold; `rust_library` merely contributes its own + propagates.
+    r.register("RustLinkInfo", "bs_flags", FieldSpec { kind: FieldKind::Set, dep_fold: folded("rust_link_bs_flags", FoldPolicy::Plain) });
     r
 }
 
