@@ -459,11 +459,26 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
   `b3_rustc_argv`, both sides) — rustc search paths are order-free, so only the SET must agree.
   `blake3_analysis_matches_the_bazel_golden` GREEN (ignored/network); `rust_graph_parity` 2/2 + lib 75/0 +
   gates + perfgate unaffected.
-- **REMAINING:** **B4 — blake3 EXECUTION parity (xp)** — `razel build @crates//:blake3` → the rlib + the
-  SIMD `.o`s in `OUT_DIR`; diff the flags-file. The cc env leg (deferred P3.8d leg 2): `CC`/`AR`/`CFLAGS`
-  from `razel-cc-toolchain` for the build-script run (blake3's `build.rs` `cc::Build` compiles the SIMD
-  C/asm) — the captured CargoBuildScriptRun env already shows Bazel's cc env to match. Then **Phase B
-  COMPLETE** (Milestone-1). Phase A + the local execution stay fully gated.
+- `a7444fb` **B4 step-1** — the build path resolves the `@crates//:blake3` ALIAS to its canonical target
+  (`analyze_workspace_resolved` returns the resolved canonical top; `build_workspace_with` starts
+  `execute_jobs` there). `razel build @crates//:blake3` now gets PAST target resolution INTO execution.
+- **STOP — B4 surfaces an EXEC-ROOT-LAYOUT decision (architectural; RR's call).** Probe: razel runs
+  arrayref's rustc but it can't read `external/rules_rust++crate+crates__arrayref-0.3.9/src/lib.rs`.
+  razel's argv uses Bazel's exec-root path form `external/<repo>/…` (REQUIRED for analysis parity — B3),
+  but the fetched source lives at `.razel-crates/<repo>/…` (B1.3's `fetched_external_base`). For
+  EXECUTION the exec root must present the source at the declared path — bazel symlinks
+  `execroot/external/<repo>` → the output_base's fetched repo. razel's exec_root IS the workspace root,
+  so the options each have a trade-off RR owns: (a) symlink `exec_root/external` → `.razel-crates` before
+  execution (small, but outputs land in the source cache + only fixes non-compat paths — under
+  `bazel_build_compat` outputs are `bazel-out/<cfg>/bin/external/<repo>/…`, a 2nd layer); (b) materialize
+  to `exec_root/external/<repo>/` directly (aligns analysis+exec, pollutes the workspace with a top-level
+  `external/`); (c) a PROPER separate exec-root (sources `external/<repo>`, outputs `bazel-out/…`) — the
+  bazel-faithful model, biggest change. RECO: (c) longer-term, but confirm — it reshapes razel's whole
+  external-crate execution layout. AFTER it: the cc env leg (P3.8d leg 2) `CC`/`AR`/`CFLAGS` from
+  `razel-cc-toolchain` for the build-script run (blake3's `build.rs` `cc::Build` → SIMD `.o`s; the
+  captured CargoBuildScriptRun env shows Bazel's exact cc env — a deviation-posture call too). Then
+  **Phase B COMPLETE** (Milestone-1). **Milestone-1 ANALYSIS half (B1–B3) is DONE + gated**; Phase A +
+  local execution stay fully gated.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
