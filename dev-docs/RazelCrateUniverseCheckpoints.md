@@ -462,23 +462,28 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
 - `a7444fb` **B4 step-1** — the build path resolves the `@crates//:blake3` ALIAS to its canonical target
   (`analyze_workspace_resolved` returns the resolved canonical top; `build_workspace_with` starts
   `execute_jobs` there). `razel build @crates//:blake3` now gets PAST target resolution INTO execution.
-- **STOP — B4 surfaces an EXEC-ROOT-LAYOUT decision (architectural; RR's call).** Probe: razel runs
-  arrayref's rustc but it can't read `external/rules_rust++crate+crates__arrayref-0.3.9/src/lib.rs`.
-  razel's argv uses Bazel's exec-root path form `external/<repo>/…` (REQUIRED for analysis parity — B3),
-  but the fetched source lives at `.razel-crates/<repo>/…` (B1.3's `fetched_external_base`). For
-  EXECUTION the exec root must present the source at the declared path — bazel symlinks
-  `execroot/external/<repo>` → the output_base's fetched repo. razel's exec_root IS the workspace root,
-  so the options each have a trade-off RR owns: (a) symlink `exec_root/external` → `.razel-crates` before
-  execution (small, but outputs land in the source cache + only fixes non-compat paths — under
-  `bazel_build_compat` outputs are `bazel-out/<cfg>/bin/external/<repo>/…`, a 2nd layer); (b) materialize
-  to `exec_root/external/<repo>/` directly (aligns analysis+exec, pollutes the workspace with a top-level
-  `external/`); (c) a PROPER separate exec-root (sources `external/<repo>`, outputs `bazel-out/…`) — the
-  bazel-faithful model, biggest change. RECO: (c) longer-term, but confirm — it reshapes razel's whole
-  external-crate execution layout. AFTER it: the cc env leg (P3.8d leg 2) `CC`/`AR`/`CFLAGS` from
-  `razel-cc-toolchain` for the build-script run (blake3's `build.rs` `cc::Build` → SIMD `.o`s; the
-  captured CargoBuildScriptRun env shows Bazel's exact cc env — a deviation-posture call too). Then
-  **Phase B COMPLETE** (Milestone-1). **Milestone-1 ANALYSIS half (B1–B3) is DONE + gated**; Phase A +
-  local execution stay fully gated.
+- `9dee91c` **B4 exec-root (RR chose (c): "always do it properly")** — `prepare_exec_root`: a separate
+  `.razel-exec` symlink FOREST (workspace source entries + `external/<repo>` → the fetched `.razel-crates`
+  repos), so external sources resolve at the declared `external/<repo>/…` path and outputs land in
+  `bazel-out/`, never the source cache. External builds use it; pure-local (A7) keep `exec_root=root`.
+- `8e3702d` **B4 transitive rlibs as inputs** — `transitive_rlibs` (the rlib FILES) staged as action
+  inputs so the per-action sandbox has the transitive closure (a direct rlib refs its deps by name+hash
+  → rustc loads their `.rmeta`); fixed "can't find crate `shlex` which `cc` depends on". Parity-neutral
+  (the diff drops `external/<repo>/` inputs).
+- `7261f03` **B4 env-file producer dep** — `cargo_toml_env_vars` (the `--env-file` producer) added to the
+  build-script target's `deps` so `collect_order` BUILDS it before the run (else the run ENOENT'd on the
+  missing `--env-file`). Parity-neutral.
+- **PROGRESS: blake3 executes through the WHOLE closure** — ~15 crates compile, the build-script bin
+  compiles + RUNS (CARGO_* env present). **STOP at the final leg — the cc SIMD compile.** blake3's
+  `build.rs` runs `cc::Build` to compile `c/blake3_neon.c` etc.; it fails because (a) the build script's
+  cwd isn't the crate root, so `c/*.c` (relative to `CARGO_MANIFEST_DIR`) doesn't resolve — a `--rundir`
+  fix; and (b) the **cc env** (`CC`/`AR`/`CFLAGS`) is unset (the deferred **P3.8d leg 2**). (b) carries a
+  DEVIATION-POSTURE decision RR owns: Bazel's CargoBuildScriptRun env has a rich `CFLAGS` (cc_wrapper.sh,
+  `-fstack-protector`, `-mmacosx-version-min=<sdk>`, redacted `__DATE__`/`__TIME__` macros, …) — MATCH it
+  (via `razel-cc-toolchain`) vs DOCUMENT razel's system-cc env as a deviation (like the rust system-rustc
+  `--sysroot`/`-L` deviations). RECO: cwd fix + system-cc to GET the `.o`s built (B4 "rlib + SIMD `.o`s
+  exist"), document the exact-CFLAGS as a deviation — but RR's call. Then **Phase B COMPLETE**
+  (Milestone-1). **Milestone-1 ANALYSIS half (B1–B3) DONE + gated**; Phase A + local execution gated.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
