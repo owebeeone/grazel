@@ -1,0 +1,32 @@
+@@ //corpus/rust/transitive:all
+//corpus/rust/transitive:base
+//corpus/rust/transitive:util
+
+@@ //corpus/rust/transitive:*
+//corpus/rust/transitive:BUILD
+//corpus/rust/transitive:base
+//corpus/rust/transitive:base.rs
+//corpus/rust/transitive:util
+//corpus/rust/transitive:util.rs
+
+@@ kind("rust_library rule", //corpus/rust/transitive:all)
+//corpus/rust/transitive:base
+//corpus/rust/transitive:util
+
+@@ deps(//corpus/rust/transitive:util)
+//corpus/rust/transitive:base
+//corpus/rust/transitive:base.rs
+//corpus/rust/transitive:util
+//corpus/rust/transitive:util.rs
+
+@@ rdeps(//corpus/rust/transitive:all, //corpus/rust/transitive:base)
+//corpus/rust/transitive:base
+//corpus/rust/transitive:util
+
+@@ labels(srcs, //corpus/rust/transitive:util)
+//corpus/rust/transitive:util.rs
+
+@@ somepath(//corpus/rust/transitive:util, //corpus/rust/transitive:base)
+//corpus/rust/transitive:base
+//corpus/rust/transitive:util
+

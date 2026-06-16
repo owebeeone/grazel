@@ -100,10 +100,19 @@ the 2 carve-out reds.
 **Rollback.** `git reset --hard razelv3-rust/p0` (Phase 1 is additive — a new crate + a CLI verb;
 the only shared-crate change is the `discover_packages` move, behavior-identical).
 
-**Remaining for full Phase 1 (`razelv3-rust/p1`):** LIVE `bazel query` golden capture — the
-design's true `qg` (razel vs bazel). It needs `bazel` + a corpus both can query, and rides the
-goldens xtask (like the aquery goldens); the `labels()` raw-vs-canonical question settles there.
-Also the implicit-deps parity rung (Phase 6).
+**Full Phase 1 (`razelv3-rust/p1`) — DONE: LIVE `bazel query` parity.** The design's true `qg`
+(razel vs LIVE bazel) now lands, riding the goldens xtask like aquery:
+- `27fd23f` — `:*` / `:all-targets` (all targets incl source/generated files + `BUILD`; was `:all`=
+  rules only). Filters the graph's `kinds` (file edge-targets included) by package + adds `//pkg:BUILD`.
+- `7bfe412` — `labels()` emits CANONICAL labels (`:base`→`//pkg:base`, bare `n`→`//pkg:n`); was raw.
+  **This settles the raw-vs-canonical question: bazel is canonical, so razel canonicalizes.**
+- (this) — `cargo xtask capture-query-goldens` captures `bazel query --noimplicit_deps <expr>` for a
+  7-op battery (`:all`/`:*`/kind/deps/rdeps/labels/somepath) over `corpus/rust/transitive` →
+  `query_goldens.txt`; the `live_query_parity` test (hermetic, no bazel at test time) asserts
+  `razel query` byte-matches. GREEN across all 7. (Before this, the other 5 ops already matched —
+  the only gaps were `:*` + `labels()`.)
+**The only remaining divergence is the `--implicit_deps` default** (bazel-on/razel-off) — with
+`--noimplicit_deps` on both, `deps()` is byte-identical. That's the **Phase 6** rung (q5+), as designed.
 
 ---
 

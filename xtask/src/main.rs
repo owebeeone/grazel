@@ -118,6 +118,7 @@ fn main() -> ExitCode {
             }
         }
         Some("capture-goldens") => capture_goldens(&rest),
+        Some("capture-query-goldens") => capture_query_goldens(),
         Some("normalize-golden") => normalize_golden(&rest),
         Some("examples") if rest.first().map(String::as_str) == Some("--survey") => {
             match examples::survey(&workspace_root()) {
@@ -240,6 +241,68 @@ fn capture_goldens(filter: &[String]) -> ExitCode {
             }
         }
     }
+    if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
+}
+
+/// The live-query parity battery (`{P}` = the package label) — patterns + the v1 operators, each
+/// captured `--noimplicit_deps` (razel query's v1 default; implicit-deps parity is Phase 6). Mirrors
+/// the `qg` sentinels (q1–q3) against LIVE `bazel query`.
+const QUERY_BATTERY: &[&str] = &[
+    "{P}:all",
+    "{P}:*",
+    "kind(\"rust_library rule\", {P}:all)",
+    "deps({P}:util)",
+    "rdeps({P}:all, {P}:base)",
+    "labels(srcs, {P}:util)",
+    "somepath({P}:util, {P}:base)",
+];
+
+/// `cargo xtask capture-query-goldens` runs `bazel query --noimplicit_deps <expr>` for [`QUERY_BATTERY`]
+/// over the dual-queryable `corpus/rust/transitive` package and writes `query_goldens.txt` (blocks:
+/// `@@ <expr>` then the SORTED result labels, blank-line separated). Dev/authoring-only — the only
+/// bazel-touching step; the `live_query_parity` test consumes the committed goldens with no bazel.
+fn capture_query_goldens() -> ExitCode {
+    let parity = workspace_root().join("parity");
+    let bazel = std::env::var("BAZEL").unwrap_or_else(|_| "bazel".into());
+    let ob = std::env::var("RAZEL_GOLDEN_OB").unwrap_or_else(|_| "/tmp/razel-parity-ob".into());
+    let pkg = "//corpus/rust/transitive";
+
+    let mut blocks = String::new();
+    let mut failed = 0usize;
+    for tmpl in QUERY_BATTERY {
+        let expr = tmpl.replace("{P}", pkg);
+        eprintln!("query {expr} …");
+        let out = Command::new(&bazel)
+            .current_dir(&parity)
+            .arg(format!("--output_base={ob}"))
+            .args(["query", "--noimplicit_deps", "--noshow_progress", &expr])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let mut labels: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                labels.sort();
+                blocks.push_str(&format!("@@ {expr}\n{}\n\n", labels.join("\n")));
+            }
+            Ok(o) => {
+                eprintln!("  FAIL: {}", String::from_utf8_lossy(&o.stderr).trim_end());
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("  FAIL spawn bazel: {e}");
+                failed += 1;
+            }
+        }
+    }
+    let path = parity.join("corpus/rust/transitive/query_goldens.txt");
+    if let Err(e) = std::fs::write(&path, &blocks) {
+        eprintln!("FAIL write {}: {e}", path.display());
+        return ExitCode::from(1);
+    }
+    eprintln!("wrote {} ({} bytes)", path.display(), blocks.len());
     if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
