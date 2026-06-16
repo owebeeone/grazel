@@ -1,0 +1,22 @@
+# P4.4 — getrandom (richer per-cfg `select()` deps) EXTERNAL-closure analysis-parity golden (§9.3).
+#
+# getrandom 0.4.2 is the RICHER §5.4 case: its `deps = select({<triple>: [...], default: [...]})`
+# fans the host (darwin/unix) arm to {cfg_if, libc, rand_core} and selects the wasm (`wasi*`) and
+# windows (`windows-targets`) arms AWAY — those repos are declared in the lock but never fetched on
+# this host. So getrandom's OWN rlib Rustc action must `--extern` exactly cfg_if+libc+rand_core, and
+# its build-script bin compile must match too. A TRANSITIVE dep (no top-level alias), so the
+# canonical `@@rules_rust++crate+crates__getrandom-0.4.2//:getrandom` label is used (like serde_derive).
+# Fetched (sha256-verified) by the network-gated parity test from the repo root (where `@crates` lives).
+#
+# CAPTURE (manual + reproducible — `capture-goldens` only reaches self-contained corpus BUILD cases):
+#   bazel --output_base=/tmp/razel-parity-ob \
+#     aquery 'deps(@@rules_rust++crate+crates__getrandom-0.4.2//:getrandom)' --output=text > raw.txt
+#   # extract getrandom's OWN action blocks (Target = crates__getrandom-0.4.2), then:
+#   cargo xtask normalize-golden <scoped> parity/corpus/rust/crate_getrandom/golden.txt
+# Re-capture if the root lock bumps getrandom off 0.4.2.
+bazel_version        = "9.1.1"
+rules_rust_version   = "0.70.0"
+getrandom_version    = "0.4.2"
+platform             = "darwin_arm64"
+norm_version         = 3
+query                = "aquery 'deps(getrandom)' --output=text  (filtered to crates__getrandom-0.4.2)"

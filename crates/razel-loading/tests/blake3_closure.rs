@@ -96,6 +96,32 @@ fn probe_serde_derive_analyzes() {
 }
 
 #[test]
+#[ignore = "P4.4 dev driver: analyzes getrandom (richer per-cfg `select()` deps) from the repo root"]
+fn probe_getrandom_analyzes() {
+    // getrandom 0.4.2's `deps = select({<triple>: [libc|wasi|windows…], default: []})` is the richer
+    // P4.3/P4.4 per-cfg case: on a darwin host the libc arm must resolve (extern'd into getrandom's
+    // own rustc), and the wasm/windows arms must be selected away (their repos are never fetched).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root");
+    let label = "@@rules_rust++crate+crates__getrandom-0.4.2//:getrandom";
+    match analyze_workspace_with(&root, label, GlobalFlags { bazel_build_compat: true, ..Default::default() }) {
+        Ok(targets) => {
+            eprintln!("OK: getrandom closure analyzed — {} targets", targets.len());
+            for t in targets.iter().filter(|t| t.name.contains("getrandom-0.4.2")) {
+                for a in &t.actions {
+                    eprintln!("  {} [{}] -> {:?}", t.name, a.mnemonic, a.outputs);
+                    for (i, tok) in a.argv.iter().enumerate() {
+                        if tok.contains("--extern") || tok.contains("libc") || tok.contains("wasi") {
+                            eprintln!("    argv[{i}] {tok}");
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => panic!("getrandom closure did NOT analyze:\n{e}"),
+    }
+}
+
+#[test]
 #[ignore = "B3 dev gate: blake3 external-closure analysis parity (fetches over network from the root)"]
 fn blake3_analysis_matches_the_bazel_golden() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root");
@@ -224,5 +250,73 @@ fn serde_derive_analysis_matches_the_bazel_golden() {
     assert!(
         report.is_match(),
         "serde_derive analysis must match the Bazel golden (documented deviations only):\n{report:#?}"
+    );
+}
+
+#[test]
+#[ignore = "P4.4 dev gate: getrandom richer per-cfg `select()` deps analysis parity (network from the root)"]
+fn getrandom_analysis_matches_the_bazel_golden() {
+    // getrandom 0.4.2 is the richer §5.4 case (P4.3/P4.4): its `deps = select({<triple>: …})` must
+    // resolve to the host (darwin/unix) arm — getrandom's OWN rlib Rustc action `--extern`s exactly
+    // cfg_if+libc+rand_core, with the wasm/windows arms selected away (never fetched). Same documented
+    // deviations as blake3's rlib (B3_OMIT + the toolchain/link strips).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root");
+    let flags = GlobalFlags { bazel_build_compat: true, ..Default::default() };
+    let label = "@@rules_rust++crate+crates__getrandom-0.4.2//:getrandom";
+    let targets = analyze_workspace_with(&root, label, flags)
+        .unwrap_or_else(|e| panic!("razel analyzes getrandom: {e}"));
+
+    let n = |s: &str| razel_parity::normalize(s).trim_end().to_string();
+    let is_gr = |s: &str| s.contains("crates__getrandom-0.4.2");
+
+    let razel: Vec<razel_parity::Action> = targets
+        .iter()
+        .filter(|t| is_gr(&t.name))
+        .flat_map(|t| t.actions.iter())
+        .map(|a| {
+            let rustc = a.mnemonic == "Rustc";
+            let mut outputs: Vec<String> = a.outputs.iter().map(|s| n(s)).collect();
+            outputs.sort();
+            let argv: Vec<String> = a.argv.iter().map(|s| n(s)).collect();
+            let mut inputs: Vec<String> = a.inputs.iter().map(|s| n(s)).collect();
+            inputs.sort();
+            razel_parity::Action {
+                mnemonic: a.mnemonic.clone(),
+                argv: if rustc { b3_rustc_argv(&argv) } else { argv },
+                inputs: if rustc { b3_rustc_inputs(&inputs) } else { inputs },
+                outputs,
+            }
+        })
+        .collect();
+
+    let golden: Vec<razel_parity::Action> = razel_parity::parse_golden(include_str!(
+        "../../../parity/corpus/rust/crate_getrandom/golden.txt"
+    ))
+    .into_iter()
+    .map(|a| {
+        let rustc = a.mnemonic == "Rustc";
+        razel_parity::Action {
+            argv: if rustc { b3_rustc_argv(&a.argv) } else { a.argv.clone() },
+            inputs: if rustc { b3_rustc_inputs(&a.inputs) } else { a.inputs.clone() },
+            mnemonic: a.mnemonic,
+            outputs: a.outputs,
+        }
+    })
+    .collect();
+
+    if std::env::var("B3_DUMP").is_ok() {
+        for (tag, set) in [("RAZEL", &razel), ("GOLDEN", &golden)] {
+            for a in set.iter().filter(|a| a.mnemonic == "Rustc") {
+                eprintln!("== {tag} Rustc {} ==", a.outputs.join(","));
+                for (i, t) in a.argv.iter().enumerate() {
+                    eprintln!("  [{i}] {t}");
+                }
+            }
+        }
+    }
+    let report = razel_parity::diff(&razel, &golden, B3_OMIT);
+    assert!(
+        report.is_match(),
+        "getrandom analysis must match the Bazel golden (documented deviations only):\n{report:#?}"
     );
 }
