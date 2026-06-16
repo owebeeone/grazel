@@ -2,7 +2,7 @@
 //! from the lock: the ROOT `@crates` (inline generated text — no fetch) and the PER-CRATE repos
 //! (fetch+extract+patch the `.crate`, drop in `build_file_content`).
 
-use crate::lock::CrateRepo;
+use crate::lock::{CrateLock, CrateRepo};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -24,6 +24,32 @@ pub fn materialize_root(contents: &BTreeMap<String, String>, dest: &Path) -> Res
         if !dest.join(required).exists() {
             return Err(format!("root @crates repo is missing `{required}` after materialization"));
         }
+    }
+    Ok(())
+}
+
+/// RazelRustParityPlan **B1** (§2.2/§5.6): materialize the whole `@crates` world from the lock for
+/// ANALYSIS — the root `@crates` repo (inline contents) + EACH per-crate repo's generated
+/// `BUILD.bazel` (`build_file_content`), each under its CANONICAL name (`@@rules_rust++crate+crates…`,
+/// the form [`crate::state::Global::external_repo_dir`] resolves). NO `.crate` fetch: analysis needs
+/// only the generated BUILDs (the committed lock is the source of truth — never cargo/bazel at build
+/// time); the crate SOURCE is execution-only (B4 — [`fetch_crate`]). Eager (the whole world) so the
+/// `@crates//:blake3` alias chain finds every repo it walks. Idempotent — each repo dir is rewritten.
+pub fn materialize_crates_world(lock: &CrateLock, base: &Path) -> Result<(), String> {
+    // The root `@crates` repo: inline generated text (BUILD.bazel/defs.bzl/alias_rules.bzl/…).
+    let root_canon = lock
+        .canonical_repo("crates")
+        .ok_or("lock defines no root `crates` repo")?;
+    materialize_root(&lock.root_contents, &base.join(&root_canon))?;
+    // Each per-crate repo: just its generated package BUILD (the `.crate` fetch is B4/execution).
+    for (apparent, repo) in &lock.crates {
+        let canon = lock
+            .canonical_repo(apparent)
+            .ok_or_else(|| format!("no canonical name for crate repo `{apparent}`"))?;
+        let dir = base.join(&canon);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        std::fs::write(dir.join("BUILD.bazel"), &repo.build_file_content)
+            .map_err(|e| format!("write {}/BUILD.bazel: {e}", dir.display()))?;
     }
     Ok(())
 }
@@ -132,6 +158,53 @@ mod tests {
         bad.insert("defs.bzl".to_string(), "X=1\n".to_string());
         let bad_dest = tmp.join("bad");
         assert!(materialize_root(&bad, &bad_dest).unwrap_err().contains("missing `BUILD.bazel`"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn materialize_crates_world_writes_root_plus_per_crate_builds() {
+        // B1: from a CrateLock, materialize the root @crates repo + each per-crate generated BUILD
+        // under its canonical name — NO `.crate` fetch (analysis-only; the source is B4).
+        let mut root_contents = BTreeMap::new();
+        root_contents.insert("BUILD.bazel".to_string(), "exports_files([])\n".to_string());
+        root_contents.insert("defs.bzl".to_string(), "ALL_CRATES = 1\n".to_string());
+        let mut crates = BTreeMap::new();
+        crates.insert(
+            "crates__blake3-1.8.2".to_string(),
+            CrateRepo {
+                urls: vec!["https://static.crates.io/crates/blake3/1.8.2/download".into()],
+                sha256: "deadbeef".into(),
+                strip_prefix: Some("blake3-1.8.2".into()),
+                build_file_content: "rust_library(name = \"blake3\")\n".into(),
+                remote_patch_strip: Some(1),
+                archive_type: Some("tar.gz".into()),
+            },
+        );
+        let lock = CrateLock {
+            version: 18,
+            root_contents,
+            crates,
+            recorded_inputs: vec![],
+            canonical_prefix: "rules_rust++crate+".into(),
+        };
+
+        let tmp = std::env::temp_dir().join(format!("razel-world-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        materialize_crates_world(&lock, &tmp).unwrap();
+
+        // The root @crates repo is materialized (inline contents, validated by materialize_root).
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("rules_rust++crate+crates/defs.bzl")).unwrap(),
+            "ALL_CRATES = 1\n"
+        );
+        // The per-crate repo's GENERATED BUILD is present under its canonical name...
+        let bs = tmp.join("rules_rust++crate+crates__blake3-1.8.2");
+        assert_eq!(
+            std::fs::read_to_string(bs.join("BUILD.bazel")).unwrap(),
+            "rust_library(name = \"blake3\")\n"
+        );
+        // ...and the crate SOURCE was NOT fetched (analysis materialization is lock-only — B4 fetches).
+        assert!(!bs.join("Cargo.toml").exists(), "no .crate fetch for analysis");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
