@@ -449,17 +449,21 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
   paths `external/<repo>/…` not `external/@<repo>/…` (the `--out-dir`/`-Ldependency` divergence; same `@@`
   family); (ii) `compile_extras` emits feature cfgs as TWO tokens (`--cfg` `feature="x"`) POSITIONED after
   `--target`, `rustc_flags` (`--cap-lints`) at the end — rules_rust's order; (iii) p32/p36 updated.
-- **STOP — ONE deviation left: the transitive `-Ldependency` (a parity-POSTURE decision RR owns).** Bazel's
-  `-Ldependency` is the FULL TRANSITIVE closure (typenum, generic-array, block-buffer, crypto-common,
-  subtle, crossbeam-{utils,epoch,deque}, then the 6 direct) in a specific traversal ORDER; razel emits the
-  6 DIRECT only. Closing it needs (1) a transitive dep-dir FOLD — the dds-provider pattern (à la
-  `CcInfo`/`JavaInfo` OrderedDepset) is the architecturally-consistent mechanism, vs a dep-graph walk; and
-  (2) an ORDER call — match Bazel's exact traversal, OR compare `-Ldependency` ORDER-INSENSITIVELY (rustc
-  search paths are order-free, so the SET is what matters functionally — a small canonicalizer sort, but a
-  parity RELAXATION RR should sanction). Also needed for **B4** (rustc needs the transitive `.rmeta` search
-  paths to compile). RECO: dds-fold + order-insensitive `-Ldependency` compare. Then **B4** (blake3 xp + cc
-  `CC`/`AR`/`CFLAGS` for the SIMD `.o`s; the CargoBuildScriptRun env already shows the cc env). Phase A +
-  the local execution stay fully gated; `rust_graph_parity` 2/2 + lib 75/0 throughout.
+- `d6b90d9` **B3 — blake3 ANALYSIS PARITY GREEN (Milestone-1 analysis half).** The last deviation closed
+  (RR sanctioned the reco): `transitive_rlib_dirs` walks the analyzed dep graph (`results[canon].deps`)
+  for the TRANSITIVE rlib-dir closure → `-Ldependency` per transitive crate (rules_rust's form; also
+  needed for B4 so rustc finds transitive `.rmeta`). Only rlib-producing CRATES are collected/recursed —
+  a `cargo_build_script` (`_bs`, bin output) is the intra-target edge, so recursing it is SKIPPED (else
+  BUILD-only deps like `version_check` leak in, which Bazel's crate-compile `-Ldependency` excludes — that
+  was the final 1-entry diff). The parity diff compares `-Ldependency` ORDER-INSENSITIVELY (sorted in
+  `b3_rustc_argv`, both sides) — rustc search paths are order-free, so only the SET must agree.
+  `blake3_analysis_matches_the_bazel_golden` GREEN (ignored/network); `rust_graph_parity` 2/2 + lib 75/0 +
+  gates + perfgate unaffected.
+- **REMAINING:** **B4 — blake3 EXECUTION parity (xp)** — `razel build @crates//:blake3` → the rlib + the
+  SIMD `.o`s in `OUT_DIR`; diff the flags-file. The cc env leg (deferred P3.8d leg 2): `CC`/`AR`/`CFLAGS`
+  from `razel-cc-toolchain` for the build-script run (blake3's `build.rs` `cc::Build` compiles the SIMD
+  C/asm) — the captured CargoBuildScriptRun env already shows Bazel's cc env to match. Then **Phase B
+  COMPLETE** (Milestone-1). Phase A + the local execution stay fully gated.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
