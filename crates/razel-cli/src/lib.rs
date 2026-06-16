@@ -1169,8 +1169,12 @@ fn build_one(
     cache: &Cache,
     flags: GlobalFlags,
 ) -> Result<BuildResult, ExitCode> {
-    let report = if target_arg.starts_with("//") {
-        // Workspace label → load packages on demand from the workspace root.
+    let report = if target_arg.starts_with("//")
+        || (target_arg.starts_with('@') && target_arg.contains("//"))
+    {
+        // Workspace label (`//pkg:name`) OR an external-repo label (`@crates//:blake3`,
+        // RazelRustParityPlan B1) → load packages on demand from the workspace root; the analysis
+        // path seeds the `@crates` lock + follows the alias chain to the versioned crate repo.
         build_workspace_with(&o.workspace, target_arg, cache, flags)
     } else {
         // Bare name / :name → single-package build from the workspace's root package.
