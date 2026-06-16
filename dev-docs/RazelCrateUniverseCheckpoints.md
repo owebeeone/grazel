@@ -479,18 +479,33 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
   relative `build.file("c/blake3_neon.c")` resolves and the SIMD `.o`s compile (system `cc`; exact
   CFLAGS not gated — CargoBuildScriptRun is OMIT'd). Parity-neutral (run argv OMIT'd): A7 ok, rust 2/2,
   blake3 analysis GREEN, wrapper 11/0.
-- **REMAINING: the per-crate EXECUTION tail (a wrapper-env-model continuation).** Execution proceeds
-  through the closure; the next gap is `crossbeam-utils`'s build-script BIN COMPILE — its `build.rs`
-  reads `env!("CARGO_PKG_NAME")` at COMPILE time, but razel's direct-rustc bin compile carries only the
-  hardcoded `PATH` (run_one_target). FIX: route the build-script bin compile through the wrapper's
-  `rustc` subcommand with `--env-file=<cargo_toml_env_vars>` (supplies `CARGO_PKG_*`); canonicalize
-  strips the wrapper prefix → parity-neutral. CAVEAT (interconnected): the wrapper's child env is
-  default-deny (no `PATH` on unix) — fine for an rlib (no link) but the bin compile LINKS (needs cc/ld
-  → `PATH`), so the wrapper's rustc env must supply `PATH` too. After that, more crates' build.rs may
-  surface further env needs, then the final blake3/closure crate compiles + the **xp gate** (build →
-  rlib + SIMD `.o`s + flags-file diff). The HARDEST part (blake3 + cc SIMD) is DONE; the tail is a
-  focused wrapper-env-model continuation. **Milestone-1 ANALYSIS half (B1–B3) DONE + gated**; Phase A +
-  local execution gated.
+- **B4 EXECUTION COMPLETE — `razel build @crates//:blake3` builds the FULL external closure end-to-end
+  under the (c) exec-root (compat posture); outputs isolated in `bazel-out`, source cache CLEAN.** Four
+  interlocking fixes (all parity-neutral; rust 2/2, lib 29/9/75/11, gates + perfgate green):
+  1. **build-script bin COMPILE → wrapper** (`rust_rules.rs`): when a crate declares a Cargo env, the
+     `_bs` bin compile routes through the wrapper's `rustc` subcommand with the crate's `--env-file` +
+     literal `version`/`pkg_name`, so `build.rs`'s compile-time `env!("CARGO_PKG_NAME")` (crossbeam-utils)
+     resolves. `canonicalize_rust_argv` strips the wrapper prefix; the env-file lives under
+     `external/<repo>/…` so `source_inputs` drops it → parity-neutral (p36 test updated for the wrapped
+     shape).
+  2. **wrapper rustc gets `PATH`** (`rustc.rs`): razel omits Bazel's `-Clinker=<abs cc>` (documented
+     deviation → SYSTEM linker), so when rustc LINKS a `bin` it must resolve `cc`/`ld` via PATH; the
+     default-deny env carries none on unix → pass the wrapper's own (env is runtime, not graph → neutral).
+  3. **abs-OUT_DIR → exec-relative rewrite** (`bs_runner.rs`): the build script ran with an ABSOLUTE
+     OUT_DIR inside its EPHEMERAL sandbox, so cc-rs emitted `rustc-link-search` under a dead dir;
+     rewrite that prefix back to the exec-root-relative `--out-dir` (where the OUT_DIR tree is staged
+     for the consuming compile) — also how Bazel expresses build-script link paths.
+  4. **DIRECTORY (tree) inputs digested + staged** (`razel-build` `digest_input`): a `cargo_build_script`
+     OUT_DIR is a TREE input to the consuming crate compile (blake3's `libblake3_neon.a`), but
+     `std::fs::read`'s `EISDIR` silently dropped it from BOTH the content key AND sandbox staging → the
+     rlib compile's `-Lnative` found nothing. Now a dir input hashes its tree (sorted) → enters the map
+     → symlinked into the sandbox. (Latent until blake3: the local A7 build script only emits a `--cfg`,
+     never references OUT_DIR contents.) Fixes cache correctness too. + `RAZEL_KEEP_SANDBOX` debug hook
+     (the Bazel `--sandbox_debug` analog) used to root-cause this.
+- **REMAINING (Milestone-1 close): the xp GATE** — a test that LOCKS this in (build the blake3 closure
+  in the compat posture → assert the rlib `!<arch>`, the SIMD `.o`s / `libblake3_neon.a` in the OUT_DIR
+  tree, + the build-script flags-file). The execution WORKS; the gate makes it permanent → **Phase B /
+  Milestone-1 COMPLETE.** **Milestone-1 ANALYSIS half (B1–B3) DONE + gated**; Phase A + local execution gated.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,

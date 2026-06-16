@@ -271,6 +271,47 @@ pub fn build_target_report(
 /// shared by the serial and parallel drivers, so `-j1` and `-jN` run identical action/cache
 /// semantics — only the *order across independent targets* differs. Returns
 /// `(executed_count, produced_paths)`.
+/// Content digest of a declared input that EXISTS — a FILE's bytes, or a DIRECTORY tree's content
+/// (P2.4: a `cargo_build_script` `OUT_DIR` is a tree input to the consuming crate compile, e.g.
+/// blake3's `libblake3_neon.a`). A directory hashes its files' `(relative-path, content-digest)`
+/// pairs in SORTED order → deterministic. Absent → `None` (skipped, symmetric with the executor's
+/// `copy_path`: e.g. a declared-but-unproduced `.dSYM`). Follows symlinks (the exec-root forest).
+/// Before this, a directory input hit `std::fs::read`'s `EISDIR` and was silently dropped — omitted
+/// from BOTH the content key AND the sandbox staging, so the consuming compile couldn't see it.
+fn digest_input(path: &Path) -> Option<Digest> {
+    if std::fs::metadata(path).ok()?.is_dir() {
+        let mut files: Vec<(String, Digest)> = Vec::new();
+        digest_tree_into(path, path, &mut files)?;
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut buf = Vec::new();
+        for (rel, d) in files {
+            buf.extend_from_slice(rel.as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(d.to_hex().as_bytes());
+            buf.push(0);
+        }
+        Some(Digest::of(&buf))
+    } else {
+        std::fs::read(path).ok().map(|b| Digest::of(&b))
+    }
+}
+
+/// Collect `(path-relative-to-root, file-content-digest)` for every file under `dir`. `None` on any
+/// I/O error mid-walk → the whole input is skipped (surfacing loudly as a missing input downstream).
+fn digest_tree_into(root: &Path, dir: &Path, acc: &mut Vec<(String, Digest)>) -> Option<()> {
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if std::fs::metadata(&path).ok()?.is_dir() {
+            digest_tree_into(root, &path, acc)?;
+        } else {
+            let rel = path.strip_prefix(root).ok()?.to_string_lossy().into_owned();
+            acc.push((rel, Digest::of(&std::fs::read(&path).ok()?)));
+        }
+    }
+    Some(())
+}
+
 fn run_one_target(
     t: &AnalyzedTarget,
     exec_root: &Path,
@@ -282,8 +323,8 @@ fn run_one_target(
         // Digest the declared inputs that exist on disk → the action's content key.
         let mut inputs = BTreeMap::new();
         for inp in &act.inputs {
-            if let Ok(bytes) = std::fs::read(exec_root.join(inp)) {
-                inputs.insert(inp.clone(), Digest::of(&bytes));
+            if let Some(d) = digest_input(&exec_root.join(inp)) {
+                inputs.insert(inp.clone(), d);
             }
         }
         let action = Action {

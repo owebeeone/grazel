@@ -123,6 +123,16 @@ pub fn run_rustc(opts: &RustcOpts) -> io::Result<i32> {
     for (k, v) in &opts.env {
         env.insert(k.clone(), v.clone());
     }
+    // B4: razel compiles with the SYSTEM toolchain — it does NOT emit Bazel's `-Clinker=<abs cc>`
+    // (a documented parity deviation), so when rustc LINKS (a `bin`, e.g. a build-script host bin) it
+    // must resolve the linker `cc`/`ld` via PATH. The default-deny env carries no PATH on unix, so
+    // pass the wrapper's own (the executor set it) unless `--env`/`--env-file` already pinned one.
+    // Parity-neutral: env is runtime mechanism, not part of the action-graph (argv/inputs) compare.
+    if !env.contains_key("PATH") {
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".into(), path);
+        }
+    }
     let status = Command::new(&opts.rustc)
         .args(&opts.rustc_args)
         .args(&extra_args)

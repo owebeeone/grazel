@@ -926,8 +926,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             // link flags + `--sysroot`/`-L` are deviations razel doesn't emit (the diff filters them).
             let bin = out_path(sess, &format!("{name}_"));
             let dsym = out_path(sess, &format!("{name}_.dSYM")); // macOS debug-symbols tree output
-            let mut compile_argv = vec![
-                rustc(),
+            // The bare rustc args (everything after the rustc binary).
+            let mut bare_argv = vec![
                 crate_root,
                 format!("--crate-name={crate_name}"),
                 "--crate-type=bin".into(),
@@ -941,13 +941,42 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 "--color=always".into(),
                 format!("--target={}", crate::state::host_triple()),
             ];
-            compile_argv.extend(feature_cfgs); // B3: feature cfgs after --target (Bazel's order)
-            compile_argv.push(format!("--edition={edition}"));
-            compile_argv.push("-Cembed-bitcode=no".into());
-            compile_argv.extend(extern_flags);
-            compile_argv.extend(rustc_flags); // rustc_flags (e.g. --cap-lints) at the end
+            bare_argv.extend(feature_cfgs); // B3: feature cfgs after --target (Bazel's order)
+            bare_argv.push(format!("--edition={edition}"));
+            bare_argv.push("-Cembed-bitcode=no".into());
+            bare_argv.extend(extern_flags);
+            bare_argv.extend(rustc_flags); // rustc_flags (e.g. --cap-lints) at the end
             let mut compile_inputs = srcs.clone();
             compile_inputs.extend(dep_rlibs);
+            // B4: a build script's `build.rs` can read the Cargo env at COMPILE time (e.g.
+            // crossbeam-utils' `env!("CARGO_PKG_NAME")`). When the crate declares any Cargo env,
+            // route this compile through the wrapper's `rustc` subcommand with the SAME env-file +
+            // literal `version`/`pkg_name` as the run, so `env!()` resolves. Parity-neutral:
+            // `canonicalize_rust_argv` strips the wrapper prefix, and the env-file lives under
+            // `external/<repo>/…` so `source_inputs` drops it.
+            let compile_argv = if !env_files.is_empty()
+                || compile.version.is_some()
+                || compile.pkg_name.is_some()
+            {
+                let mut w = vec![process_wrapper(), "rustc".into(), format!("--rustc={}", rustc())];
+                for ef in &env_files {
+                    w.push(format!("--env-file={ef}"));
+                }
+                if let Some(v) = &compile.version {
+                    w.push(format!("--env=CARGO_PKG_VERSION={v}"));
+                }
+                if let Some(p) = &compile.pkg_name {
+                    w.push(format!("--env=CARGO_PKG_NAME={p}"));
+                }
+                w.push("--".into());
+                w.extend(bare_argv);
+                compile_inputs.extend(env_files.clone());
+                w
+            } else {
+                let mut a = vec![rustc()];
+                a.extend(bare_argv);
+                a
+            };
 
             // --- action 2: run the bin via the wrapper → §6.1 flags file + OUT_DIR tree ---
             let flags_out = out_path(sess, &format!("{name}.out")); // §6.1 `<name>.out`
@@ -1393,26 +1422,35 @@ mod tests {
         );
         let targets = analyze("p36_bs", &build).unwrap();
         let argv = argv_of(&targets);
-        // Compiles the build-script root → a HOST bin (`<name>_`, the §12 `:_bs_`) via rustc, with
-        // rules_rust's faithful argv (A3): `--crate-type=bin`, `--emit=link=<bin>` (not `-o`).
-        assert!(argv.first().is_some_and(|a| a.ends_with("rustc")), "rustc compile: {argv:?}");
-        assert!(argv.contains(&"--crate-type=bin".to_string()), "bin crate-type: {argv:?}");
-        assert!(argv.contains(&"--emit=link=app/t_".to_string()), "host build-script bin output: {argv:?}");
+        // B4: `version` declares a COMPILE-time Cargo env (`env!(CARGO_PKG_VERSION)` in `build.rs`),
+        // so the bin compile routes through the wrapper's `rustc` subcommand —
+        // `[wrapper, rustc, --rustc=…, --env=CARGO_PKG_VERSION=…, --, <bare rustc args>]`.
+        assert_eq!(argv.first().map(String::as_str), Some("razel-process-wrapper"), "wrapped compile: {argv:?}");
+        assert_eq!(argv.get(1).map(String::as_str), Some("rustc"), "the rustc subcommand: {argv:?}");
+        assert!(argv.iter().any(|a| a.starts_with("--rustc=") && a.ends_with("rustc")), "carries the rustc binary: {argv:?}");
+        assert!(argv.contains(&"--env=CARGO_PKG_VERSION=1.2.3".to_string()), "version → compile-time CARGO_PKG_VERSION: {argv:?}");
+        // The bare rustc args (after `--`) are rules_rust's faithful bin compile (A3):
+        // `--crate-type=bin`, `--emit=link=<bin>` (not `-o`).
+        let dd = argv.iter().position(|a| a == "--").expect("wrapper `--` separator");
+        let bare = &argv[dd + 1..];
+        assert!(bare.contains(&"--crate-type=bin".to_string()), "bin crate-type: {bare:?}");
+        assert!(bare.contains(&"--emit=link=app/t_".to_string()), "host build-script bin output: {bare:?}");
         // `deps` → `--extern=` (joined, build-deps link the host bin), NOT run inputs; rlib hashed.
         assert!(
-            argv.iter().any(|a| a.starts_with("--extern=dep=app/libdep-")),
-            "build-dep is an --extern (joined, hashed rlib): {argv:?}"
+            bare.iter().any(|a| a.starts_with("--extern=dep=app/libdep-")),
+            "build-dep is an --extern (joined, hashed rlib): {bare:?}"
         );
         // `crate_root` picks root.rs as the positional; default crate_name = the target name.
-        assert!(argv.contains(&"app/root.rs".to_string()), "crate_root positional: {argv:?}");
-        assert!(argv.contains(&"--crate-name=t".to_string()), "default crate_name = name: {argv:?}");
+        assert!(bare.contains(&"app/root.rs".to_string()), "crate_root positional: {bare:?}");
+        assert!(bare.contains(&"--crate-name=t".to_string()), "default crate_name = name: {bare:?}");
         // `crate_features` → `--cfg` `feature="x"` (two tokens, compile phase, B3); `rustc_flags` verbatim.
-        assert!(argv.windows(2).any(|w| w == ["--cfg", "feature=\"std\""]), "{argv:?}");
-        assert!(argv.contains(&"-Cdebuginfo=0".to_string()), "{argv:?}");
-        // Run-phase attrs (`version`/`links`/`data`) + ignored (`tags`) are ACCEPTED but argv-inert.
+        assert!(bare.windows(2).any(|w| w == ["--cfg", "feature=\"std\""]), "{bare:?}");
+        assert!(bare.contains(&"-Cdebuginfo=0".to_string()), "{bare:?}");
+        // `links`/`data`/`tags` are ACCEPTED but argv-inert; `version` is the compile Cargo env above,
+        // never a bare rustc arg.
         assert!(
-            !argv.iter().any(|a| a.contains("1.2.3") || a.contains("table.bin") || a == "z" || a == "manual"),
-            "run-phase/ignored attrs are not compile argv: {argv:?}"
+            !bare.iter().any(|a| a.contains("1.2.3") || a.contains("table.bin") || a == "z" || a == "manual"),
+            "run-phase/ignored attrs are not bare compile argv: {bare:?}"
         );
         // §4.3: the build-script target exposes NO libs — a crate dep on it gets no `--extern`.
         let bs = targets.iter().find(|t| t.name == "//app:t").unwrap();

@@ -258,7 +258,7 @@ impl Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        if self.owned {
+        if self.owned && std::env::var_os("RAZEL_KEEP_SANDBOX").is_none() {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }

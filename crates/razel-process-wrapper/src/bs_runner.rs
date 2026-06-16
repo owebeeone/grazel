@@ -136,7 +136,15 @@ pub fn run_build_script(opts: &RunOpts) -> io::Result<i32> {
     }
     cmd.envs(&env);
     let output = cmd.output()?; // captures stdout (and stderr)
-    let processed = process_script_output(&output.stdout);
+    // B4: the script ran with an ABSOLUTE OUT_DIR (the per-action sandbox), so cc-rs etc. emit
+    // `rustc-link-search`/`-L` paths under that EPHEMERAL sandbox dir — invalid for the downstream
+    // crate compile (a different sandbox). Rewrite that absolute prefix back to the exec-root-relative
+    // `--out-dir`, where the OUT_DIR tree is staged as a declared input of the consuming compile, so
+    // the recorded flags resolve there. (Bazel's build-script link paths are likewise exec-relative.)
+    let abs = abs_out_dir.to_string_lossy();
+    let rel = opts.out_dir.to_string_lossy();
+    let stdout = String::from_utf8_lossy(&output.stdout).replace(abs.as_ref(), rel.as_ref());
+    let processed = process_script_output(stdout.as_bytes());
     for w in &processed.warnings {
         eprintln!("warning: {w}");
     }
