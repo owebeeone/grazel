@@ -74,7 +74,50 @@ pub fn build_workspace_with(
     // under its RESOLVED canonical name (`@@rules_rust++crate+crates__blake3-1.8.2//:blake3`). Start
     // execution from that resolved name — `collect_order` would otherwise not find the apparent alias.
     let (targets, resolved) = analyze_workspace_resolved(root, top_label, flags)?;
-    execute_jobs(&targets, &resolved, root, cache, jobs)
+    // B4: an external (`@crates`) build executes in a PROPER exec-root forest (workspace sources +
+    // `external/<repo>` → the fetched repos) so external crate sources resolve at the declared path and
+    // outputs land in `bazel-out/`, never the source cache. A pure-local build (no `.razel-crates`
+    // materialized) keeps `exec_root = root` — unchanged (A7, the corpus cases).
+    let exec_root_buf;
+    let exec_root: &Path = if root.join(".razel-crates").is_dir() {
+        exec_root_buf = prepare_exec_root(root).map_err(|e| format!("prepare exec root: {e}"))?;
+        exec_root_buf.as_path()
+    } else {
+        root
+    };
+    execute_jobs(&targets, &resolved, exec_root, cache, jobs)
+}
+
+/// RazelRustParityPlan B4: lay out a proper bazel-style EXEC ROOT for external-crate builds — a
+/// symlink forest of the workspace's SOURCE entries plus `external/<repo>` → the fetched `@crates`
+/// repos (`.razel-crates`), so an external crate's declared source path
+/// (`external/<repo>/src/lib.rs`) resolves at execution. Generated outputs land in
+/// `<exec_root>/bazel-out/…` (under `--bazel_build_compat`), SEPARATE from sources — the bazel-faithful
+/// layout, never mixed into the fetched-source cache. Razel-managed state + build outputs are excluded.
+fn prepare_exec_root(workspace: &Path) -> std::io::Result<std::path::PathBuf> {
+    let exec_root = workspace.join(".razel-exec");
+    let _ = std::fs::remove_dir_all(&exec_root);
+    std::fs::create_dir_all(&exec_root)?;
+    for entry in std::fs::read_dir(workspace)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let n = name.to_string_lossy();
+        if n.starts_with(".razel-")
+            || n.starts_with(".git")
+            || matches!(n.as_ref(), "target" | "bazel-out" | "razel-out" | "razel-bin" | "razel-testlogs")
+        {
+            continue;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(entry.path(), exec_root.join(&name))?;
+    }
+    // `external/<repo>` → the fetched `@crates` repos (analysis materialized them lazily into .razel-crates).
+    let crates = workspace.join(".razel-crates");
+    if crates.is_dir() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&crates, exec_root.join("external"))?;
+    }
+    Ok(exec_root)
 }
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
