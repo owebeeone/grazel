@@ -276,48 +276,87 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    /// `rust_proc_macro(name, srcs, deps=[], edition="2021")` (§5.3, P4.1) → one rustc action with
-    /// `--crate-type proc-macro` → `lib<name>.<dylib|so>` (the host dylib suffix; single toolchain —
-    /// no exec/target split, §5.3). A dependent links it via `proc_macro_deps` → `--extern
-    /// <name>=<dylib>`; the own-only `RustProcMacro` marker tells `resolve_dep` it's a HOST dylib, not
-    /// a target rlib (so it stays out of the transitive `-Ldependency` rlib closure).
+    /// `rust_proc_macro(name, srcs, deps=[], edition="2021", **attrs)` (§5.3, P4.1/P4.2) → one rustc
+    /// action `--crate-type=proc-macro` → `lib<name>-<hash>.{dylib,so}`, in rules_rust's faithful A3/A5
+    /// form (joined flags, the hashed-output model, `--emit=dep-info,link`). A proc-macro is HOST-
+    /// compiled — single toolchain, **no `--target`** (§5.3). A dependent links it via `proc_macro_deps`
+    /// → `--extern <name>=<dylib>`; the own-only `RustProcMacro` marker tells `resolve_dep` it's a HOST
+    /// dylib, not a target rlib (so it stays out of the transitive `-Ldependency` rlib closure).
     fn native_rust_proc_macro<'v>(
         #[starlark(require = named)] name: String,
-        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
-        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
         #[starlark(require = named)] edition: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
-        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
+        crate::loaded::capture_rule(eval, &label, "rust_proc_macro", &[("srcs", srcs), ("deps", deps)], &_kw);
+        let compile = compile_attrs(eval, "rust_proc_macro", &name, &_kw)?;
+        let srcs = crate::values::str_attr_parts(eval, srcs)?;
+        let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        let tcw = crate::values::resolve_str_parts(eval, &compile.target_compatible_with)?;
+        {
+            let sess = session(eval);
+            if is_incompatible(sess, &tcw)? {
+                let nm = canon_label(sess, &name);
+                sess.incompatible_targets.borrow_mut().insert(nm.clone());
+                record_target(sess, AnalyzedTarget { name: nm, ..Default::default() });
+                return Ok(());
+            }
+        }
+        let srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+        let deps = crate::values::resolve_str_parts(eval, &deps)?;
         let sess = session(eval);
         let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
-        let crate_root = srcs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("rust_proc_macro `{name}` needs at least one src"))?
-            .clone();
+        let crate_root = match &compile.crate_root {
+            Some(cr) => qualify(sess, cr),
+            None => srcs
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("rust_proc_macro `{name}` needs at least one src"))?
+                .clone(),
+        };
         let edition = edition.unwrap_or_else(|| "2021".into());
-        let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
+        let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
+        let mut all_deps = deps.clone();
+        all_deps.extend(crate::values::resolve_str_parts(eval, &compile.proc_macro_deps)?);
+        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps)?;
+        let (feature_cfgs, rustc_flags) = compile_extras(eval, &compile)?;
+        let data = data_inputs(eval, &compile)?;
         let sess = session(eval);
-        // Host dylib suffix: `.dylib` (macOS) / `.so` (linux) — `DLL_SUFFIX` includes the dot.
-        let dylib = out_path(sess, &format!("lib{name}{}", std::env::consts::DLL_SUFFIX));
+
+        // §5.3/P4.2: faithful proc-macro argv (rules_rust A3/A5) — `--crate-type=proc-macro`, the
+        // `--out-dir`+hashed `metadata`/`extra-filename` model → `lib<name>-<hash>.{dylib,so}`. HOST
+        // compile: NO `--target` (vs the target crate's `--target=<triple>`).
+        let hash = metadata_hash(&canon_label(sess, &name));
+        let dylib = out_path(sess, &format!("lib{crate_name}-{hash}{}", std::env::consts::DLL_SUFFIX));
         let mut argv = vec![
             rustc(),
-            "--edition".into(),
-            edition,
-            "--crate-type".into(),
-            "proc-macro".into(),
-            "--crate-name".into(),
-            name.clone(),
             crate_root,
-            "-o".into(),
-            dylib.clone(),
+            format!("--crate-name={crate_name}"),
+            "--crate-type=proc-macro".into(),
+            "--error-format=human".into(),
+            format!("--codegen=metadata=-{hash}"),
+            format!("--codegen=extra-filename=-{hash}"),
+            format!("--out-dir={}", out_dir(sess)),
+            "--codegen=opt-level=0".into(),
+            "--codegen=debuginfo=0".into(),
+            "--codegen=strip=none".into(),
+            "--emit=dep-info,link".into(),
+            "--color=always".into(),
         ];
+        argv.extend(feature_cfgs);
+        argv.push(format!("--edition={edition}"));
+        argv.push("-Cembed-bitcode=no".into());
         argv.extend(extern_flags);
+        argv.extend(rustc_flags);
+        let (argv, bs_inputs) = apply_build_script_edge("rust_proc_macro", &name, argv, &build_scripts)?;
+
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
+        inputs.extend(data);
+        inputs.extend(bs_inputs);
         let mut t = AnalyzedTarget {
             name: canon_label(sess, &name),
             deps: dep_names,

@@ -459,7 +459,9 @@ mod tests {
         // the proc-macro: `--crate-type proc-macro`, host-dylib DefaultInfo.
         let mac = targets.iter().find(|t| t.name == "//app:mac").expect("mac analyzed");
         let margv = &mac.actions[0].argv;
-        assert!(margv.windows(2).any(|w| w == ["--crate-type", "proc-macro"]), "crate-type: {margv:?}");
+        assert!(margv.contains(&"--crate-type=proc-macro".to_string()), "crate-type: {margv:?}");
+        // faithful (P4.2): hashed-output dylib name `lib<name>-<hash>.{dylib,so}`.
+        assert!(margv.iter().any(|a| a.starts_with("--codegen=extra-filename=-")), "hashed: {margv:?}");
         assert!(
             mac.default_info.iter().any(|o| o.ends_with(suffix)),
             "proc-macro output is a host dylib ({suffix}): {:?}",

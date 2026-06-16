@@ -78,6 +78,24 @@ fn probe_blake3_closure_analyzes() {
 }
 
 #[test]
+#[ignore = "P4.2 dev driver: analyzes serde_derive (a rust_proc_macro crate) from the repo root"]
+fn probe_serde_derive_analyzes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root");
+    let label = "@@rules_rust++crate+crates__serde_derive-1.0.228//:serde_derive";
+    match analyze_workspace_with(&root, label, GlobalFlags { bazel_build_compat: true, ..Default::default() }) {
+        Ok(targets) => {
+            eprintln!("OK: serde_derive closure analyzed — {} targets", targets.len());
+            for t in targets.iter().filter(|t| t.name.contains("serde_derive")) {
+                for a in &t.actions {
+                    eprintln!("  {} [{}] -> {:?}", t.name, a.mnemonic, a.outputs);
+                }
+            }
+        }
+        Err(e) => panic!("serde_derive closure did NOT analyze:\n{e}"),
+    }
+}
+
+#[test]
 #[ignore = "B3 dev gate: blake3 external-closure analysis parity (fetches over network from the root)"]
 fn blake3_analysis_matches_the_bazel_golden() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root");
