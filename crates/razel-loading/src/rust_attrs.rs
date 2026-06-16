@@ -69,6 +69,12 @@ pub(crate) struct CompileAttrs {
     pub(crate) rustc_env_files: Vec<crate::values::StrAttrPart>,
     pub(crate) version: Option<String>,
     pub(crate) pkg_name: Option<String>,
+    /// P4.5 (§5.5/§6): `links` — this build script publishes `DEP_<LINKS>_*` metadata to dependents
+    /// (the `<LINKS>` prefix). `cargo_build_script` only.
+    pub(crate) links: Option<String>,
+    /// P4.5 (§5.5/§6): `link_deps` — the `links` crates whose `DEP_<LINKS>_*` metadata THIS build
+    /// script inherits into its run env (the cross-build-script channel). `cargo_build_script` only.
+    pub(crate) link_deps: Vec<crate::values::StrAttrPart>,
 }
 
 

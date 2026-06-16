@@ -71,6 +71,20 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
                 env_files.extend(dep.libs);
                 dep_names.push(dep.canon);
             }
+            // P4.5 (§5.5/§6): `link_deps` — resolve each `links` crate to its (links-name, flags-file)
+            // so this run inherits its `DEP_<LINKS>_*` metadata (the cross-build-script channel). The
+            // producing build script joins `deps` (it must RUN before this one); its flags-file is a
+            // run input. A link_dep that isn't a `links` crate contributes nothing.
+            let mut dep_metadata: Vec<(String, String)> = Vec::new();
+            for entry in crate::values::resolve_str_parts(eval, &compile.link_deps)? {
+                let dep = resolve_dep(eval, &entry)?;
+                if let Some(bs) = &dep.build_script
+                    && let Some(links) = &bs.links
+                {
+                    dep_metadata.push((links.clone(), bs.flags_file.clone()));
+                    dep_names.push(dep.canon.clone());
+                }
+            }
             let sess = session(eval);
 
             // --- action 1: compile the host build-script bin (`<name>_`, §12 `:_bs_`) ---
@@ -183,12 +197,19 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
                 run_argv.push("--env".into());
                 run_argv.push(format!("CARGO_PKG_NAME={p}"));
             }
+            // P4.5 (§5.5/§6): the cross-build-script `DEP_<LINKS>_*` channel — one `--dep-metadata`
+            // per link_dep; the wrapper reads each links crate's flags-file + injects DEP_<LINKS>_<K>.
+            for (links, flags_file) in &dep_metadata {
+                run_argv.push("--dep-metadata".into());
+                run_argv.push(format!("{links}={flags_file}"));
+            }
             run_argv.push("--".into());
             run_argv.push(bin.clone());
             let mut run_inputs = vec![bin.clone()];
             run_inputs.extend(srcs);
             run_inputs.extend(data_files);
             run_inputs.extend(env_files);
+            run_inputs.extend(dep_metadata.iter().map(|(_, f)| f.clone())); // P4.5: link_deps flags-files
 
             let mut t = AnalyzedTarget {
                 name: canon_label(sess, &name),
@@ -215,6 +236,11 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
             // reads it via `resolve_dep(...).build_script` and routes its rustc through the wrapper.
             t.set_set("BuildScriptRun", "flags_file", vec![flags_out]);
             t.set_set("BuildScriptRun", "out_dir", vec![out_dir]);
+            // P4.5 (§5.5/§6): publish this build script's `links` name so a dependent's `link_deps`
+            // can form `--dep-metadata <links>=<flags-file>` (own-only — named, not folded).
+            if let Some(links) = &compile.links {
+                t.set_set("BuildScriptRun", "links", vec![links.clone()]);
+            }
             record_target(sess, t);
             Ok(())
         }))?;

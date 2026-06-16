@@ -124,6 +124,11 @@ pub(crate) fn bs_attrs<'v>(
                 }
                 "version" => out.version = val.unpack_str().map(str::to_owned),
                 "pkg_name" => out.pkg_name = val.unpack_str().map(str::to_owned),
+                // P4.5 (§5.5/§6): `links` (this crate's `DEP_<LINKS>_*` prefix) + `link_deps` (the
+                // links crates whose metadata this build script inherits — the cross-build-script
+                // channel). The remaining run attrs (`build_script_env`/`tools`/`rundir`) stay inert.
+                "links" => out.links = val.unpack_str().map(str::to_owned),
+                "link_deps" => out.link_deps = crate::values::str_attr_parts(eval, Some(*val))?,
                 _ => {}
             },
             // `Compile` (deferred) / `Ignored` → accepted no-ops here; never extracted.

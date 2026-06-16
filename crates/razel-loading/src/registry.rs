@@ -106,6 +106,10 @@ pub(crate) fn builtin_registry() -> ProviderRegistry {
     // reads it directly off the dep (deps.rs), not via the transitive fold.
     r.register("BuildScriptRun", "flags_file", FieldSpec { kind: FieldKind::Set, dep_fold: None });
     r.register("BuildScriptRun", "out_dir", FieldSpec { kind: FieldKind::Set, dep_fold: None });
+    // P4.5 (§5.5/§6): the build script's `links` name — read OWN-only by a dependent's `link_deps`
+    // to form `--dep-metadata <links>=<flags-file>` (the `DEP_<LINKS>_*` channel). Not folded: the
+    // edge is named explicitly, not inherited transitively.
+    r.register("BuildScriptRun", "links", FieldSpec { kind: FieldKind::Set, dep_fold: None });
     // P4.1 (§5.3): own-only marker that a target is a `rust_proc_macro` — `resolve_dep` reads it
     // directly off the dep (a proc-macro is `--extern`'d as a host dylib, not a target rlib); it must
     // NOT propagate transitively (a crate's consumers aren't proc-macros).

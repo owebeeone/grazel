@@ -294,6 +294,34 @@ mod tests {
     }
 
     #[test]
+    fn p45_link_deps_injects_dep_metadata_into_the_build_script_run() {
+        // P4.5 (§5.5/§6): the cross-build-script DEP_<LINKS>_* channel. Producer `z_bs` (links="z")
+        // publishes its flags-file + links name; consumer `t` (cargo_build_script, link_deps=[":z_bs"])
+        // emits `--dep-metadata z=<z_bs flags-file>` on its RUN action — so the wrapper injects DEP_Z_*
+        // into t's build-script env (P4.5c) — and stages z_bs's flags-file as a run input.
+        let build = format!(
+            "{BS_LOAD}\
+             cargo_build_script(name = \"z_bs\", srcs = [\"lib.rs\"], links = \"z\")\n\
+             cargo_build_script(name = \"t\", srcs = [\"root.rs\"], link_deps = [\":z_bs\"])\n"
+        );
+        let targets = analyze("p45dep", &build).unwrap();
+        let t = targets.iter().find(|t| t.name == "//app:t").expect("//app:t analyzed");
+        let run = t.actions.iter().find(|a| a.mnemonic == "CargoBuildScriptRun").expect("a run action");
+        assert!(
+            run.argv
+                .windows(2)
+                .any(|w| w[0] == "--dep-metadata" && w[1].starts_with("z=") && w[1].contains("z_bs.out")),
+            "link_deps → --dep-metadata for the links crate: {:?}",
+            run.argv
+        );
+        assert!(
+            run.inputs.iter().any(|i| i.contains("z_bs.out")),
+            "the producing build script's flags-file is a run input: {:?}",
+            run.inputs
+        );
+    }
+
+    #[test]
     fn p35a_cargo_toml_env_vars_emits_the_cargo_pkg_env_file() {
         let tmp = std::env::temp_dir().join(format!("razel-p35a-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

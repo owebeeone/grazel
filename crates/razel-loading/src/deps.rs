@@ -38,6 +38,9 @@ pub(crate) fn record_target(sess: &Session, t: AnalyzedTarget) {
 pub(crate) struct BuildScriptRunInfo {
     pub(crate) flags_file: String,
     pub(crate) out_dir: String,
+    /// P4.5 (§5.5/§6): this build script's `links` name (if any) — a dependent's `link_deps` reads it
+    /// to inject `DEP_<LINKS>_*` from this crate's metadata.
+    pub(crate) links: Option<String>,
 }
 
 /// What a dep contributes to its users: its linkable outputs (`libs` — own `DefaultInfo`), its
@@ -163,6 +166,7 @@ pub(crate) fn resolve_dep<'v>(
     // the transitive fold — exactly how `libs`/`DefaultInfo.files` is read above).
     let bs_flags = t.field_strs("BuildScriptRun", "flags_file");
     let bs_out = t.field_strs("BuildScriptRun", "out_dir");
+    let bs_links = t.field_strs("BuildScriptRun", "links"); // P4.5: the `links` name (if any)
     // P4.1 (§5.3): a `rust_proc_macro` target carries this own-only marker — its dep is a host
     // dylib `--extern`'d at compile time, not a target rlib.
     let proc_macro = !t.field_strs("RustProcMacro", "marker").is_empty();
@@ -170,6 +174,7 @@ pub(crate) fn resolve_dep<'v>(
     let build_script = bs_flags.into_iter().next().map(|flags_file| BuildScriptRunInfo {
         flags_file,
         out_dir: bs_out.into_iter().next().unwrap_or_default(),
+        links: bs_links.into_iter().next(),
     });
     // The transitive provider closure via the ONE registry-driven fold (C3a.3b), over the
     // Session's LIVE store (E0d) — no per-dep rebuild, no snapshot clones.
