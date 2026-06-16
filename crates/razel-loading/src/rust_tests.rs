@@ -446,5 +446,32 @@ mod tests {
         assert!(argv[0].ends_with("rustc"), "plain crate runs rustc directly: {argv:?}");
         assert!(!argv[0].contains("razel-process-wrapper"), "not wrapped: {argv:?}");
     }
+
+    #[test]
+    fn p41_rust_proc_macro_compiles_to_a_dylib_and_dependents_extern_it() {
+        // §5.3/P4.1: a rust_proc_macro compiles `--crate-type proc-macro` → a HOST dylib; a
+        // dependent's `proc_macro_deps` `--extern`s that dylib (NOT as a target rlib).
+        let suffix = std::env::consts::DLL_SUFFIX; // ".dylib" / ".so"
+        let build = "load(\"@rules_rust//rust:defs.bzl\", \"rust_library\", \"rust_proc_macro\")\n\
+             rust_proc_macro(name = \"mac\", srcs = [\"mac.rs\"])\n\
+             rust_library(name = \"t\", srcs = [\"lib.rs\"], proc_macro_deps = [\":mac\"])\n";
+        let targets = analyze("p41", build).unwrap();
+        // the proc-macro: `--crate-type proc-macro`, host-dylib DefaultInfo.
+        let mac = targets.iter().find(|t| t.name == "//app:mac").expect("mac analyzed");
+        let margv = &mac.actions[0].argv;
+        assert!(margv.windows(2).any(|w| w == ["--crate-type", "proc-macro"]), "crate-type: {margv:?}");
+        assert!(
+            mac.default_info.iter().any(|o| o.ends_with(suffix)),
+            "proc-macro output is a host dylib ({suffix}): {:?}",
+            mac.default_info
+        );
+        // the dependent `--extern`s the proc-macro DYLIB (via proc_macro_deps), not an rlib.
+        let t = targets.iter().find(|t| t.name == "//app:t").expect("t analyzed");
+        let targv = &t.actions[0].argv;
+        assert!(
+            targv.iter().any(|a| a.starts_with("--extern=mac=") && a.ends_with(suffix)),
+            "proc-macro dylib --extern'd: {targv:?}"
+        );
+    }
 }
 

@@ -50,6 +50,9 @@ pub(crate) struct DepInfo {
     pub(crate) canon: String,
     fields: BTreeMap<String, Vec<String>>,
     pub(crate) build_script: Option<BuildScriptRunInfo>,
+    /// P4.1 (§5.3): this dep is a `rust_proc_macro` — a HOST dylib `--extern`'d at compile time,
+    /// NOT a target rlib, so it's excluded from the transitive `-Ldependency` rlib closure.
+    pub(crate) proc_macro: bool,
 }
 
 impl DepInfo {
@@ -108,6 +111,7 @@ pub(crate) fn resolve_dep<'v>(
                 canon,
                 fields: Default::default(),
                 build_script: None,
+                proc_macro: false,
             });
         }
         // Bazel file-label semantics: a label naming no declared target resolves to a SOURCE
@@ -139,7 +143,7 @@ pub(crate) fn resolve_dep<'v>(
             })
         };
         if let Some(path) = on_disk {
-            return Ok(DepInfo { libs: vec![path], canon, fields: Default::default(), build_script: None });
+            return Ok(DepInfo { libs: vec![path], canon, fields: Default::default(), build_script: None, proc_macro: false });
         }
         // A failed dep-package load SURFACES (round 29 — was swallowed: a missing-vendor
         // chain reported the wrong-reason "not analyzed"; loud errors over silent-wrong).
@@ -159,6 +163,9 @@ pub(crate) fn resolve_dep<'v>(
     // the transitive fold — exactly how `libs`/`DefaultInfo.files` is read above).
     let bs_flags = t.field_strs("BuildScriptRun", "flags_file");
     let bs_out = t.field_strs("BuildScriptRun", "out_dir");
+    // P4.1 (§5.3): a `rust_proc_macro` target carries this own-only marker — its dep is a host
+    // dylib `--extern`'d at compile time, not a target rlib.
+    let proc_macro = !t.field_strs("RustProcMacro", "marker").is_empty();
     drop(results);
     let build_script = bs_flags.into_iter().next().map(|flags_file| BuildScriptRunInfo {
         flags_file,
@@ -177,7 +184,7 @@ pub(crate) fn resolve_dep<'v>(
         sess.fold_cache.borrow_mut().insert(canon.clone(), f.clone());
         f
     };
-    Ok(DepInfo { libs, canon, fields: fields.into_iter().collect(), build_script })
+    Ok(DepInfo { libs, canon, fields: fields.into_iter().collect(), build_script, proc_macro })
 }
 
 

@@ -149,6 +149,16 @@ pub(crate) fn extern_args(
             names.push(dep.canon);
             continue;
         }
+        // P4.1 (§5.3): a `rust_proc_macro` dep is `--extern`'d as a HOST dylib, but is NOT a target
+        // rlib — keep it OUT of `rlib_deps` so it never enters the transitive `-Ldependency` closure.
+        if dep.proc_macro {
+            let crate_name = crate_name_of(&dep.canon);
+            for dylib in &dep.libs {
+                args.push(format!("--extern={crate_name}={dylib}"));
+            }
+            names.push(dep.canon);
+            continue;
+        }
         let crate_name = crate_name_of(&dep.canon);
         // A rust_library exports exactly one rlib in default_info → dep.libs. rules_rust's faithful
         // form is `--extern=<name>=<rlib>` (joined) for the DIRECT dep.

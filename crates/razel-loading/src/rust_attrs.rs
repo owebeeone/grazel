@@ -58,6 +58,9 @@ pub(crate) struct CompileAttrs {
     pub(crate) rustc_flags: Vec<crate::values::StrAttrPart>,
     pub(crate) compile_data: Vec<crate::values::StrAttrPart>,
     pub(crate) target_compatible_with: Vec<crate::values::StrAttrPart>,
+    /// P4.1 (§5.3): `proc_macro_deps` — host proc-macro dylibs `--extern`'d at compile time
+    /// (resolved like `deps`, but the dep is a `rust_proc_macro`, not an rlib).
+    pub(crate) proc_macro_deps: Vec<crate::values::StrAttrPart>,
     /// P3.8b: `data` — build-script RUN inputs (§5.2 action 2); only `cargo_build_script` fills it.
     pub(crate) data: Vec<crate::values::StrAttrPart>,
     /// P3.8c: build-script RUN env (§5.2/§6.2). `rustc_env_files` are env-file targets → `--env-file`
@@ -106,11 +109,13 @@ pub(crate) fn compile_attrs<'v>(
                 }
                 _ => {} // env family — accepted, extraction in P3.5 (argv/env-inert here)
             },
-            // `target_compatible_with` semantics land HERE (P3.4); the other delegated attrs
-            // (`proc_macro_deps` → P4.1, `link_deps` → P4.5) stay accepted + inert.
+            // `target_compatible_with` (P3.4) + `proc_macro_deps` (P4.1) semantics land HERE; the
+            // other delegated attr (`link_deps` → P4.5) stays accepted + inert.
             Verdict::Delegated => {
                 if key == "target_compatible_with" {
                     out.target_compatible_with = crate::values::str_attr_parts(eval, Some(*val))?;
+                } else if key == "proc_macro_deps" {
+                    out.proc_macro_deps = crate::values::str_attr_parts(eval, Some(*val))?;
                 }
             }
             // Accepted + recorded (via `capture_rule`); never an action effect.

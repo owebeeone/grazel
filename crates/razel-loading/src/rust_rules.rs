@@ -71,7 +71,11 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         };
         let edition = edition.unwrap_or_else(|| "2021".into());
         let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
-        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, deps.clone())?;
+        // P4.1 (§5.3): `proc_macro_deps` resolve + `--extern` alongside `deps` (extern_args routes
+        // each by its DepInfo — a proc-macro dep becomes a host-dylib extern, not an rlib).
+        let mut all_deps = deps.clone();
+        all_deps.extend(crate::values::resolve_str_parts(eval, &compile.proc_macro_deps)?);
+        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps)?;
         let (feature_cfgs, rustc_flags) = compile_extras(eval, &compile)?;
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
@@ -170,7 +174,11 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         };
         let edition = edition.unwrap_or_else(|| "2021".into());
         let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
-        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, deps.clone())?;
+        // P4.1 (§5.3): `proc_macro_deps` resolve + `--extern` alongside `deps` (extern_args routes
+        // each by its DepInfo — a proc-macro dep becomes a host-dylib extern, not an rlib).
+        let mut all_deps = deps.clone();
+        all_deps.extend(crate::values::resolve_str_parts(eval, &compile.proc_macro_deps)?);
+        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps)?;
         let tail = compile_tail(eval, &compile)?;
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
@@ -268,6 +276,68 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
+    /// `rust_proc_macro(name, srcs, deps=[], edition="2021")` (§5.3, P4.1) → one rustc action with
+    /// `--crate-type proc-macro` → `lib<name>.<dylib|so>` (the host dylib suffix; single toolchain —
+    /// no exec/target split, §5.3). A dependent links it via `proc_macro_deps` → `--extern
+    /// <name>=<dylib>`; the own-only `RustProcMacro` marker tells `resolve_dep` it's a HOST dylib, not
+    /// a target rlib (so it stays out of the transitive `-Ldependency` rlib closure).
+    fn native_rust_proc_macro<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] deps: Option<UnpackList<Value<'v>>>,
+        #[starlark(require = named)] edition: Option<String>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        let (srcs, deps) = (unpack_strs(srcs), unpack_strs(deps));
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
+        let sess = session(eval);
+        let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
+        let crate_root = srcs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("rust_proc_macro `{name}` needs at least one src"))?
+            .clone();
+        let edition = edition.unwrap_or_else(|| "2021".into());
+        let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
+        let sess = session(eval);
+        // Host dylib suffix: `.dylib` (macOS) / `.so` (linux) — `DLL_SUFFIX` includes the dot.
+        let dylib = out_path(sess, &format!("lib{name}{}", std::env::consts::DLL_SUFFIX));
+        let mut argv = vec![
+            rustc(),
+            "--edition".into(),
+            edition,
+            "--crate-type".into(),
+            "proc-macro".into(),
+            "--crate-name".into(),
+            name.clone(),
+            crate_root,
+            "-o".into(),
+            dylib.clone(),
+        ];
+        argv.extend(extern_flags);
+        let mut inputs = srcs;
+        inputs.extend(dep_rlibs);
+        let mut t = AnalyzedTarget {
+            name: canon_label(sess, &name),
+            deps: dep_names,
+            actions: vec![AnalyzedAction {
+                mnemonic: "Rustc".into(),
+                argv,
+                inputs,
+                outputs: vec![dylib.clone()],
+            }],
+            default_info: vec![dylib],
+            providers: Default::default(),
+        };
+        // §5.3: own-only marker — `resolve_dep` reads it to `--extern` this as a host dylib.
+        t.set_set("RustProcMacro", "marker", vec!["1".into()]);
+        record_target(sess, t);
+        Ok(())
+        }))?;
+        Ok(NoneType)
+    }
+
     /// `rust_library_group(name, deps)` — faithful GROUPING rule: no actions,
     /// DefaultInfo = the deps' rlibs (rules_rust's lib-collection shape).
     fn native_rust_library_group<'v>(
@@ -327,6 +397,7 @@ const RUST_RULES_BZL: &str = r#"
 rust_binary = native_rust_binary
 rust_library = native_rust_library
 rust_shared_library = native_rust_shared_library
+rust_proc_macro = native_rust_proc_macro
 rust_library_group = native_rust_library_group
 rust_doc = native_rust_doc
 rust_doc_test = native_rust_doc
