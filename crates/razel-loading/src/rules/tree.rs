@@ -84,7 +84,20 @@ pub fn load_tree_report_with_targets(
     threads: usize,
 ) -> (Vec<(String, Result<(), String>)>, Vec<String>, Vec<AnalyzedTarget>) {
     let (session, report, loaded) = drive_tree(root, flags, packages, asts, threads);
-    let targets = session.results.borrow().values().cloned().collect();
+    // §5.4 (P4.4/P3.4c): this enumerator backs the WILDCARD expander (`expand_pattern`), and a
+    // wildcard/transitive build SKIPS incompatible targets — they are absent from the built set on
+    // this platform (matching Bazel), never a loud error. An incompatible target also carries no
+    // actions, so it isn't buildable here anyway. The EXPLICIT single-label path
+    // (`analyze_workspace_with`) keeps the loud error for a NAMED incompatible target; a caller that
+    // needs the incompatible set drives `drive_tree` directly (it returns the Session).
+    let incompat = session.incompatible_targets.borrow();
+    let targets = session
+        .results
+        .borrow()
+        .values()
+        .filter(|t| !incompat.contains(&t.name))
+        .cloned()
+        .collect();
     (report, loaded, targets)
 }
 

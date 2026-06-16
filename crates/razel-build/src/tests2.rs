@@ -442,6 +442,31 @@ cc_binary(name = "app", src = "app.c", deps = [":math"])
         assert_eq!(expand_pattern(root.path(), "//a:x", g()).unwrap(), vec!["//a:x".to_string()]);
     }
 
+    #[test]
+    fn expand_pattern_skips_incompatible_targets() {
+        // §5.4 (P4.4/P3.4c): a WILDCARD build SKIPS incompatible targets — they are ABSENT from the
+        // enumerated (built) set on this platform, matching Bazel. (The EXPLICIT single-label path
+        // keeps the loud error — `analyze_workspace_with`; rust_tests::p34b_named.)
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("MODULE.bazel"), "").unwrap();
+        let load = "load(\"@rules_rust//rust:defs.bzl\", \"rust_library\")\n";
+        std::fs::create_dir_all(root.path().join("a")).unwrap();
+        std::fs::write(root.path().join("a/lib.rs"), "pub fn x() {}\n").unwrap();
+        std::fs::write(
+            root.path().join("a/BUILD"),
+            format!(
+                "{load}\
+                 rust_library(name = \"ok\", srcs = [\"lib.rs\"])\n\
+                 rust_library(name = \"nope\", srcs = [\"lib.rs\"], \
+                 target_compatible_with = [\"@platforms//:incompatible\"])\n"
+            ),
+        )
+        .unwrap();
+        let all = expand_pattern(root.path(), "//...", GlobalFlags::default()).unwrap();
+        assert!(all.iter().any(|l| l == "//a:ok"), "compatible target present: {all:?}");
+        assert!(!all.iter().any(|l| l == "//a:nope"), "incompatible target skipped: {all:?}");
+    }
+
     /// S5x: the parallel executor. Diamond `base <- {a, b} <- top`. Each dependent CATs
     /// its deps' outputs, so a build that completes AT ALL proves deps ran first (cat fails
     /// on a missing input); `a` and `b` are independent (run concurrently at jobs>=2). The
