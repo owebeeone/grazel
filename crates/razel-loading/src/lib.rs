@@ -40,6 +40,12 @@ mod fetch; // Fetch R1: WORKSPACE spec extraction (RazelFetchPlan §3)
 mod js_rules; // S3a: the razel-native js rulepack (@razel_js// — gryth's grammar)
 mod py_rules;
 mod rust_rules;
+mod cargo_rules; // cargo_build_script + cargo_toml_env_vars natives (split from rust_rules)
+mod cargo_support; // cargo build-script support helpers (split from rust_rules)
+mod rust_attrs; // rust rules: §5.5 compile-attr verdict + parse machinery (split from rust_rules)
+mod rust_common; // rust rules: shared toolchain/dep/edge helpers (split from rust_rules)
+#[cfg(test)]
+mod rust_tests; // tests for the rust + cargo rules (split from rust_rules)
 mod sh_rules;
 mod workspace; // S1 (V3sh1): E-mode boundary walk + BUILD.razel XOR + boundary guard
 pub use fetch::{AttrV, RepoSpec, extract_workspace_repos};
