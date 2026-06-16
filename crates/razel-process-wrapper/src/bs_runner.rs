@@ -25,6 +25,9 @@ pub struct RunOpts {
     pub env: Vec<(String, String)>,
     /// `--env-file` paths (KEY=VALUE lines); later files win (§6.2).
     pub env_files: Vec<PathBuf>,
+    /// P4.5 (§5.5/§6): `(LINKS, flags-file)` of each `link_deps` crate — this build script inherits
+    /// their `DEP_<LINKS>_*` metadata env (the cross-build-script channel). Read at run time.
+    pub dep_metadata_files: Vec<(String, PathBuf)>,
     pub program: String,
     pub args: Vec<String>,
 }
@@ -71,6 +74,14 @@ impl RunOpts {
                     o.env_files.push(PathBuf::from(val(i)?));
                     i += 2;
                 }
+                "--dep-metadata" => {
+                    let v = val(i)?;
+                    let (links, file) = v
+                        .split_once('=')
+                        .ok_or_else(|| format!("--dep-metadata expects LINKS=FILE, got `{v}`"))?;
+                    o.dep_metadata_files.push((links.to_string(), PathBuf::from(file)));
+                    i += 2;
+                }
                 other => return Err(format!("unknown build-script flag `{other}`")),
             }
         }
@@ -104,8 +115,14 @@ pub struct Processed {
 /// Parse captured stdout (§6.1) → the JSONL flags-file body + side channels. Pure.
 pub fn process_script_output(stdout: &[u8]) -> Processed {
     let parsed = flags::parse_build_script_output(&String::from_utf8_lossy(stdout));
+    // P4.5 (§5.5/§6): persist `metadata=K=V` as `metadata`-kind records in the SAME `.out` so a
+    // dependent build script can read this `links` crate's `DEP_<LINKS>_*` source. Appended after the
+    // rustc-* directives; the rustc reader ignores them, and `.out` content is not in the analysis
+    // golden (the action's outputs PATH is unchanged), so parity is unaffected.
+    let mut records = parsed.flags.clone();
+    records.extend(flags::metadata_records(&parsed.dep_metadata));
     Processed {
-        flags_jsonl: flags::flags_file_jsonl(&parsed.flags),
+        flags_jsonl: flags::flags_file_jsonl(&records),
         warnings: parsed.warnings,
         deviations: parsed.deviations,
         error: parsed.error,
@@ -126,6 +143,16 @@ pub fn run_build_script(opts: &RunOpts) -> io::Result<i32> {
     std::fs::create_dir_all(&abs_out_dir)?;
     let mut env =
         assemble_child_env(&abs_out_dir, &opts.env_files, &opts.env, &crate::env::platform_baseline())?;
+    // P4.5 (§5.5/§6): the cross-build-script channel — inject `DEP_<LINKS>_<KEY>` from each
+    // `link_deps` crate's flags-file (its `metadata` records). Distinct keys from CARGO_*/OUT_DIR, so
+    // order-independent; absent files (a links crate that emitted no metadata) contribute nothing.
+    for (links, file) in &opts.dep_metadata_files {
+        if let Ok(jsonl) = std::fs::read_to_string(absify(file)) {
+            for (k, v) in flags::dep_env_vars(links, &jsonl) {
+                env.insert(k, v);
+            }
+        }
+    }
     let mut cmd = Command::new(absify(Path::new(&opts.program)));
     cmd.args(&opts.args).env_clear();
     if let Some(dir) = &opts.rundir {
@@ -203,6 +230,30 @@ mod tests {
         let args: Vec<String> =
             ["--out-dir", "/o/out"].iter().map(|s| s.to_string()).collect();
         assert!(RunOpts::from_args(&args).unwrap_err().contains("`--` separator"));
+    }
+
+    #[test]
+    fn p45_from_args_collects_dep_metadata_files() {
+        // P4.5: each `--dep-metadata LINKS=FILE` names a `link_deps` crate's flags-file → the
+        // `DEP_<LINKS>_*` source for THIS build script.
+        let args: Vec<String> = [
+            "--flags-out", "/o/bar.out", "--out-dir", "/o/d",
+            "--dep-metadata", "zstd-sys=/o/zstd/_bs.out",
+            "--dep-metadata", "lz4-sys=/o/lz4/_bs.out",
+            "--", "/o/_bs_",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let o = RunOpts::from_args(&args).unwrap();
+        assert_eq!(
+            o.dep_metadata_files,
+            [
+                ("zstd-sys".to_string(), PathBuf::from("/o/zstd/_bs.out")),
+                ("lz4-sys".to_string(), PathBuf::from("/o/lz4/_bs.out")),
+            ],
+            "link_deps metadata files collected: {:?}", o.dep_metadata_files
+        );
     }
 
     #[test]

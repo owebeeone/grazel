@@ -125,6 +125,30 @@ pub fn flags_file_jsonl(flags: &[FlagsRecord]) -> String {
     s
 }
 
+/// P4.5 (§5.5/§6): a `links` crate's `metadata=K=V` directives as `metadata`-kind flags records, so
+/// the SAME `.out` flags-file ALSO carries the `DEP_<LINKS>_*` source for dependent build scripts (no
+/// extra action output → analysis-parity-neutral). The rustc reader ignores `metadata` (apply_flags'
+/// `_ => {}` / `link_args_only`'s); only [`dep_env_vars`] consumes it.
+pub fn metadata_records(dep_metadata: &[(String, String)]) -> Vec<FlagsRecord> {
+    dep_metadata
+        .iter()
+        .map(|(k, v)| FlagsRecord { kind: "metadata".into(), args: vec![k.clone(), v.clone()] })
+        .collect()
+}
+
+/// P4.5 (§5.5/§6): the `DEP_<LINKS>_<KEY>=VALUE` env a DEPENDENT build script inherits from a `links`
+/// crate (`links`), given that crate's flags-file JSONL (its `metadata` records). cargo's naming: the
+/// links name and each key are UPPERCASED with non-alphanumerics mapped to `_`.
+pub fn dep_env_vars(links: &str, jsonl: &str) -> Vec<(String, String)> {
+    let up = |s: &str| s.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+    read_flags_jsonl(jsonl)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.kind == "metadata" && r.args.len() == 2)
+        .map(|r| (format!("DEP_{}_{}", up(links), up(&r.args[0])), r.args[1].clone()))
+        .collect()
+}
+
 /// Read a JSONL flags file back into records (the rustc subcommand's reader, P3.9). Blank lines are
 /// skipped; a malformed line is an error (the contract is machine-written, never hand-edited).
 pub fn read_flags_jsonl(jsonl: &str) -> Result<Vec<FlagsRecord>, String> {
@@ -230,5 +254,29 @@ cargo::error=missing system blake3\n";
         assert_eq!(p.flags[0].kind, "rustc-link-lib");
         assert_eq!(p.flags[1].args, ["-L", "/x"], "rustc-flags tokenized even single-colon");
         assert!(p.dep_metadata.is_empty(), "reserved keys are not metadata: {:?}", p.dep_metadata);
+    }
+
+    #[test]
+    fn p45_metadata_persists_to_jsonl_and_dep_env_vars_names_per_cargo() {
+        // P4.5 (§5.5/§6): a `links` crate's `metadata=K=V` round-trips through the `.out` JSONL as
+        // `metadata` records, and a dependent inherits `DEP_<LINKS>_<KEY>` — links name + key both
+        // UPPERCASED, non-alphanumerics → `_` (cargo's rule). `rustc-link-lib` is NOT metadata.
+        let parsed = parse_build_script_output(
+            "cargo::metadata=include=/usr/include/zstd\n\
+             cargo::metadata=root-dir=/opt/z\n\
+             cargo::rustc-link-lib=z\n",
+        );
+        let mut records = parsed.flags.clone();
+        records.extend(metadata_records(&parsed.dep_metadata));
+        let jsonl = flags_file_jsonl(&records);
+        let env = dep_env_vars("zstd-sys", &jsonl);
+        assert_eq!(
+            env,
+            vec![
+                ("DEP_ZSTD_SYS_INCLUDE".to_string(), "/usr/include/zstd".to_string()),
+                ("DEP_ZSTD_SYS_ROOT_DIR".to_string(), "/opt/z".to_string()),
+            ],
+            "DEP_<LINKS>_<KEY> naming, metadata only (not the rustc-link-lib): {env:?}"
+        );
     }
 }
