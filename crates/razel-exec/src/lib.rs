@@ -67,7 +67,16 @@ impl Cache {
 /// Copy an output path — a FILE (`fs::copy`) or a whole DIRECTORY tree (recursive). P2.4: the
 /// `cargo_build_script` `OUT_DIR` and extracted `.crate` trees are directory outputs the executor
 /// must round-trip, not just single files (design §5.2/§10).
-fn copy_path(from: &Path, to: &Path) -> io::Result<()> {
+///
+/// An ABSENT `from` is a NO-OP (A7): a declared output the action did not produce — e.g. the macOS
+/// `.dSYM` bundle a `debuginfo=0` build omits, declared only to MATCH Bazel's action graph (the
+/// system rustc, no vendored toolchain, is a documented parity deviation) — is simply not
+/// captured/cached. This is symmetric with the build driver, which digests only inputs that exist;
+/// if anything actually consumes a skipped output, that consumer fails loudly on the missing input.
+pub(crate) fn copy_path(from: &Path, to: &Path) -> io::Result<()> {
+    if !from.exists() {
+        return Ok(());
+    }
     if from.is_dir() {
         copy_dir_recursive(from, to)
     } else {
@@ -180,6 +189,41 @@ mod tests {
         assert!(cache.restore(&key, &["out_dir".into()], exec2.path()).unwrap());
         assert_eq!(std::fs::read(exec2.path().join("out_dir/a.o")).unwrap(), b"aaa");
         assert_eq!(std::fs::read(exec2.path().join("out_dir/sub/b.o")).unwrap(), b"bbb");
+    }
+
+    #[test]
+    fn captures_a_tree_output_and_skips_an_absent_declared_output() {
+        // A7: an action writes a FILE + a DIRECTORY tree but NOT a third declared output (the
+        // macOS `.dSYM` a `debuginfo=0` rust build omits — declared only to match Bazel's graph).
+        // Capture is dir-aware (the tree round-trips) AND skip-absent (the unproduced output is
+        // silently not captured/cached), not a hard `os error 2`. Round-trips through the cache.
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let exec = tempfile::tempdir().unwrap();
+        let action = Action {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo hi > out.bin && mkdir -p out.dir/sub && echo t > out.dir/sub/x".into(),
+            ],
+            outputs: vec!["out.bin".into(), "out.dir".into(), "missing.dSYM".into()],
+            env: path_env(),
+            ..Default::default()
+        };
+        let r = build_action(&action, &cache, exec.path()).unwrap();
+        assert_eq!(r.exit_code, 0);
+        assert!(!r.cached);
+        // The produced file + tree are captured back; the unproduced declared output is absent.
+        assert_eq!(fs::read_to_string(exec.path().join("out.bin")).unwrap().trim(), "hi");
+        assert_eq!(fs::read_to_string(exec.path().join("out.dir/sub/x")).unwrap().trim(), "t");
+        assert!(!exec.path().join("missing.dSYM").exists(), "absent output is not materialized");
+
+        // Fresh exec root: cache hit restores the file + tree (dir-aware), skips the absent one.
+        let exec2 = tempfile::tempdir().unwrap();
+        let r2 = build_action(&action, &cache, exec2.path()).unwrap();
+        assert!(r2.cached, "served from cache");
+        assert_eq!(fs::read_to_string(exec2.path().join("out.bin")).unwrap().trim(), "hi");
+        assert_eq!(fs::read_to_string(exec2.path().join("out.dir/sub/x")).unwrap().trim(), "t");
+        assert!(!exec2.path().join("missing.dSYM").exists());
     }
 
     #[test]

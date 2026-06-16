@@ -245,14 +245,12 @@ impl Sandbox {
         Ok(status.code().unwrap_or(-1))
     }
 
-    /// Copy declared `outputs` produced in the sandbox back into `exec_root`.
+    /// Copy declared `outputs` produced in the sandbox back into `exec_root`. Dir-aware (the
+    /// `OUT_DIR` / extracted `.crate` trees, P2.4) and skip-absent (an unproduced declared output
+    /// — e.g. the omitted `.dSYM`, A7) via the shared [`crate::copy_path`].
     pub fn capture_outputs(&self, exec_root: &Path, outputs: &[String]) -> io::Result<()> {
         for o in outputs {
-            let to = exec_root.join(o);
-            if let Some(p) = to.parent() {
-                std::fs::create_dir_all(p)?;
-            }
-            std::fs::copy(self.dir.join(o), to)?;
+            crate::copy_path(&self.dir.join(o), &exec_root.join(o))?;
         }
         Ok(())
     }
