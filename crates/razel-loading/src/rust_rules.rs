@@ -386,18 +386,33 @@ fn bs_attrs<'v>(
     Ok(out)
 }
 
-/// Resolve the P3.2a compile-argv tail at ANALYSIS time: `--cfg=feature="x"` per `crate_features`
-/// (rules_rust's form), then `rustc_flags` verbatim. (`crate_name`/`crate_root` overrides are
-/// applied inline by each rule, since they replace existing argv tokens.)
+/// Resolve the compile-argv extras at ANALYSIS time, returned SEPARATELY so each rule can POSITION
+/// them in Bazel's order (RazelRustParityPlan B3): the feature cfgs go right after `--target` (before
+/// `--edition`); `rustc_flags` go at the very end (after the externs). rules_rust emits each feature
+/// cfg as TWO tokens — `--cfg` then `feature="x"` (NOT joined `--cfg=feature="x"`) — so the argv
+/// matches token-for-token. (`crate_name`/`crate_root` overrides are applied inline by each rule.)
+fn compile_extras<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    compile: &CompileAttrs,
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    let mut cfgs = Vec::new();
+    for f in crate::values::resolve_str_parts(eval, &compile.crate_features)? {
+        cfgs.push("--cfg".into());
+        cfgs.push(format!("feature=\"{f}\""));
+    }
+    let flags = crate::values::resolve_str_parts(eval, &compile.rustc_flags)?;
+    Ok((cfgs, flags))
+}
+
+/// Back-compat flat tail (feature cfgs then `rustc_flags`) for rules whose faithful argv ORDER is not
+/// yet gated (e.g. the lean `rust_binary`). Faithful rules (`rust_library`, `cargo_build_script`) use
+/// [`compile_extras`] directly to position the parts per Bazel.
 fn compile_tail<'v>(
     eval: &mut Evaluator<'v, '_, '_>,
     compile: &CompileAttrs,
 ) -> anyhow::Result<Vec<String>> {
-    let mut tail = Vec::new();
-    for f in crate::values::resolve_str_parts(eval, &compile.crate_features)? {
-        tail.push(format!("--cfg=feature=\"{f}\""));
-    }
-    tail.extend(crate::values::resolve_str_parts(eval, &compile.rustc_flags)?);
+    let (mut tail, flags) = compile_extras(eval, compile)?;
+    tail.extend(flags);
     Ok(tail)
 }
 
@@ -566,7 +581,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let edition = edition.unwrap_or_else(|| "2021".into());
         let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
         let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, deps.clone())?;
-        let tail = compile_tail(eval, &compile)?;
+        let (feature_cfgs, rustc_flags) = compile_extras(eval, &compile)?;
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
 
@@ -592,11 +607,12 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             "--emit=dep-info,link".into(),
             "--color=always".into(),
             format!("--target={}", crate::state::host_triple()),
-            format!("--edition={edition}"),
-            "-Cembed-bitcode=no".into(),
         ];
-        argv.extend(extern_flags); // empty here (build-script dep is the edge, not an --extern)
-        argv.extend(tail); // crate_features → --cfg / rustc_flags (empty for this case)
+        argv.extend(feature_cfgs); // B3: `--cfg feature="x"` right after --target (Bazel's order)
+        argv.push(format!("--edition={edition}"));
+        argv.push("-Cembed-bitcode=no".into());
+        argv.extend(extern_flags); // build-script dep is the edge, not an --extern
+        argv.extend(rustc_flags); // `rustc_flags` (e.g. --cap-lints) at the end (Bazel's order)
         // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper.
         let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, argv, &build_scripts)?;
 
@@ -844,7 +860,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             // re-taking `sess` for the path `qualify`s + `record_target`. (Build-deps of the bs bin
             // are normal crates, not build scripts → `_bs` edge unused here.)
             let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
-            let tail = compile_tail(eval, &compile)?;
+            let (feature_cfgs, rustc_flags) = compile_extras(eval, &compile)?;
             let features = crate::values::resolve_str_parts(eval, &compile.crate_features)?;
             // §5.2 slice-1 run inputs: declared `data` + `compile_data`, resolved to files.
             let mut data_files = Vec::new();
@@ -882,11 +898,12 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 "--emit=dep-info".into(),
                 "--color=always".into(),
                 format!("--target={}", crate::state::host_triple()),
-                format!("--edition={edition}"),
-                "-Cembed-bitcode=no".into(),
             ];
+            compile_argv.extend(feature_cfgs); // B3: feature cfgs after --target (Bazel's order)
+            compile_argv.push(format!("--edition={edition}"));
+            compile_argv.push("-Cembed-bitcode=no".into());
             compile_argv.extend(extern_flags);
-            compile_argv.extend(tail);
+            compile_argv.extend(rustc_flags); // rustc_flags (e.g. --cap-lints) at the end
             let mut compile_inputs = srcs.clone();
             compile_inputs.extend(dep_rlibs);
 
@@ -1142,10 +1159,10 @@ mod tests {
         // crate_root picks root.rs as the positional (not srcs[0] = lib.rs).
         assert!(argv.contains(&"app/root.rs".to_string()), "crate_root is the positional: {argv:?}");
         assert!(!argv.contains(&"app/lib.rs".to_string()), "lib.rs is not the root: {argv:?}");
-        // crate_features → one `--cfg=feature="x"` per feature (rules_rust's form).
-        assert!(argv.contains(&"--cfg=feature=\"alpha\"".to_string()), "{argv:?}");
-        assert!(argv.contains(&"--cfg=feature=\"beta\"".to_string()), "{argv:?}");
-        // rustc_flags appended verbatim.
+        // crate_features → `--cfg` `feature="x"` (TWO tokens, rules_rust's form — B3), right after --target.
+        assert!(argv.windows(2).any(|w| w == ["--cfg", "feature=\"alpha\""]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["--cfg", "feature=\"beta\""]), "{argv:?}");
+        // rustc_flags appended verbatim (at the end).
         assert!(argv.contains(&"-Cdebuginfo=0".to_string()), "{argv:?}");
     }
 
@@ -1339,8 +1356,8 @@ mod tests {
         // `crate_root` picks root.rs as the positional; default crate_name = the target name.
         assert!(argv.contains(&"app/root.rs".to_string()), "crate_root positional: {argv:?}");
         assert!(argv.contains(&"--crate-name=t".to_string()), "default crate_name = name: {argv:?}");
-        // `crate_features` → `--cfg feature` (compile phase); `rustc_flags` verbatim.
-        assert!(argv.contains(&"--cfg=feature=\"std\"".to_string()), "{argv:?}");
+        // `crate_features` → `--cfg` `feature="x"` (two tokens, compile phase, B3); `rustc_flags` verbatim.
+        assert!(argv.windows(2).any(|w| w == ["--cfg", "feature=\"std\""]), "{argv:?}");
         assert!(argv.contains(&"-Cdebuginfo=0".to_string()), "{argv:?}");
         // Run-phase attrs (`version`/`links`/`data`) + ignored (`tags`) are ACCEPTED but argv-inert.
         assert!(

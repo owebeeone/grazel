@@ -1176,16 +1176,20 @@ fn canon_label_inner(sess: &Session, s: &str) -> String {
 pub(crate) fn qualify(sess: &Session, path: &str) -> String {
     match sess.current_pkg() {
         // External package: FILE paths take Bazel's exec-root form, `external/<repo>/<pkg>/…`
-        // (`@repo//pkg` is a label, not a path).
-        Some(pkg) => match pkg.strip_prefix('@') {
-            Some(rest) => match rest.split_once("//") {
+        // (`@repo//pkg` is a label, not a path). Trim ALL leading `@` so the canonical `@@repo//`
+        // form (§11.3) yields `external/<repo>/…` (not `external/@<repo>/…`) — a lone
+        // `strip_prefix('@')` left the stray `@` that diverged blake3's `--out-dir`/`-Ldependency`
+        // from Bazel's; same family as the glob/deps/decls fixes.
+        Some(pkg) if pkg.starts_with('@') => {
+            let rest = pkg.trim_start_matches('@');
+            match rest.split_once("//") {
                 Some((repo, sub)) if sub.is_empty() => format!("external/{repo}/{path}"),
                 Some((repo, sub)) => format!("external/{repo}/{sub}/{path}"),
                 None => format!("external/{rest}/{path}"),
-            },
-            None if pkg.is_empty() => path.to_string(),
-            None => format!("{pkg}/{path}"),
-        },
+            }
+        }
+        Some(pkg) if pkg.is_empty() => path.to_string(),
+        Some(pkg) => format!("{pkg}/{path}"),
         None => path.to_string(),
     }
 }
