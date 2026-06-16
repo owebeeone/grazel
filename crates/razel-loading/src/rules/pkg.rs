@@ -222,17 +222,41 @@ pub fn analyze_workspace_resolved(
         }
     }
     let targets = session.take_targets();
-    // P3.4b (§5.4): an incompatible target reached by an EXPLICIT request (the top label) or pulled
-    // in as a DEP of a compatible target is a LOUD ERROR — never a silent drop. (A wildcard build
-    // SKIPS incompatible targets instead; that filter lives in the CLI's pattern loop — P3.4c.)
-    if let Some(bad) = targets
-        .iter()
-        .find(|t| session.incompatible_targets.borrow().contains(&t.name))
-    {
+    // P3.4b/P4.3 (§5.4): an incompatible target is a LOUD ERROR only when it is REQUIRED — the
+    // EXPLICIT top label, or a dep that survives `select()` resolution into the built target's
+    // transitive closure. A target merely DECLARED in the loaded package — sitting in a non-taken
+    // `select()` arm, or an unrelated sibling — is SKIPPED, never errored (matching a wildcard
+    // build's skip; that CLI-loop filter is P3.4c). So walk `canon`'s closure over the analyzed dep
+    // graph and error only when it actually REACHES an incompatible target — never on mere presence.
+    let bad = {
+        let incompat = session.incompatible_targets.borrow();
+        if incompat.is_empty() {
+            None
+        } else {
+            let deps_of: std::collections::HashMap<&str, &[String]> =
+                targets.iter().map(|t| (t.name.as_str(), t.deps.as_slice())).collect();
+            let mut seen = std::collections::HashSet::new();
+            let mut stack = vec![canon.clone()];
+            let mut hit = None;
+            while let Some(n) = stack.pop() {
+                if !seen.insert(n.clone()) {
+                    continue;
+                }
+                if incompat.contains(&n) {
+                    hit = Some(n);
+                    break;
+                }
+                if let Some(deps) = deps_of.get(n.as_str()) {
+                    stack.extend(deps.iter().cloned());
+                }
+            }
+            hit
+        }
+    };
+    if let Some(bad) = bad {
         return Err(format!(
-            "target `{}` is incompatible with the target platform (target_compatible_with) — \
-             it cannot be built when named or required by a built target",
-            bad.name
+            "target `{bad}` is incompatible with the target platform (target_compatible_with) — \
+             it cannot be built when named or required by a built target"
         ));
     }
     Ok((targets, canon))

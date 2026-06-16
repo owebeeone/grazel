@@ -185,6 +185,82 @@ mod tests {
     }
 
     #[test]
+    fn p43_per_cfg_dep_select_externs_the_host_arm_and_drops_the_rest() {
+        // P4.3 (§5.4): the libc/getrandom shape — `deps = select({<triple>: [...], default: [...]})`.
+        // The HOST-triple arm's dep is compiled + `--extern`'d into the consumer; a NON-host arm
+        // referencing a crate that was never fetched (`@crates__wasi`) is SELECTED AWAY — never
+        // resolved, so its absent repo is no error — exactly as getrandom's wasm-only dep is inert on
+        // a darwin host. (Beyond p33's compile_data: proves the per-cfg DEP edge + extern + the
+        // select-away of an unfetched dep.)
+        let host = crate::state::host_triple();
+        let build = format!(
+            "{LOAD}\
+             rust_library(name = \"dep_host\", srcs = [\"lib.rs\"])\n\
+             rust_library(name = \"t\", srcs = [\"root.rs\"], deps = select({{\
+             \"@rules_rust//rust/platform:{host}\": [\":dep_host\"], \
+             \"@rules_rust//rust/platform:wasm32-unknown-unknown\": \
+             [\"@crates__wasi-0.11.0//:wasi\"], \
+             \"//conditions:default\": []}}))\n"
+        );
+        let argv = argv_of(&analyze("p43dep", &build).unwrap());
+        assert!(
+            argv.iter().any(|a| a.starts_with("--extern=dep_host=app/libdep_host-")),
+            "host-arm dep is compiled + extern'd: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a.contains("wasi")),
+            "the non-host (unfetched) arm is selected away, never resolved: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn p43_selects_with_or_over_triples_picks_the_host_dep() {
+        // P4.3: crate_universe groups triples that share a dep via `selects.with_or` (one cfg-class →
+        // many triples → one dep). The tuple fans out to one arm each (p31b), and on the host the
+        // host-triple arm resolves the shared dep into `--extern`; the non-host triple in the tuple
+        // is inert.
+        let host = crate::state::host_triple();
+        let build = format!(
+            "{LOAD}\
+             load(\"@rules_rust//crate_universe/private:selects.bzl\", \"selects\")\n\
+             rust_library(name = \"dep_host\", srcs = [\"lib.rs\"])\n\
+             rust_library(name = \"t\", srcs = [\"root.rs\"], deps = selects.with_or({{\
+             (\"@rules_rust//rust/platform:{host}\", \
+             \"@rules_rust//rust/platform:wasm32-unknown-unknown\"): [\":dep_host\"], \
+             \"//conditions:default\": []}}))\n"
+        );
+        let argv = argv_of(&analyze("p43wor", &build).unwrap());
+        assert!(
+            argv.iter().any(|a| a.starts_with("--extern=dep_host=app/libdep_host-")),
+            "with_or host-triple arm resolves the shared dep: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn p43_incompatible_dep_in_a_non_host_arm_is_selected_away() {
+        // §5.4 guarantee: the CORRECT graph selects incompatible deps away. p34b proves a plain
+        // `deps = [":bad"]` on an incompatible `:bad` is a loud error; here `:bad` lives only in the
+        // NON-host (default) arm, so the select removes it before the incompatible-dep check ever
+        // sees it — `t` builds cleanly. (Select-away precedes the §5.4 incompatible-dep error.)
+        let host = crate::state::host_triple();
+        let build = format!(
+            "{LOAD}\
+             rust_library(name = \"good\", srcs = [\"lib.rs\"])\n\
+             rust_library(name = \"bad\", srcs = [\"lib.rs\"], \
+             target_compatible_with = [\"@platforms//:incompatible\"])\n\
+             rust_library(name = \"t\", srcs = [\"root.rs\"], deps = select({{\
+             \"@rules_rust//rust/platform:{host}\": [\":good\"], \
+             \"//conditions:default\": [\":bad\"]}}))\n"
+        );
+        let argv = argv_of(&analyze("p43incompat", &build).expect("select removes the incompatible arm"));
+        assert!(
+            argv.iter().any(|a| a.starts_with("--extern=good=app/libgood-")),
+            "host arm's compatible dep is extern'd: {argv:?}"
+        );
+        assert!(!argv.iter().any(|a| a.contains("=bad=")), "the incompatible arm is gone: {argv:?}");
+    }
+
+    #[test]
     fn p35a_cargo_toml_env_vars_emits_the_cargo_pkg_env_file() {
         let tmp = std::env::temp_dir().join(format!("razel-p35a-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
