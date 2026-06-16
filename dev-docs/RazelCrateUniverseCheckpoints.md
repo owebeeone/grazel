@@ -406,10 +406,26 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
   runs all 3 actions. Verified empirically: the system rustc shim runs under the sandbox's stripped env
   (no HOME needed); the wrapper's empty-unix-env is fine for the rlib (no link) + the self-contained
   build-script bin. **Phase A COMPLETE** (analysis A1–A6 + execution A7).
-- **REMAINING:** **Phase B** — external `@crates//:blake3` (B1 resolve "unknown target: blake3" — wire
-  the `@crates` repo/alias into the build path; B2 the full closure analyzes; B3 blake3 aq parity; B4
-  blake3 xp parity + the cc `CC`/`AR`/`CFLAGS` env, the deferred P3.8d leg 2). The local case (analysis
-  + execution) is fully gated; Phase B is the external-crate integration.
+**Phase B — external `@crates//:blake3` (Milestone-1) — roll progress:**
+- `3e19ed8` **B1.1** — `build_one` routes external-repo labels (`@crates//:blake3`) to the workspace
+  build path (was: bare-name branch → "unknown target: blake3"). Probe advanced to "not vendored".
+- `3638e8e` **B1.2** — `materialize_crates_world(lock, base)`: from the seeded `CrateLock`, materialize
+  the root `@crates` repo + EACH per-crate generated `BUILD.bazel` under its canonical name, inline,
+  **NO `.crate` fetch** (analysis is lock-only; the source is B4/`fetch_crate`). Pure + unit-tested.
+  KEY FINDING: the lock carries `build_file_content` inline → B1–B3 need NO fetch; the fetch/vendor
+  decision (`fetch_crate` vs `read_from_bazel_external`) is real but bites only at **B4** (execution).
+- `c4e2cdd` **B1.3 — B1 GATE MET**: `analyze_workspace_with`, once the lock is seeded, materializes the
+  world into a workspace-local `.razel-crates` (gitignored) + points `fetched_external_base` at it.
+  Guarded by `crate_lock.is_some()` + no caller base → inert for the parity corpus (its lock has no
+  `@crates`) + the vendored-dir unit tests. `razel build @crates//:blake3` now gets PAST target
+  resolution + INTO analysis (probe: "unknown target" → "not vendored" → evaluating the root `@crates`
+  BUILD). `rust_graph_parity` 2/2 + lib 75/0 unaffected.
+- **REMAINING:** **B2** — the full closure analyzes. FIRST gap (the probe's current error): the root
+  `@crates` BUILD calls `glob()` and razel's `glob()` errs "needs a package on disk" on the materialized
+  external package (note the `@@…+crates///BUILD` triple-slash — the root package's empty sub-path).
+  Then the ~20-crate closure (proc-macro deps → P4.1, cc SIMD, per-crate `crate_features`/
+  `target_compatible_with`). Then **B3** (blake3 aq parity) + **B4** (blake3 xp parity + cc env — the
+  fetch/vendor decision lands here). Phase A (local analysis + execution) stays fully gated.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
