@@ -64,7 +64,7 @@ pub use workspace::{e_mode_guard, find_workspace_root, resolve_build_file};
 pub use loaded::{Edge, EdgeKind, LoadedTarget, QueryNode, RawAttr, RawLabelRef};
 pub use patterns::{discover_packages, load_query_graph, packages_for_pattern};
 pub use lock::{CrateLock, CrateRepo, read_lock};
-pub use materialize::{fetch_crate, materialize_root, read_from_bazel_external};
+pub use materialize::{fetch_crate, materialize_root};
 pub use recorded::{FileValue, RecordedInput, parse_recorded};
 pub use stale::check_stale;
 pub use razel_ir::TargetKind; // re-exported: `LoadedTarget.kind` is a `TargetKind`

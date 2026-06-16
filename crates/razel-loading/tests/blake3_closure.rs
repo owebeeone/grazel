@@ -96,6 +96,24 @@ fn probe_serde_derive_analyzes() {
 }
 
 #[test]
+#[ignore = "P4.6 dev driver: full-@crates scale — analyzes starlark's LARGE closure from the root"]
+fn probe_starlark_closure_analyzes() {
+    // P4.6 (§9.4): the resolved graph builds end-to-end at scale. `starlark` is razel's heaviest
+    // direct dep — its closure spans dozens of crates (proc-macros, build scripts, per-cfg selects),
+    // so analyzing it on the pure `fetch_crate` RepoFetch path exercises the full `@crates` machinery
+    // far beyond blake3/getrandom/serde_derive. A clean analysis (no unresolved attr/select/dep) is
+    // the scale signal; the captured goldens remain the aq-parity gate.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root");
+    match analyze_workspace_with(&root, "@crates//:starlark", GlobalFlags::default()) {
+        Ok(targets) => {
+            eprintln!("OK: @crates//:starlark closure analyzed — {} targets", targets.len());
+            assert!(targets.len() > 30, "starlark pulls a large closure, got {}", targets.len());
+        }
+        Err(e) => panic!("@crates//:starlark closure did NOT analyze:\n{e}"),
+    }
+}
+
+#[test]
 #[ignore = "P4.4 dev driver: analyzes getrandom (richer per-cfg `select()` deps) from the repo root"]
 fn probe_getrandom_analyzes() {
     // getrandom 0.4.2's `deps = select({<triple>: [libc|wasi|windows…], default: []})` is the richer

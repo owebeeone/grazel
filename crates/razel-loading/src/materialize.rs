@@ -109,42 +109,12 @@ pub fn fetch_crate(spec: &CrateRepo, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// P2.7: the INTERIM dev-only cache — copy Bazel's already-fetched repo tree (e.g.
-/// `bazel-bin/external/rules_rust++crate+crates__blake3-1.8.2`) to `dest` instead of downloading.
-/// Defers download/extract while the build lands; **NOT parity-gating** — reading Bazel's tree
-/// masks RepoFetch/patch/§4.4-key bugs, so the pure [`fetch_crate`] path is the one under the
-/// goldens by rung 4 (§5.1).
-pub fn read_from_bazel_external(
-    repo_canonical: &str,
-    external_root: &Path,
-    dest: &Path,
-) -> Result<(), String> {
-    let src = external_root.join(repo_canonical);
-    if !src.is_dir() {
-        return Err(format!(
-            "bazel external repo `{repo_canonical}` not found under {} (run `bazel fetch` first, \
-             or use the pure RepoFetch path)",
-            external_root.display()
-        ));
-    }
-    copy_tree(&src, dest).map_err(|e| format!("copy bazel external tree: {e}"))
-}
-
-/// Recursively copy `from`'s subtree into `to` (created). Follows symlinks (Bazel's external tree
-/// is symlink-heavy) by copying their targets' bytes.
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let (src, dst) = (entry.path(), to.join(entry.file_name()));
-        if src.is_dir() {
-            copy_tree(&src, &dst)?;
-        } else {
-            std::fs::copy(&src, &dst)?; // is_dir() follows symlinks, so this copies link targets
-        }
-    }
-    Ok(())
-}
+// P4.6 (§9.4): the P2.7 INTERIM dev-only cache (`read_from_bazel_external` — copy Bazel's
+// already-fetched external tree instead of downloading) is RETIRED. It was a scaffold to defer
+// download/extract while the build landed, explicitly NOT parity-gating; by rung 4 the pure
+// [`fetch_crate`] `RepoFetch` path is the one under the goldens (blake3/getrandom/serde_derive all
+// fetch via `materialize_one_repo` → `fetch_crate`), so the bazel-tree shortcut — which would mask
+// RepoFetch/patch/§4.4-key bugs — is removed.
 
 #[cfg(test)]
 mod tests {
@@ -202,25 +172,6 @@ mod tests {
     fn sha256_matches_known_vector() {
         // sha256("") is the well-known empty-string digest.
         assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-    }
-
-    #[test]
-    fn interim_cache_copies_a_bazel_external_tree() {
-        // P2.7: a fake bazel external/ tree → copied to dest (the dev-only no-fetch path).
-        let tmp = std::env::temp_dir().join(format!("razel-interim-{}", std::process::id()));
-        let ext = tmp.join("external");
-        let repo = "rules_rust++crate+crates__blake3-1.8.2";
-        std::fs::create_dir_all(ext.join(repo).join("src")).unwrap();
-        std::fs::write(ext.join(repo).join("BUILD.bazel"), "rust_library(...)\n").unwrap();
-        std::fs::write(ext.join(repo).join("src/lib.rs"), "//! blake3\n").unwrap();
-
-        let dest = tmp.join("out");
-        read_from_bazel_external(repo, &ext, &dest).unwrap();
-        assert!(dest.join("BUILD.bazel").exists());
-        assert_eq!(std::fs::read_to_string(dest.join("src/lib.rs")).unwrap(), "//! blake3\n");
-        // a missing repo → loud error.
-        assert!(read_from_bazel_external("nope", &ext, &dest).unwrap_err().contains("not found"));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
