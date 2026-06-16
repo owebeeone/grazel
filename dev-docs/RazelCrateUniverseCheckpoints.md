@@ -534,3 +534,23 @@ reserve `-p razel-loading --tests` for steps that actually touch the integration
 (condition source + `target_compatible_with`) → P3.5–P3.10 (env-file, build-script compile/run,
 flags parser, rustc wrapper, the build-script edge) → P3.11/P3.12 (analysis + execution parity vs
 live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the goldens xtask.
+
+---
+
+## Track A Phase 4 — proc-macro, richer select, full @crates (in progress)
+
+- `b6cef5d` **P4.1 — `rust_proc_macro` native + `proc_macro_deps`** (§5.3): `--crate-type=proc-macro`
+  → `lib<name>-<hash>.{dylib,so}` (host suffix); own-only `RustProcMacro` provider marker (registered,
+  no dep_fold); `DepInfo += proc_macro`; `extern_args` routes a proc-macro dep to `--extern <name>=
+  <dylib>` but OUT of the rlib `-Ldependency` closure; `proc_macro_deps` (was Delegated) extracted +
+  merged into the extern set for rust_library/binary. Unit-gated.
+- `18340a2` **P4.2a — faithful proc-macro argv**: rewrote `native_rust_proc_macro` from the lean slice
+  to rules_rust's A3/A5 form (joined flags, hashed `metadata`/`extra-filename`, `--emit=dep-info,link`,
+  compile_attrs, build-script edge). HOST compile.
+- `f01e159` **P4.2b — serde_derive analysis-parity golden GREEN** (§9.2, Milestone 2): live
+  `bazel aquery` golden for the real `@crates` serde_derive (`crate_serde_derive/{golden.txt,meta.toml}`,
+  captured like blake3 B3; network-gated test). Closed the two argv gaps it surfaced: `--target=<host>`
+  (rules_rust passes it even for the host proc-macro) + bare `--extern proc_macro` (the implicit sysroot
+  crate). razel == bazel modulo the documented deviations. lib 76/0, rust_graph_parity 2/2, gates OK.
+- **REMAINING:** P4.3 richer `select()` (per-cfg platform deps; §5.4) → P4.4 libc/getrandom golden +
+  incompatible negative case → P4.5 `link_deps` `DEP_*` propagation → P4.6 full `@crates` scale.
