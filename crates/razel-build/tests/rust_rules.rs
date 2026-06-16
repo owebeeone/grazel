@@ -61,7 +61,13 @@ rust_binary(name = "app", srcs = ["app.rs"], deps = ["//lib:greet"])
     let report = build_workspace(root.path(), "//app:app", &cache).unwrap();
     assert_eq!(report.executed, 2, "1 rlib compile + 1 binary compile");
     assert!(report.produced.contains(&"app/app".to_string()));
-    assert!(report.produced.contains(&"lib/libgreet.rlib".to_string()));
+    // The rlib carries rules_rust's faithful `-<metadata-hash>` suffix (since the A3–A6 argv work,
+    // e2d8a42 — `lib<name>-<hash>.rlib`); assert the hashed shape, not the pre-faithful bare name.
+    assert!(
+        report.produced.iter().any(|p| p.starts_with("lib/libgreet-") && p.ends_with(".rlib")),
+        "greet's hashed rlib is produced: {:?}",
+        report.produced
+    );
 
     let out = Command::new(root.path().join("app/app")).output().unwrap();
     assert!(
