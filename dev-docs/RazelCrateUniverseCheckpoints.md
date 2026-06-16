@@ -552,5 +552,35 @@ live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the gold
   captured like blake3 B3; network-gated test). Closed the two argv gaps it surfaced: `--target=<host>`
   (rules_rust passes it even for the host proc-macro) + bare `--extern proc_macro` (the implicit sysroot
   crate). razel == bazel modulo the documented deviations. lib 76/0, rust_graph_parity 2/2, gates OK.
-- **REMAINING:** P4.3 richer `select()` (per-cfg platform deps; §5.4) → P4.4 libc/getrandom golden +
-  incompatible negative case → P4.5 `link_deps` `DEP_*` propagation → P4.6 full `@crates` scale.
+- `d675112` **P4.3 — richer per-cfg `select()` deps** (§5.4): the libc/getrandom shape
+  (`deps = select({<triple>: …, default: …})`) already resolved through the shared select path
+  (str_attr_parts → resolve_str_parts → pick_branch → extern_args) from P3.3 — proven by three p43
+  units (host-arm dep extern'd; non-host/unfetched arm selected away; `selects.with_or` over triples).
+  The gate surfaced a real §5.4 bug: an incompatible target sitting ONLY in a non-taken arm tripped the
+  loud error (the check scanned ALL recorded targets). Fix (`rules/pkg.rs`): walk `canon`'s closure and
+  error only when an incompatible target is actually REACHED — never on mere presence. Unit-gated.
+- `22b652d` **P4.4a — getrandom richer-per-cfg golden GREEN** (§9.3): captured the `bazel aquery`
+  golden (`crate_getrandom/{golden.txt,meta.toml}`, norm v3). GREEN first run — getrandom's rlib Rustc
+  action is byte-identical to bazel's (externs cfg_if+rand_core+libc = the resolved unix/host arm;
+  wasm/windows arms selected away). Confirms P4.3 on a real crate; no engine change needed.
+- `a8c44c3` **P4.4b — incompatible negative case** (§5.4 / the deferred P3.4c): wildcard SKIPS,
+  named ERRORS. `load_tree_report_with_targets` (sole caller `expand_pattern`) filters out
+  `incompatible_targets` — absent from the wildcard set (matching bazel); the explicit single-label
+  path keeps the loud error. Gated `expand_pattern_skips_incompatible_targets` + existing p34b_named.
+  *(= Milestone 3.)*
+- **P4.5 — `link_deps` propagation** (§5.5/§6), four green steps:
+  - `b3f8cce` **P4.5a** wrapper `--link-flags-file` — `link_args_only` contributes a transitive build
+    script's LINK directives only (cfg/env stay intra-target).
+  - `cbc7a01` **P4.5b** analysis: transitive `RustLinkInfo` projection — a `rust_library` publishes its
+    own build-script flags-file; a consuming `rust_binary`'s FINAL link inherits the closure's via
+    `--link-flags-file` (NOT applied at the rlib — rules_rust's posture).
+  - `8855a39` **P4.5c** wrapper `DEP_<LINKS>_*` — a links crate's `metadata=K=V` persists in `.out`;
+    `--dep-metadata <LINKS>=<file>` injects `DEP_<LINKS>_<KEY>` into a dependent build script's env.
+  - `b2d0921` **P4.5d** analysis: `cargo_build_script` captures `links` + `link_deps` → emits
+    `--dep-metadata` for each link_dep. Synthetic shape (no corpus crate consumes DEP_* yet — the
+    design's deferred long tail); inert for non-links crates → byte-identical parity.
+  - All P4.5 steps: byte-identical for the existing cases (blake3/getrandom/serde_derive goldens +
+    rust_graph_parity green throughout).
+- **REMAINING:** P4.6 — full `@crates` scale (the resolved graph builds end-to-end; aq green across it,
+  documented deviations only) + retire the P2.7 interim cache for the pure RepoFetch path (§9.4).
+  *(= Milestone 4.)*
