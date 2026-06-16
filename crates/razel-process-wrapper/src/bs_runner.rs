@@ -116,14 +116,25 @@ pub fn process_script_output(stdout: &[u8]) -> Processed {
 /// stdout, parse it, surface warnings/deviations to stderr, fail on `error=` or a non-zero script
 /// exit, else write the flags file. Returns the exit code for the wrapper to propagate.
 pub fn run_build_script(opts: &RunOpts) -> io::Result<i32> {
-    std::fs::create_dir_all(&opts.out_dir)?;
-    let env =
-        assemble_child_env(&opts.out_dir, &opts.env_files, &opts.env, &crate::env::platform_baseline())?;
-    let mut cmd = Command::new(&opts.program);
-    cmd.args(&opts.args).env_clear().envs(&env);
+    // B4: cargo runs a build script with cwd = the crate manifest dir (so `cc::Build`'s relative
+    // `build.file("c/x.c")` resolves) and ABSOLUTE OUT_DIR / program (cwd-independent). The wrapper's
+    // own cwd is the exec sandbox; absolutize OUT_DIR + the bin against it BEFORE chdir-ing the child
+    // to `--rundir`. The flags-file + `--env-file`s stay relative — the WRAPPER reads/writes those.
+    let base = std::env::current_dir()?;
+    let absify = |p: &Path| if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+    let abs_out_dir = absify(&opts.out_dir);
+    std::fs::create_dir_all(&abs_out_dir)?;
+    let mut env =
+        assemble_child_env(&abs_out_dir, &opts.env_files, &opts.env, &crate::env::platform_baseline())?;
+    let mut cmd = Command::new(absify(Path::new(&opts.program)));
+    cmd.args(&opts.args).env_clear();
     if let Some(dir) = &opts.rundir {
-        cmd.current_dir(dir);
+        let abs_rundir = absify(dir);
+        // cargo sets CARGO_MANIFEST_DIR = the crate dir; cc-rs + `env!()` read it.
+        env.insert("CARGO_MANIFEST_DIR".into(), abs_rundir.to_string_lossy().into_owned());
+        cmd.current_dir(&abs_rundir);
     }
+    cmd.envs(&env);
     let output = cmd.output()?; // captures stdout (and stderr)
     let processed = process_script_output(&output.stdout);
     for w in &processed.warnings {

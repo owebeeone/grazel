@@ -953,6 +953,12 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             let flags_out = out_path(sess, &format!("{name}.out")); // §6.1 `<name>.out`
             let out_dir = out_path(sess, &format!("{name}.out_dir")); // P2.4 tree output
             let triple = crate::state::host_triple();
+            // B4: cargo runs a build script with cwd = the crate's manifest dir, so cc-rs's
+            // `build.file("c/blake3_neon.c")` (relative to `CARGO_MANIFEST_DIR`) resolves. `--rundir`
+            // = the crate SOURCE dir (`external/<repo>` for a vendored crate, the package dir
+            // otherwise); the wrapper chdir's the bin there + sets `CARGO_MANIFEST_DIR`. Absolute
+            // OUT_DIR/program are the wrapper's job (cwd-independent, like cargo).
+            let crate_dir = qualify(sess, "").trim_end_matches('/').to_string();
             let mut run_argv = vec![
                 process_wrapper(),
                 "build-script".into(),
@@ -960,6 +966,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
                 flags_out.clone(),
                 "--out-dir".into(),
                 out_dir.clone(),
+                "--rundir".into(),
+                crate_dir,
             ];
             // P3.8c: env-files FIRST (lower precedence than the literal `--env` below, §6.2).
             for ef in &env_files {
