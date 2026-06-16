@@ -1,0 +1,20 @@
+# RazelRustParityPlan B3 — blake3 EXTERNAL-closure analysis-parity golden.
+#
+# Unlike the local corpus cases, blake3 is NOT self-contained: it is an external `@crates` crate from
+# razel's OWN dogfood lock (the repo-root `MODULE.bazel.lock`). This mirrors how bazel works — the
+# lock (urls + sha256 + generated BUILD) is committed; the crate SOURCES are FETCHED (sha256-verified)
+# into a content-addressed cache, never vendored. So this golden is captured from the repo root, and
+# the parity test (network-gated) fetches the closure via `fetch_crate` exactly as bazel fetches it.
+#
+# CAPTURE (manual + reproducible — `capture-goldens` only iterates self-contained `parity/corpus`
+# BUILD cases, so it cannot reach an external `@crates//` label):
+#   bazel --output_base=/tmp/razel-parity-ob aquery 'deps(@crates//:blake3)' --output=text > raw.txt
+#   # extract blake3's OWN action blocks (Target = crates__blake3-1.8.2), then:
+#   cargo xtask normalize-golden raw.txt parity/corpus/rust/crate_blake3/golden.txt
+# Re-capture if the root lock bumps blake3 off 1.8.2 (same discipline as the version-pinned locals).
+bazel_version      = "9.1.1"
+rules_rust_version = "0.70.0"
+blake3_version     = "1.8.2"
+platform           = "darwin_arm64"
+norm_version       = 3
+query              = "aquery 'deps(@crates//:blake3)' --output=text  (filtered to crates__blake3-1.8.2)"

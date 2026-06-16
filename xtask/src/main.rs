@@ -118,6 +118,7 @@ fn main() -> ExitCode {
             }
         }
         Some("capture-goldens") => capture_goldens(&rest),
+        Some("normalize-golden") => normalize_golden(&rest),
         Some("examples") if rest.first().map(String::as_str) == Some("--survey") => {
             match examples::survey(&workspace_root()) {
                 Ok(md) => {
@@ -154,6 +155,35 @@ fn main() -> ExitCode {
 }
 
 // ── Phase 0.3: parity goldens (RazelParityHarness.md) ───────────────────────────
+// `cargo xtask normalize-golden <in> <out>` normalizes a MANUALLY-captured aquery (e.g. an external
+// `@crates//` closure that `capture-goldens` — which iterates `parity/corpus` BUILD cases — cannot
+// reach) the SAME way as the local goldens: `filter_aquery` + `razel-parity::normalize`. The capture
+// itself stays manual + reproducible (e.g. `bazel … aquery 'deps(@crates//:blake3)' --output=text`).
+fn normalize_golden(args: &[String]) -> ExitCode {
+    let (Some(infile), Some(outfile)) = (args.first(), args.get(1)) else {
+        eprintln!("usage: cargo xtask normalize-golden <raw-aquery-in> <golden-out>");
+        return ExitCode::from(2);
+    };
+    let raw = match std::fs::read_to_string(infile) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("normalize-golden: cannot read {infile}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let golden = razel_parity::normalize(&filter_aquery(&raw));
+    match std::fs::write(outfile, &golden) {
+        Ok(()) => {
+            eprintln!("normalize-golden: wrote {outfile} ({} bytes)", golden.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("normalize-golden: cannot write {outfile}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 // `cargo xtask capture-goldens` runs `bazel aquery` over each corpus case under
 // `parity/corpus/**` (dirs with a BUILD file), normalizes via `razel-parity`, and writes
 // `golden.txt` into the case dir. This is the ONLY bazel-touching step — dev/authoring-only;
