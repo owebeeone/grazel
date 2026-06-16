@@ -473,17 +473,24 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
 - `7261f03` **B4 env-file producer dep** — `cargo_toml_env_vars` (the `--env-file` producer) added to the
   build-script target's `deps` so `collect_order` BUILDS it before the run (else the run ENOENT'd on the
   missing `--env-file`). Parity-neutral.
-- **PROGRESS: blake3 executes through the WHOLE closure** — ~15 crates compile, the build-script bin
-  compiles + RUNS (CARGO_* env present). **STOP at the final leg — the cc SIMD compile.** blake3's
-  `build.rs` runs `cc::Build` to compile `c/blake3_neon.c` etc.; it fails because (a) the build script's
-  cwd isn't the crate root, so `c/*.c` (relative to `CARGO_MANIFEST_DIR`) doesn't resolve — a `--rundir`
-  fix; and (b) the **cc env** (`CC`/`AR`/`CFLAGS`) is unset (the deferred **P3.8d leg 2**). (b) carries a
-  DEVIATION-POSTURE decision RR owns: Bazel's CargoBuildScriptRun env has a rich `CFLAGS` (cc_wrapper.sh,
-  `-fstack-protector`, `-mmacosx-version-min=<sdk>`, redacted `__DATE__`/`__TIME__` macros, …) — MATCH it
-  (via `razel-cc-toolchain`) vs DOCUMENT razel's system-cc env as a deviation (like the rust system-rustc
-  `--sysroot`/`-L` deviations). RECO: cwd fix + system-cc to GET the `.o`s built (B4 "rlib + SIMD `.o`s
-  exist"), document the exact-CFLAGS as a deviation — but RR's call. Then **Phase B COMPLETE**
-  (Milestone-1). **Milestone-1 ANALYSIS half (B1–B3) DONE + gated**; Phase A + local execution gated.
+- `7c048a5` **B4 cc SIMD — blake3 ITSELF FULLY BUILDS (incl the cc SIMD).** The build script now runs
+  with cwd = the crate root (`--rundir` = the crate src dir) + ABSOLUTE OUT_DIR/program (the wrapper
+  absolutizes against its sandbox cwd, chdir's the child, sets `CARGO_MANIFEST_DIR`) — so cc-rs's
+  relative `build.file("c/blake3_neon.c")` resolves and the SIMD `.o`s compile (system `cc`; exact
+  CFLAGS not gated — CargoBuildScriptRun is OMIT'd). Parity-neutral (run argv OMIT'd): A7 ok, rust 2/2,
+  blake3 analysis GREEN, wrapper 11/0.
+- **REMAINING: the per-crate EXECUTION tail (a wrapper-env-model continuation).** Execution proceeds
+  through the closure; the next gap is `crossbeam-utils`'s build-script BIN COMPILE — its `build.rs`
+  reads `env!("CARGO_PKG_NAME")` at COMPILE time, but razel's direct-rustc bin compile carries only the
+  hardcoded `PATH` (run_one_target). FIX: route the build-script bin compile through the wrapper's
+  `rustc` subcommand with `--env-file=<cargo_toml_env_vars>` (supplies `CARGO_PKG_*`); canonicalize
+  strips the wrapper prefix → parity-neutral. CAVEAT (interconnected): the wrapper's child env is
+  default-deny (no `PATH` on unix) — fine for an rlib (no link) but the bin compile LINKS (needs cc/ld
+  → `PATH`), so the wrapper's rustc env must supply `PATH` too. After that, more crates' build.rs may
+  surface further env needs, then the final blake3/closure crate compiles + the **xp gate** (build →
+  rlib + SIMD `.o`s + flags-file diff). The HARDEST part (blake3 + cc SIMD) is DONE; the tail is a
+  focused wrapper-env-model continuation. **Milestone-1 ANALYSIS half (B1–B3) DONE + gated**; Phase A +
+  local execution gated.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
