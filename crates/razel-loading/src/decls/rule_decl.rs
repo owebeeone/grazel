@@ -11,7 +11,7 @@ use starlark::eval::Evaluator;
 use starlark::values::list::ListRef;
 use starlark::values::structs::AllocStruct;
 use starlark::values::{
-    StarlarkValue, Value,
+    Value,
 };
 // ---- rule() + DefaultInfo + select ----------------------------------------------
 use super::*;

@@ -6,7 +6,7 @@ use crate::state::session;
 use starlark::eval::Evaluator;
 use starlark::values::list::ListRef;
 use starlark::values::{
-    StarlarkValue, Value, ValueLike,
+    Value, ValueLike,
 };
 // ---- rule() + DefaultInfo + select ----------------------------------------------
 use super::*;
