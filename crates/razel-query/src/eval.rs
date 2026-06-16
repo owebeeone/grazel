@@ -36,6 +36,19 @@ fn attr_labels(raw: &RawAttr, out: &mut Vec<String>) {
     }
 }
 
+/// Resolve a raw attr label to its canonical `//pkg:name` form relative to `pkg` (the owning
+/// target's package) — Bazel's `labels()` emits CANONICAL labels: `:n` → `//pkg:n`, a bare `n` →
+/// `//pkg:n`, and `//…` / `@…` are already absolute. (v1 simplification: no subpackage probing.)
+fn canonical_label(raw: &str, pkg: &str) -> String {
+    if raw.starts_with("//") || raw.starts_with('@') {
+        raw.to_string()
+    } else if let Some(rest) = raw.strip_prefix(':') {
+        format!("//{pkg}:{rest}")
+    } else {
+        format!("//{pkg}:{raw}")
+    }
+}
+
 /// Evaluate `expr` over `graph`, with `--implicit_deps` = `implicit`.
 pub fn eval(graph: &QueryGraph, expr: &Expr, implicit: bool) -> Result<LabelSet, String> {
     Eval { graph, implicit, env: BTreeMap::new() }.go(expr)
@@ -119,10 +132,17 @@ impl Eval<'_> {
                 let set = self.go(x)?;
                 let mut out = LabelSet::new();
                 for l in set {
+                    // Resolve each raw attr value relative to the OWNING target's package, so the
+                    // output is canonical (Bazel's `labels()` semantics) rather than as-written.
+                    let pkg = l
+                        .strip_prefix("//")
+                        .and_then(|b| b.split_once(':'))
+                        .map(|(p, _)| p)
+                        .unwrap_or("");
                     if let Some(a) = self.graph.target(&l).and_then(|t| t.attrs.get(attr)) {
                         let mut v = Vec::new();
                         attr_labels(a, &mut v);
-                        out.extend(v);
+                        out.extend(v.into_iter().map(|raw| canonical_label(&raw, pkg)));
                     }
                 }
                 Ok(out)
@@ -202,7 +222,8 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("//a:base".into(), target("//a:base", "a", "rust_library", &[]));
         let mut lib = target("//a:lib", "a", "rust_library", &["//a:base"]);
-        lib.attrs.insert("deps".into(), RawAttr::List(vec![RawAttr::Str("//a:base".into())]));
+        // a RELATIVE raw dep — `labels()` must canonicalize it to `//a:base` (Bazel's form).
+        lib.attrs.insert("deps".into(), RawAttr::List(vec![RawAttr::Str(":base".into())]));
         m.insert("//a:lib".into(), lib);
         m.insert("//a:bin".into(), target("//a:bin", "a", "rust_binary", &["//a:lib"]));
         let g = QueryGraph::new(m);
@@ -212,7 +233,7 @@ mod tests {
         assert_eq!(run("kind(\"rust_binary rule\", //...)"), ["//a:bin"]);
         assert_eq!(run("kind(library, //...)"), ["//a:base", "//a:lib"]); // partial match
         assert_eq!(run("filter(base, //...)"), ["//a:base"]);
-        assert_eq!(run("labels(deps, //a:lib)"), ["//a:base"]); // the raw dep label
+        assert_eq!(run("labels(deps, //a:lib)"), ["//a:base"]); // `:base` canonicalized to `//a:base`
         assert_eq!(run("attr(deps, base, //...)"), ["//a:lib"]); // deps canonical contains "base"
     }
 
