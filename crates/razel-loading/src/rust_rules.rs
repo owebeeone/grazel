@@ -152,41 +152,35 @@ fn crate_name_of(canon: &str) -> String {
         .to_string()
 }
 
-/// RazelRustParityPlan B3: the TRANSITIVE rlib-dir closure for `-Ldependency`. rules_rust passes a
-/// `-Ldependency=<dir>` for EVERY crate in the transitive closure (not just direct deps), so rustc can
-/// locate transitively-needed `.rmeta` during type-check. Walk the ALREADY-analyzed dep graph
-/// (`results[canon].deps`), collecting each rust target's rlib output dir; deduped + SORTED
+/// RazelRustParityPlan B3/B4: the TRANSITIVE rlib closure (the rlib FILE paths). rules_rust passes a
+/// `-Ldependency=<dir>` for EVERY crate in the transitive closure AND stages each transitive rlib as an
+/// action input — a direct rlib references its own deps by name+hash, so rustc loads their `.rmeta`
+/// from a `-Ldependency` dir, which the per-action sandbox must contain. Walk the ALREADY-analyzed dep
+/// graph (`results[canon].deps`), collecting each rust target's rlib output FILE; deduped + SORTED
 /// (deterministic — rustc treats search-path ORDER as irrelevant, so the parity diff compares the SET).
-fn transitive_rlib_dirs(sess: &crate::state::Session, roots: &[String]) -> Vec<String> {
+/// Only CRATES (rlib outputs) are collected/recursed: a `cargo_build_script` (`_bs`, a bin output) is
+/// the intra-target build-script EDGE, not a crate dep — recursing it would wrongly pull in BUILD-only
+/// deps (e.g. `version_check`) Bazel's crate-compile `-Ldependency` excludes.
+fn transitive_rlibs(sess: &crate::state::Session, roots: &[String]) -> Vec<String> {
     let results = sess.results.borrow();
     let mut seen = std::collections::HashSet::new();
-    let mut dirs: Vec<String> = Vec::new();
+    let mut rlibs: Vec<String> = Vec::new();
     let mut stack: Vec<String> = roots.to_vec();
     while let Some(canon) = stack.pop() {
         if !seen.insert(canon.clone()) {
             continue;
         }
         let Some(t) = results.get(&canon) else { continue };
-        // Only CRATES (rlib outputs) are `-Ldependency` deps and are recursed: a `cargo_build_script`
-        // (`_bs`, a bin output) is the intra-target build-script EDGE, not a crate dep — recursing
-        // through it would wrongly pull in BUILD-only deps (e.g. `version_check`) that Bazel's
-        // crate-compile `-Ldependency` excludes. No rlib → skip (don't collect, don't recurse).
-        let Some(dir) = t
-            .default_info
-            .iter()
-            .find(|l| l.ends_with(".rlib"))
-            .and_then(|l| l.rsplit_once('/'))
-            .map(|(d, _)| d.to_string())
-        else {
-            continue;
+        let Some(rlib) = t.default_info.iter().find(|l| l.ends_with(".rlib")) else {
+            continue; // not a crate (build-script bin / env file) → skip + don't recurse
         };
-        if !dirs.iter().any(|d| d == &dir) {
-            dirs.push(dir);
+        if !rlibs.iter().any(|r| r == rlib) {
+            rlibs.push(rlib.clone());
         }
         stack.extend(t.deps.iter().cloned());
     }
-    dirs.sort();
-    dirs
+    rlibs.sort();
+    rlibs
 }
 
 /// Resolve `deps` to `(--extern crate=rlib args, dep rlib inputs, dep canon names, build-script
@@ -208,18 +202,26 @@ fn extern_args(
         }
         let crate_name = crate_name_of(&dep.canon);
         // A rust_library exports exactly one rlib in default_info → dep.libs. rules_rust's faithful
-        // form is `--extern=<name>=<rlib>` (joined).
+        // form is `--extern=<name>=<rlib>` (joined) for the DIRECT dep.
         for rlib in &dep.libs {
             args.push(format!("--extern={crate_name}={rlib}"));
-            inputs.push(rlib.clone());
         }
         rlib_deps.push(dep.canon.clone());
         names.push(dep.canon);
     }
-    // RazelRustParityPlan B3: rules_rust passes a `-Ldependency=<dir>` for EVERY crate in the
-    // TRANSITIVE rlib closure (not just direct deps) so rustc can locate transitively-needed `.rmeta`
-    // at type-check (+ the rlibs at link) — also required for B4 execution. After the `--extern`s.
-    for dir in transitive_rlib_dirs(session(eval), &rlib_deps) {
+    // RazelRustParityPlan B3/B4: rustc must FIND the transitive rlib closure (a direct rlib references
+    // its deps by name+hash → rustc loads their `.rmeta` from a `-Ldependency` dir). rules_rust emits a
+    // `-Ldependency=<dir>` per transitive crate AND stages every transitive rlib as an input (the
+    // per-action sandbox materializes only DECLARED inputs). Stage the rlibs + emit the dirs; the direct
+    // `--extern` rlibs are a subset. The parity diff drops `external/<repo>/` inputs, so this is
+    // analysis-parity-neutral; it's what makes B4 execution find e.g. `cc`'s `shlex`.
+    let transitive = transitive_rlibs(session(eval), &rlib_deps);
+    inputs.extend(transitive.iter().cloned());
+    let mut dirs: Vec<String> =
+        transitive.iter().filter_map(|r| r.rsplit_once('/').map(|(d, _)| d.to_string())).collect();
+    dirs.sort();
+    dirs.dedup();
+    for dir in dirs {
         args.push(format!("-Ldependency={dir}"));
     }
     Ok((args, inputs, names, build_scripts))
