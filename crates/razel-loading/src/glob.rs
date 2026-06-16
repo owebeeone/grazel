@@ -27,10 +27,13 @@ pub(crate) fn do_glob(
     include: Vec<String>,
     exclude: Vec<String>,
 ) -> anyhow::Result<Vec<String>> {
-    // External packages (`@repo//pkg`) glob against the vendored repo's dir.
+    // External packages (`@repo//pkg`) glob against the vendored repo's dir. Trim ALL leading `@`
+    // so BOTH the apparent `@crates//` and the canonical `@@rules_rust++crate+crates//` (§11.3) forms
+    // resolve — mirrors `load_package_body` (a lone `strip_prefix('@')` left the canonical `@@…` repo
+    // name with a stray `@`, so `external_repo_dir` missed the vendored dir → B2 glob failure).
     let dir = sess.current_pkg().and_then(|pkg| {
-        if let Some(rest) = pkg.strip_prefix('@') {
-            let (repo, sub) = rest.split_once("//")?;
+        if pkg.starts_with('@') {
+            let (repo, sub) = pkg.trim_start_matches('@').split_once("//")?;
             sess.global.external_repo_dir(repo).map(|r| r.join(sub))
         } else {
             sess.workspace.clone().map(|root| root.join(&pkg))
