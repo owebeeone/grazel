@@ -420,12 +420,37 @@ external `@crates//:blake3` integration (Phase B) — not "~250 + a normalizer".
   `@crates`) + the vendored-dir unit tests. `razel build @crates//:blake3` now gets PAST target
   resolution + INTO analysis (probe: "unknown target" → "not vendored" → evaluating the root `@crates`
   BUILD). `rust_graph_parity` 2/2 + lib 75/0 unaffected.
-- **REMAINING:** **B2** — the full closure analyzes. FIRST gap (the probe's current error): the root
-  `@crates` BUILD calls `glob()` and razel's `glob()` errs "needs a package on disk" on the materialized
-  external package (note the `@@…+crates///BUILD` triple-slash — the root package's empty sub-path).
-  Then the ~20-crate closure (proc-macro deps → P4.1, cc SIMD, per-crate `crate_features`/
-  `target_compatible_with`). Then **B3** (blake3 aq parity) + **B4** (blake3 xp parity + cc env — the
-  fetch/vendor decision lands here). Phase A (local analysis + execution) stays fully gated.
+- `0ac993d` **B2 gap-1 (glob)** — `do_glob` trims ALL leading `@` (was one) so the canonical `@@repo//`
+  external package resolves; the root `@crates` BUILD's `glob()` passes.
+- `1baa891` **B2 GATE MET — the full `@crates//:blake3` closure ANALYZES** (~20 crates: digest,
+  generic-array, typenum, crypto-common, subtle, rayon-core, crossbeam-{utils,epoch,deque}, …). Two
+  more gaps closed: (i) **lazy fetch** — `materialize_one_repo` (replaced the wrong-premise BUILD-only
+  `materialize_crates_world`): per-repo ON DEMAND from `load_package_body` (root inline; per-crate
+  `fetch_crate`), so only the loaded closure (~15) is fetched, not the 140-crate lock. **CORRECTED the
+  B1 "no fetch until B4" finding** — analysis genuinely reads source (generated BUILD globs `**/*.rs`,
+  sets `crate_root`, `cargo_toml_env_vars` reads `Cargo.toml`); bazel pre-fetches the closure, razel must
+  too (network OK here; `fetch_crate` is the parity path). (ii) **`@@` data-file resolution** —
+  `deps.rs` + `decls.rs` trim ALL `@` so a canonical-repo data/srcs file (blake3's `data=glob(['**'])`
+  sweeps in `Cargo.lock`) resolves vs "not analyzed". No proc-macro in blake3's closure (P4.1 stays
+  deferred); cc SIMD is inside blake3's `build.rs` (`cc::Build`) → execution/B4. Gate: B2 dev-probe
+  `blake3_closure` (ignored — fetches over network). `rust_graph_parity` 2/2 + lib 75/0 + gates + perfgate.
+- **STOP — B3 needs a parity-FIXTURE decision (RR's call; the roll paused here per the goal).** B3
+  (blake3 aq parity) does NOT fit the established HERMETIC corpus-case pattern: every Phase A case is
+  self-contained (committed sources + golden, analyzed offline), but blake3 is an EXTERNAL closure from
+  razel's OWN root `@crates`, whose analysis needs FETCHED (non-hermetic) sources. Two fixtures, each a
+  real trade-off RR owns: **(a)** a self-contained pinned `parity/corpus/rust/crate_blake3` case (its own
+  mini Cargo workspace + `@crates` lock + sources) — hermetic + fits `capture-goldens`, but heavy setup +
+  duplicates the dogfood `@crates`; **(b)** reuse razel's root `@crates` + a network-GATED (`#[ignore]`)
+  blake3 parity test — light + reuses the dev-probe, but non-hermetic + couples the golden to razel's
+  evolving deps. Captured (reproducible: `bazel --output_base=/tmp/razel-parity-ob aquery
+  'deps(@crates//:blake3)' --output=text` from the repo root): 11k-line aquery; blake3's OWN actions =
+  **2 Rustc** (crate rlib: `--cfg`×4 [build-script-injected, the (b) flags-file deviation] +
+  `--cap-lints=allow` + `crate_features`; build-script bin) + CargoBuildScriptRun (OMIT) + **2
+  ExtractCargoTomlEnvVars** (NEW OMIT — razel emits `FileWrite`, content baked at analysis; intra-target
+  env plumbing, exactly the (b) `CargoBuildScriptRun` principle) + bazel infra (OMIT). Anticipated B3
+  argv deviations: the build-script `--cfg`s (exec-injected via the wrapper → canonicalize likely strips
+  the valueless `--cfg`s), `--cap-lints`, `crate_features`. Then **B4** (blake3 xp + cc `CC`/`AR`/`CFLAGS`
+  for the SIMD `.o`s; the CargoBuildScriptRun env already shows the cc env). Phase A stays fully gated.
 Deferred: **P3.4c** (wildcard-skip) → lands with **P4.4**'s incompatible-target golden.
 (`cargo_toml_env_vars` + env-file; makes the `rustc_env`/`version`/`pkg_name`/`rustc_env_files`
 env family + `aliases` live) → P3.6–P3.10 (build-script compile/run, flags parser, rustc wrapper,
