@@ -996,7 +996,11 @@ fn resolve_label_attr_inner<'v>(
                 // (`srcs = ["lib.rs"]`). Source files are not target deps. External
                 // file labels check the vendored repo; their path takes Bazel's
                 // exec-root form (`external/<repo>/…`).
-                let (on_disk, qualified) = if let Some(rest) = dep.strip_prefix('@') {
+                let (on_disk, qualified) = if dep.starts_with('@') {
+                    // Trim ALL leading `@` so the canonical `@@repo//` form (§11.3) resolves too
+                    // (mirrors the deps-arm fix — a lone `strip_prefix('@')` left `@@…` repos a stray
+                    // `@`, missing the vendored dir for a data/srcs file like blake3's `Cargo.lock`).
+                    let rest = dep.trim_start_matches('@');
                     match rest
                         .split_once("//")
                         .and_then(|(r, pf)| pf.split_once(':').map(|(p, f)| (r, p, f)))

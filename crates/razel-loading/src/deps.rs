@@ -113,7 +113,11 @@ pub(crate) fn resolve_dep<'v>(
         // Bazel file-label semantics: a label naming no declared target resolves to a SOURCE
         // FILE when it exists (mirrors the deps-arm fallback). External labels check the
         // vendored repo (exec-root path form).
-        let on_disk = if let Some(rest) = canon.strip_prefix('@') {
+        let on_disk = if canon.starts_with('@') {
+            // Trim ALL leading `@` so the canonical `@@repo//` form (§11.3) resolves too — a lone
+            // `strip_prefix('@')` left `@@…` repos with a stray `@`, so `external_repo_dirs` missed
+            // the vendored dir and a data/glob file (e.g. blake3's `Cargo.lock`) fell to "not analyzed".
+            let rest = canon.trim_start_matches('@');
             rest.split_once("//")
                 .and_then(|(r, pf)| pf.split_once(':').map(|(p, f)| (r, p, f)))
                 .and_then(|(repo, pkg, file)| {
