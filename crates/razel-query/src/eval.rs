@@ -36,16 +36,23 @@ fn attr_labels(raw: &RawAttr, out: &mut Vec<String>) {
     }
 }
 
-/// Resolve a raw attr label to its canonical `//pkg:name` form relative to `pkg` (the owning
-/// target's package) — Bazel's `labels()` emits CANONICAL labels: `:n` → `//pkg:n`, a bare `n` →
-/// `//pkg:n`, and `//…` / `@…` are already absolute. (v1 simplification: no subpackage probing.)
-fn canonical_label(raw: &str, pkg: &str) -> String {
+/// The package-label prefix of a target label — everything up to the target-name `:` (repo + `//` +
+/// package). `@@r//p:n` → `@@r//p`; `//p:n` → `//p`. A relative attr value resolves within THIS, so
+/// an external target's files key in its own repo (P6.Q1.a), not the main repo.
+fn pkg_prefix(label: &str) -> &str {
+    label.rsplit_once(':').map(|(p, _)| p).unwrap_or(label)
+}
+
+/// Resolve a raw attr label to its CANONICAL form relative to `prefix` (the owning target's
+/// repo+package label, from [`pkg_prefix`]) — Bazel's `labels()` semantics: `:n` / bare `n` →
+/// `{prefix}:n`; `//…` / `@…` are already absolute. (v1 simplification: no subpackage probing.)
+fn canonical_label(raw: &str, prefix: &str) -> String {
     if raw.starts_with("//") || raw.starts_with('@') {
         raw.to_string()
     } else if let Some(rest) = raw.strip_prefix(':') {
-        format!("//{pkg}:{rest}")
+        format!("{prefix}:{rest}")
     } else {
-        format!("//{pkg}:{raw}")
+        format!("{prefix}:{raw}")
     }
 }
 
@@ -132,17 +139,14 @@ impl Eval<'_> {
                 let set = self.go(x)?;
                 let mut out = LabelSet::new();
                 for l in set {
-                    // Resolve each raw attr value relative to the OWNING target's package, so the
-                    // output is canonical (Bazel's `labels()` semantics) rather than as-written.
-                    let pkg = l
-                        .strip_prefix("//")
-                        .and_then(|b| b.split_once(':'))
-                        .map(|(p, _)| p)
-                        .unwrap_or("");
+                    // Resolve each raw attr value relative to the OWNING target's repo+package, so
+                    // the output is canonical (Bazel's `labels()` semantics) rather than as-written
+                    // — an EXTERNAL target's relative files key in its own repo, not `//` (P6.Q1.a).
+                    let prefix = pkg_prefix(&l);
                     if let Some(a) = self.graph.target(&l).and_then(|t| t.attrs.get(attr)) {
                         let mut v = Vec::new();
                         attr_labels(a, &mut v);
-                        out.extend(v.into_iter().map(|raw| canonical_label(&raw, pkg)));
+                        out.extend(v.into_iter().map(|raw| canonical_label(&raw, prefix)));
                     }
                 }
                 Ok(out)
@@ -235,6 +239,34 @@ mod tests {
         assert_eq!(run("filter(base, //...)"), ["//a:base"]);
         assert_eq!(run("labels(deps, //a:lib)"), ["//a:base"]); // `:base` canonicalized to `//a:base`
         assert_eq!(run("attr(deps, base, //...)"), ["//a:lib"]); // deps canonical contains "base"
+    }
+
+    #[test]
+    fn labels_key_external_relative_values_at_the_targets_repo() {
+        // P6.Q1.a: `labels()` resolves a target's RELATIVE attr values (e.g. glob'd source files in
+        // `compile_data`) against the target's repo+package. For an EXTERNAL crate_universe target a
+        // bare file must key `@@<repo>//:c/blake3.c`, NOT the main repo `//:c/blake3.c` — the pre-fix
+        // bug: the package extraction only stripped `//`, leaving external targets an empty prefix.
+        let label = "@@rules_rust++crate+crates__blake3-1.8.2//:blake3";
+        let mut m = BTreeMap::new();
+        let mut t = target(label, "", "rust_library", &[]);
+        t.attrs.insert(
+            "compile_data".into(),
+            RawAttr::List(vec![RawAttr::Str("c/blake3.c".into()), RawAttr::Str(":src/lib.rs".into())]),
+        );
+        m.insert(label.into(), t);
+        let g = QueryGraph::new(m);
+        let got = eval(&g, &parse(&format!("labels(compile_data, {label})")).unwrap(), false)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            [
+                "@@rules_rust++crate+crates__blake3-1.8.2//:c/blake3.c",
+                "@@rules_rust++crate+crates__blake3-1.8.2//:src/lib.rs",
+            ]
+        );
     }
 
     #[test]
