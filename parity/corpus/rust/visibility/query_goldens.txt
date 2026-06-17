@@ -1,0 +1,15 @@
+@@ visible(//corpus/rust/visibility/b:b_lib, //corpus/rust/visibility/a:all)
+//corpus/rust/visibility/a:a_public
+//corpus/rust/visibility/a:a_subpkg
+//corpus/rust/visibility/a:a_to_b
+
+@@ visible(//corpus/rust/visibility/b/sub:b_sub_lib, //corpus/rust/visibility/a:all)
+//corpus/rust/visibility/a:a_public
+//corpus/rust/visibility/a:a_subpkg
+
+@@ visible(//corpus/rust/visibility/a:a_private, //corpus/rust/visibility/a:all)
+//corpus/rust/visibility/a:a_private
+//corpus/rust/visibility/a:a_public
+//corpus/rust/visibility/a:a_subpkg
+//corpus/rust/visibility/a:a_to_b
+

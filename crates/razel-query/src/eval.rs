@@ -56,6 +56,35 @@ fn canonical_label(raw: &str, prefix: &str) -> String {
     }
 }
 
+/// The PACKAGE of a label — `//pkg:n` → `pkg`, `@repo//pkg:n` → `pkg` (the part between `//` and the
+/// target `:`). Used by `visible()` to compare a `visibility` spec's package against the consumer's.
+fn pkg_of(label: &str) -> &str {
+    let after = label.split_once("//").map(|(_, p)| p).unwrap_or(label);
+    after.split_once(':').map(|(p, _)| p).unwrap_or(after)
+}
+
+/// Does a single `visibility` spec grant access to a target in package `from_pkg` (§12)?
+/// `//visibility:public` → all; `//visibility:private` → none (same-package handled by the caller);
+/// `//PKG:__pkg__` → exactly PKG; `//PKG:__subpackages__` → PKG or below. A bare `//PKG:NAME` is a
+/// `package_group` reference — a loud, NAMED deferral (no package_group model in query v1).
+fn spec_grants(spec: &str, from_pkg: &str) -> Result<bool, String> {
+    if spec == "//visibility:public" {
+        return Ok(true);
+    }
+    if spec == "//visibility:private" {
+        return Ok(false);
+    }
+    if let Some(pkg) = spec.strip_prefix("//").and_then(|s| s.strip_suffix(":__pkg__")) {
+        return Ok(from_pkg == pkg);
+    }
+    if let Some(pkg) = spec.strip_prefix("//").and_then(|s| s.strip_suffix(":__subpackages__")) {
+        return Ok(from_pkg == pkg || from_pkg.strip_prefix(pkg).is_some_and(|r| r.starts_with('/')));
+    }
+    Err(format!(
+        "visible(): package_group visibility spec `{spec}` is not supported (deferred — §12)"
+    ))
+}
+
 /// Evaluate `expr` over `graph`, with `--implicit_deps` = `implicit`.
 pub fn eval(graph: &QueryGraph, expr: &Expr, implicit: bool) -> Result<LabelSet, String> {
     Eval { graph, implicit, env: BTreeMap::new() }.go(expr)
@@ -202,7 +231,50 @@ impl Eval<'_> {
                 }
                 Ok(out)
             }
+            Expr::Visible(pred, x) => {
+                // The targets in `x` visible to EVERY target in `pred` (Bazel §12
+                // `visible(predicate, x)`). Reduce the predicate to its packages — visibility is
+                // package-scoped — then keep a candidate iff it's visible to all of them.
+                let from = self.go(pred)?;
+                let from_pkgs: std::collections::BTreeSet<&str> =
+                    from.iter().map(|f| pkg_of(f)).collect();
+                let mut out = LabelSet::new();
+                for t in self.go(x)? {
+                    let mut visible = true;
+                    for p in &from_pkgs {
+                        if !self.is_visible_to(&t, p)? {
+                            visible = false;
+                            break;
+                        }
+                    }
+                    if visible {
+                        out.insert(t);
+                    }
+                }
+                Ok(out)
+            }
         }
+    }
+
+    /// Is `target` visible to a target in package `from_pkg`? Same package → always; otherwise a
+    /// `visibility` spec must grant it (absent/default `visibility` = package-private). A non-rule
+    /// leaf (e.g. a source file) carries no captured visibility → package-private.
+    fn is_visible_to(&self, target: &str, from_pkg: &str) -> Result<bool, String> {
+        if pkg_of(target) == from_pkg {
+            return Ok(true);
+        }
+        let mut specs = Vec::new();
+        if let Some(t) = self.graph.target(target) {
+            if let Some(v) = t.attrs.get("visibility") {
+                attr_labels(v, &mut specs);
+            }
+        }
+        for s in &specs {
+            if spec_grants(s, from_pkg)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -374,6 +446,48 @@ mod tests {
             run("tests(//a:lib + //a:lib_test + //a:all_tests)"),
             ["//a:itest", "//a:lib_test"]
         );
+    }
+
+    #[test]
+    fn visible_filters_by_visibility_spec() {
+        fn with_vis(label: &str, pkg: &str, specs: &[&str]) -> LoadedTarget {
+            let mut t = target(label, pkg, "filegroup", &[]);
+            if !specs.is_empty() {
+                let xs = specs.iter().map(|s| RawAttr::Str((*s).into())).collect();
+                t.attrs.insert("visibility".into(), RawAttr::List(xs));
+            }
+            t
+        }
+        let mut m = BTreeMap::new();
+        m.insert("//a:public".into(), with_vis("//a:public", "a", &["//visibility:public"]));
+        m.insert("//a:to_b".into(), with_vis("//a:to_b", "a", &["//b:__pkg__"]));
+        m.insert("//a:sub".into(), with_vis("//a:sub", "a", &["//b:__subpackages__"]));
+        m.insert("//a:priv".into(), with_vis("//a:priv", "a", &[])); // default private
+        m.insert("//b:b".into(), with_vis("//b:b", "b", &[]));
+        m.insert("//b/sub:s".into(), with_vis("//b/sub:s", "b/sub", &[]));
+        m.insert("//a:self".into(), with_vis("//a:self", "a", &[]));
+        let g = QueryGraph::new(m);
+        let cands = "//a:public + //a:to_b + //a:sub + //a:priv";
+        let run =
+            |s: &str| eval(&g, &parse(s).unwrap(), false).unwrap().into_iter().collect::<Vec<_>>();
+        // from package b: public + __pkg__ b + __subpackages__ b; NOT private.
+        assert_eq!(run(&format!("visible(//b:b, {cands})")), ["//a:public", "//a:sub", "//a:to_b"]);
+        // from package b/sub: public + __subpackages__ b; NOT __pkg__ b, NOT private.
+        assert_eq!(run(&format!("visible(//b/sub:s, {cands})")), ["//a:public", "//a:sub"]);
+        // same package → all visible.
+        assert_eq!(run("visible(//a:self, //a:priv + //a:public)"), ["//a:priv", "//a:public"]);
+    }
+
+    #[test]
+    fn visible_defers_package_group_loudly() {
+        let mut m = BTreeMap::new();
+        let mut t = target("//a:t", "a", "filegroup", &[]);
+        t.attrs.insert("visibility".into(), RawAttr::List(vec![RawAttr::Str("//a:my_group".into())]));
+        m.insert("//a:t".into(), t);
+        m.insert("//b:b".into(), target("//b:b", "b", "filegroup", &[]));
+        let g = QueryGraph::new(m);
+        let err = eval(&g, &parse("visible(//b:b, //a:t)").unwrap(), false).unwrap_err();
+        assert!(err.contains("package_group"), "expected a named package_group deferral, got: {err}");
     }
 
     #[test]

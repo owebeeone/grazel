@@ -61,6 +61,7 @@ fn collect_patterns(expr: &Expr, out: &mut Vec<String>) {
         Expr::Rdeps(a, b, _)
         | Expr::SomePath(a, b)
         | Expr::AllPaths(a, b)
+        | Expr::Visible(a, b)
         | Expr::Union(a, b)
         | Expr::Except(a, b)
         | Expr::Intersect(a, b) => {
@@ -92,6 +93,7 @@ fn canonicalize_patterns(expr: &mut Expr, canon: &dyn Fn(&str) -> String) {
         Expr::Rdeps(a, b, _)
         | Expr::SomePath(a, b)
         | Expr::AllPaths(a, b)
+        | Expr::Visible(a, b)
         | Expr::Union(a, b)
         | Expr::Except(a, b)
         | Expr::Intersect(a, b) => {

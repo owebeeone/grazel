@@ -297,6 +297,16 @@ const GRAPH_QUERY_BATTERY: &[&str] = &[
     "//corpus/rust/transitive:all",
 ];
 
+/// The `visible(predicate, x)` battery (P6) over the 3-package `corpus/rust/visibility` — LITERAL
+/// exprs. Gates the visibility model against bazel: from package `b` (public + `//b:__pkg__` +
+/// `//b:__subpackages__`, not private), from a SUBpackage `b/sub` (public + `__subpackages__`, not
+/// `__pkg__`), and same-package (all visible).
+const VISIBLE_QUERY_BATTERY: &[&str] = &[
+    "visible(//corpus/rust/visibility/b:b_lib, //corpus/rust/visibility/a:all)",
+    "visible(//corpus/rust/visibility/b/sub:b_sub_lib, //corpus/rust/visibility/a:all)",
+    "visible(//corpus/rust/visibility/a:a_private, //corpus/rust/visibility/a:all)",
+];
+
 /// Run `bazel query --noimplicit_deps <extra…> <expr>` in `dir` (output base `ob`), returning the
 /// golden block `@@ <expr>\n<sorted result lines>\n\n`, or `None` (logged) on failure. `extra` carries
 /// per-battery flags (`--output=package`, `--output=graph --nograph:factored`, …). The single
@@ -379,6 +389,7 @@ fn capture_query_goldens() -> ExitCode {
     let pkg_exprs: Vec<String> = PACKAGE_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
     let tests_exprs: Vec<String> = TESTS_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
     let graph_exprs: Vec<String> = GRAPH_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
+    let visible_exprs: Vec<String> = VISIBLE_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
 
     let failed = capture_battery(&bazel, &parity, &ob, &label_exprs, &[],
             "corpus/rust/transitive/query_goldens.txt")
@@ -388,7 +399,9 @@ fn capture_query_goldens() -> ExitCode {
             "corpus/rust/tests/query_goldens.txt")
         + capture_battery(&bazel, &parity, &ob, &graph_exprs,
             &["--output=graph", "--nograph:factored"],
-            "corpus/rust/transitive/query_goldens_graph.txt");
+            "corpus/rust/transitive/query_goldens_graph.txt")
+        + capture_battery(&bazel, &parity, &ob, &visible_exprs, &[],
+            "corpus/rust/visibility/query_goldens.txt");
 
     if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }

@@ -31,6 +31,8 @@ pub enum Expr {
     SamePkgDirectRdeps(Box<Expr>),
     /// `tests(x)` — the test rules in `x`, expanding `test_suite` into its constituent tests.
     Tests(Box<Expr>),
+    /// `visible(predicate, x)` — the targets in `x` visible to every target in `predicate`.
+    Visible(Box<Expr>, Box<Expr>),
     /// `x + y` / `x union y`.
     Union(Box<Expr>, Box<Expr>),
     /// `x - y` / `x except y`.
@@ -219,7 +221,8 @@ impl Parser {
                         self.parse_unary(|x| Expr::SamePkgDirectRdeps(x))
                     }
                     "tests" => self.parse_unary(|x| Expr::Tests(x)),
-                    "set" | "buildfiles" | "loadfiles" | "rbuildfiles" | "visible" => {
+                    "visible" => self.parse_path2(|a, b| Expr::Visible(a, b)),
+                    "set" | "buildfiles" | "loadfiles" | "rbuildfiles" => {
                         Err(format!("`{w}` is not supported in razel query v1 (deferred — §12)"))
                     }
                     _ if w.starts_with('$') => {
