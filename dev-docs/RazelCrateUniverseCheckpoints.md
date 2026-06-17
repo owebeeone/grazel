@@ -742,3 +742,9 @@ load-phase tracking; `visible` needs visibility.
 (`Output::Package` + `package_of` strips `//pkg:name`→`pkg`, Bazel's main-repo form). Unit-gated like
 `label_kind` (the result SETS are already label-parity-gated; a bazel golden over the package-output
 mode would need the battery harness extended — a follow-on). razel-query lib 26/0, xtask gates OK.
+
+**Q5 — `tests(x)`** (`36705a5`): the test rules in x, expanding `test_suite` into its constituent
+tests (follow the `tests` attr canonicalized against the suite's package; keep `*_test`; drop others;
+cycle-guarded). Unit-gated on a synthetic graph (reuses `attr_labels`/`canonical_label`/`pkg_prefix`);
+razel-query lib 27/0, xtask gates OK. Follow-ons: a bazel-battery gate needs a test-bearing corpus +
+`test_suite` loader support; the implicit-all-tests `test_suite` (no `tests` attr) expansion is deferred.
