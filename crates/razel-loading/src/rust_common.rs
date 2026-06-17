@@ -105,6 +105,12 @@ pub(crate) fn apply_build_script_edge(
     for f in link_flags_files {
         wrapped.push(format!("--link-flags-file={f}"));
         inputs.push(f.clone());
+        // Stage the sibling OUT_DIR (`<crate>/_bs.out` → `<crate>/_bs.out_dir`): the final link's
+        // inherited `-L<OUT_DIR>`/`-l<lib>` (from this flags-file) reference native libs the build
+        // script compiled there (blake3's `libblake3_neon.a`), so the dir must be in the sandbox.
+        if let Some(stem) = f.strip_suffix("_bs.out") {
+            inputs.push(format!("{stem}_bs.out_dir"));
+        }
     }
     // The compile's extra process env — `--env K=V` BEFORE `--` (stripped by `canonicalize_rust_argv`
     // → parity-neutral). CARGO_MANIFEST_DIR (a proc-macro may read it: schemafy's schema path; the
