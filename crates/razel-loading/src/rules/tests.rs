@@ -348,5 +348,33 @@ lib_rule(name = "math")
         let targets = analyze_starlark("BUILD", src).unwrap();
         assert!(targets.iter().any(|t| t.name.ends_with("app")));
     }
+
+    #[test]
+    fn p50_platform_query_slice_loads_from_vendored_host_repos() {
+        // P5.0 (§13/R6): the `@rules_rust//rust/platform` + `@platforms` slice the `@crates` graph
+        // references is vendored as host-repo content (`host_build`), so q4 query is dogfood-clean —
+        // no dependency on Bazel's `external/` tree. Loading each representative target proves the
+        // rows + BUILDs parse and resolve as targets via the vendored slice: a triple `config_setting`,
+        // a cpu/os `constraint_value`, and `@platforms//:incompatible` (the §5.4 default-arm marker).
+        let tmp = std::env::temp_dir().join(format!("razel-p50-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        let load = |label: &str| analyze_workspace_with(&tmp, label, GlobalFlags::default());
+        let resolves = |label: &str, frag: &str| {
+            let targets = load(label).unwrap_or_else(|e| panic!("`{label}` loads from the slice: {e}"));
+            assert!(
+                targets.iter().any(|t| t.name.contains(frag)),
+                "`{label}` resolves to a target (frag `{frag}`): {:?}",
+                targets.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()
+            );
+        };
+        resolves("@rules_rust//rust/platform:aarch64-apple-darwin", "rust/platform:aarch64-apple-darwin");
+        resolves("@rules_rust//rust/platform:wasm32-wasip1", "rust/platform:wasm32-wasip1");
+        resolves("@platforms//cpu:aarch64", "cpu:aarch64");
+        resolves("@platforms//os:osx", "os:osx");
+        resolves("@platforms//:incompatible", ":incompatible");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 

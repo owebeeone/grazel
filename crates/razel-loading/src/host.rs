@@ -290,6 +290,26 @@ pub(crate) fn host_build(pkg: &str) -> Option<&'static str> {
             "@local_config_sycl//sycl",
             include_str!("../host-repos/local_config_sycl/sycl/BUILD"),
         ),
+        // P5.0 (§13/R6): the platform query-slice — vendored so q4 query over `@crates` is
+        // dogfood-clean (no dependency on Bazel's `external/` tree). The `@crates` graph's `select()`
+        // arms reference `@rules_rust//rust/platform:<triple>` config_settings + `@platforms//:
+        // incompatible`; the config_settings reference `@platforms//{cpu,os}` constraint_values.
+        (
+            "@rules_rust//rust/platform",
+            include_str!("../host-repos/rules_rust/rust/platform/BUILD"),
+        ),
+        (
+            "@platforms//cpu",
+            include_str!("../host-repos/platforms/cpu/BUILD"),
+        ),
+        (
+            "@platforms//os",
+            include_str!("../host-repos/platforms/os/BUILD"),
+        ),
+        (
+            "@platforms//",
+            include_str!("../host-repos/platforms/BUILD"),
+        ),
     ];
     HOST.iter().find(|(k, _)| *k == pkg).map(|(_, v)| *v)
 }
