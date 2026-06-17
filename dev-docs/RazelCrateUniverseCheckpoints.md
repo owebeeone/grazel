@@ -594,3 +594,27 @@ live `bazel aquery`/`bazel build`). The live-bazel parity capture rides the gold
 **Phase 4 DoD — REACHED.** Milestones 2–4: proc-macro (P4.1/P4.2) + richer per-cfg select (P4.3) +
 libc/getrandom & incompatible negative (P4.4) + link_deps native-link/DEP_* propagation (P4.5) + full
 `@crates` build on the pure fetch path with analysis parity green (P4.6). Phase tag: `razelv3-rust/p4`.
+
+---
+
+## Track Q Phase 5 — q4 query over `@crates` + dogfood (in progress)
+
+- `0473ac9` **P5.0 — vendor the `@rules_rust//rust/platform` + `@platforms` query slice** (§13/R6):
+  the 7 triple config_settings the `@crates` graph references + `@platforms//{cpu,os}` constraint_values
+  + `@platforms//:incompatible`, as `host_build` rows + `host-repos/` BUILDs (dogfood-clean: no Bazel
+  `external/` tree). constraint_values captured verbatim from `bazel query --output=build`. Unit: p50.
+- `769dd08` **P5.1 — `cargo_build_script` macro children as query nodes** (§11.2): the native declares
+  the runner `:_bs` + `:_bs_` (rust_binary) + `:_bs-` (runfiles) with synthetic Rule edges, so `deps()`
+  traverses them; `labels("deps")` stays the `:build_script_build` alias only. Query-only; analysis
+  untouched. Unit: p51.
+- `9d94ac1` **P5.2 — traversal reachability into the slice** (§13): `load_query_graph` closes over
+  edges into `host_build`-provided packages (fixpoint), so `deps()`/`rdeps()` reach the slice NODES.
+  Surfaced + fixed two query-capture gaps: `target_compatible_with` is now a rust-rule `label_attr`
+  (its select conditions/default are edges), and the host-BUILD `constraint_value`/`constraint_setting`
+  natives (`rules/globals.rs`) now capture QUERY nodes (not just analysis targets), so a constraint_value
+  reached as a default-arm value classifies by its rule_class. Kind correctness gate: q4_platform_slice
+  (config_setting + constraint_value with correct `label_kind`). lib 82/0, query goldens + rust_graph_parity green.
+- **REMAINING:** P5.3 — q4 `@crates` query goldens (qg over @crates; needs external-`@`-pattern query
+  ENTRY, currently rejected in v1, + @crates query materialization + a `bazel query` golden battery).
+  P5.4 — dogfood the binaries (`razel build //crates/razel-cli:razel` with no Bazel; the self-hosting
+  capstone, ~iterative, WS gate).
