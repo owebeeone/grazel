@@ -669,3 +669,12 @@ libc/getrandom & incompatible negative (P4.4) + link_deps native-link/DEP_* prop
 
 **Phase 5 DoD — DONE (milestone 5 + q4):** query over `@crates` matches `bazel query` (4/4, P5.3b);
 the razel binary self-hosts (P5.4). One loader, two readers — the §14 non-conflict contract is live.
+
+**Phase 5 closed:** tagged **`razelv3-rust/p5`** at `82be6e0`. Per-step tiered gate green at the tag
+(lib 82/0, rust_graph_parity 2/0, gates + perfgate). The full `--workspace` reconfirm is
+intentionally DEFERRED with a post-Phase-6 perf review: the sweep ran ~20min (recompile-dominated or
+a load regression — UNMEASURED by direction; don't run `xtask tfload` to chase it until then — see
+Plan Phase 6 "Perf"). The pre-fix sweep enumerated the complete non-ignored failing set = the
+regression (fixed in `82be6e0`) + the 2 known cc/java graph-parity carve-out reds (`live_cc_graph`,
+`java_graph` — separate track); the test-only fix can't perturb any other suite, so the post-fix
+failing set is exactly those 2 carve-outs.

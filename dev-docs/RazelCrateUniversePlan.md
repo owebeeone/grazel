@@ -649,6 +649,14 @@ forward:
   the env allowlist, link ordering — §10); rich `DEP_*` beyond P4.5.
 - **Lock:** the `cargo-bazel splice+generate` **offline** fallback (§2.4) — only if the lock format
   proves unstable; never at build time.
+- **Perf (deferred — investigate AFTER Phase 6, Gianni 2026-06-17):** the full `cargo test
+  --workspace` sweep ran ~20min (vs the ~16min roll-gate baseline). UNMEASURED whether this is a
+  genuine load/eval regression (the §10 / risk-register "O(n²) regression … workspace load slows"
+  row) or just recompilation after P5.4's large diff — by direction, not chased now. Measurement
+  tool: `cargo xtask tfload` (loads the whole TF corpus); do NOT run it for this until Phase 6 is
+  closed. When pulled forward: re-baseline with `tfload` + the `PL` scaling gate, then
+  stop-and-correct per §Performance. (The per-step `perfgate` excludes `tfload`, so the roll-gate
+  was unaffected.)
 
 ---
 
