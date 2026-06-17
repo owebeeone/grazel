@@ -722,3 +722,18 @@ root). Two green steps:
 Gate per step: razel-loading/-query lib green, rust_rules in-place (default) unchanged,
 rust_graph_parity 2/0, B3 analysis parity byte-unchanged, xtask gates + perfgate OK (2568ms; one
 3303ms reading was thermal variance from the preceding batch — 2 clean re-runs).
+
+## Phase 6 — Q2/Q3: query package verbs (DONE)
+
+**P6.Q2/Q3 (2026-06-17)** — two same-package query verbs, lifted from the v1-rejected list, each
+parity-gated against `bazel query` over `corpus/rust/transitive` (the non-`#[ignore]`
+`live_query_parity` battery, now **9 exprs, byte-identical**):
+- `f9c6493` **Q2 — `siblings(x)`**: every target in x's package(s) — Bazel's `:*` per package (reuses
+  the already-gated `match_pattern` `:*` = rules + source/generated + BUILD; + the Q1.a `pkg_prefix`
+  helper). parse `parse_unary` + eval + the run.rs pattern-walkers.
+- `31ca734` **Q3 — `same_pkg_direct_rdeps(x)`**: same-package targets that DIRECTLY depend on x — a
+  graph method over the `rev` index (excludes self / transitive / cross-package).
+
+Gate: razel-query lib 25/0 (unit tests), live_query_parity 9/9, xtask gates OK. Remaining query verbs
+are meatier follow-ons: `tests` needs test fixtures; `buildfiles`/`loadfiles`/`rbuildfiles` need
+load-phase tracking; `visible` needs visibility; the `--output=` renderers are their own rungs.

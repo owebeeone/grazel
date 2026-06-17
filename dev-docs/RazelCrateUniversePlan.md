@@ -635,9 +635,10 @@ forward:
 
 - **Query (q5+):** `tests()` (test_suite/manual/finer kinds); `--output=build`/`package`/`graph`/
   `proto`/`xml` (each its own renderer + ordering); `--cbor` (would mint an unschematized wire
-  contract — §13); `cquery` (the analyzed/configured graph); `buildfiles`/`loadfiles`/`siblings`/
-  `visible`/`rbuildfiles`; full implicit/toolchain-label fidelity (its own rung with a deviation
-  list); daemon-backed query over the V2 snapshot (≠ the §12 expression verb — §13 naming).
+  contract — §13); `cquery` (the analyzed/configured graph); the package verbs `buildfiles`/
+  `loadfiles`/`rbuildfiles`/`visible` (**`siblings` + `same_pkg_direct_rdeps` DONE — P6.Q2/Q3**); full
+  implicit/toolchain-label fidelity (its own rung with a deviation list); daemon-backed query over the
+  V2 snapshot (≠ the §12 expression verb — §13 naming).
   **External glob/source-file fidelity — DONE (P6.Q1**, the first Phase-6 rung pulled forward,
   2026-06-17): glob'd EXTERNAL source files now key `@crates__x//:f` not `//:f` (Q1.a — `query
   labels()` resolves relative attr values against the target's repo+package); the glob lists the
