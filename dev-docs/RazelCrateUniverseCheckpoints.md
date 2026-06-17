@@ -640,5 +640,24 @@ libc/getrandom & incompatible negative (P4.4) + link_deps native-link/DEP_* prop
   `cargo_toml_env_vars` generated target. External source-file label-keying + glob hidden-file
   fidelity is its own rung. Gate: `crates_query_parity` 4/4; committed suite hermetic (both drivers
   `#[ignore]`).
-- **REMAINING:** P5.4 — dogfood the binaries (`razel build //crates/razel-cli:razel` with no Bazel;
-  the self-hosting capstone, ~iterative, WS gate).
+- `f75b193` **P5.4a — dogfood: the full razel graph ANALYZES with no Bazel** (§9.5): analyzing
+  `//crates/razel-cli:razel` over razel's OWN graph (~20 workspace crates + ~229 `@crates`) loads +
+  analyzes end-to-end — **306 targets**. Three loading gaps closed: (1) the `rust_test` rule (21
+  workspace BUILDs `load()` + call it — DECLARES/captures + analyzes to an empty target; the
+  `rustc --test` harness is the test-verb rung); (2) `load("@crates//:defs.bzl", …)` (the
+  crate_universe `aliases()`/`all_crate_deps()` macro layer) via `external_bzl_path`'s
+  apparent→canonical repo resolution (same as P5.3a, for `.bzl` loads); (3) a `local_crate_mirror`
+  stub (a WORKSPACE-mode repo rule defs.bzl loads but uses only in `crate_repositories()`). New
+  `#[ignore]` dogfood driver: `probe_razel_cli_analyzes` GREEN. Gate: lib 82/0, rust_graph_parity
+  2/0, query 22/0, gates + perfgate (2584ms).
+- **P5.4b — the EXECUTION milestone (`probe_razel_cli_builds`), IN PROGRESS:** the self-host build
+  now EXECUTES — analysis → exec-root forest → the wrapper → crate compiles + build scripts. Two
+  execution gaps closed so far: (1) the driver wires `RAZEL_PROCESS_WRAPPER` to the just-built
+  `razel-process-wrapper` (built via cargo — no Bazel; mirrors `blake3_xp`), so wrapper-routed
+  actions resolve; (2) the `cargo_build_script` env now sets `RUSTC=<abs rustc>` (Cargo always does;
+  the wrapper `env_clear`s, so abs path) — allocative's `rustc --version` nightly-probe build script
+  now runs. The build advances past allocative (~7s of compilation) and currently stops at a terse
+  `File exists (os error 17)` (an exec-root/sandbox staging collision at @crates scale — its own
+  gap). **P5.4b is an iterative execution ROLL** (wrapper → RUSTC → staging → … → eventually the
+  named-deferred Phase-6 **build-script long tail** for razel's own sys-crate deps); the dogfood
+  driver leads it (`#[ignore]`, red — like the blake3 drivers led the B2 roll). WS gate.

@@ -16,6 +16,25 @@ fn repo_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root")
 }
 
+/// The build routes every rustc/build-script action through `razel-process-wrapper`, referenced by
+/// `RAZEL_PROCESS_WRAPPER` (an ABSOLUTE path — resolvable under the sandbox's minimal PATH; mirrors
+/// `blake3_xp`). The test binary lives in `target/<profile>/deps/`, so the wrapper is its
+/// grandparent's child; build it (cargo, no Bazel) if absent.
+fn wrapper_path() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("test exe");
+    let dir = exe.parent().and_then(|p| p.parent()).expect("target/<profile>");
+    let wrapper = dir.join("razel-process-wrapper");
+    if !wrapper.exists() {
+        let ok = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-p", "razel-process-wrapper"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "failed to `cargo build -p razel-process-wrapper`");
+    }
+    wrapper
+}
+
 /// Stage 1 — does the FULL razel graph ANALYZE? (loading + analysis, no execution.) Reports the
 /// target count; surfaces graph-construction gaps before the execution tail.
 #[test]
@@ -40,6 +59,8 @@ fn probe_razel_cli_analyzes() {
 #[ignore = "P5.4 dogfood: builds //crates/razel-cli:razel (the self-hosting capstone)"]
 fn probe_razel_cli_builds() {
     let root = repo_root();
+    // SAFETY: single-threaded test setup; points wrapper-routed actions at the just-built binary.
+    unsafe { std::env::set_var("RAZEL_PROCESS_WRAPPER", wrapper_path()) };
     let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
     match build_workspace(&root, TOP, &cache) {
         Ok(report) => {

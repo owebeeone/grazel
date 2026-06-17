@@ -182,6 +182,11 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
                 run_argv.push("--env".into());
                 run_argv.push(format!("{k}={v}"));
             }
+            // Cargo always sets RUSTC for build scripts; some probe `rustc --version` (e.g.
+            // allocative's nightly check). The wrapper `env_clear`s, so pass the ABSOLUTE rustc path
+            // (`rustc()` resolves it) — it must run with no inherited PATH.
+            run_argv.push("--env".into());
+            run_argv.push(format!("RUSTC={}", rustc()));
             for f in &features {
                 let var = f.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_");
                 run_argv.push("--env".into());
