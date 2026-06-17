@@ -638,6 +638,11 @@ forward:
   contract — §13); `cquery` (the analyzed/configured graph); `buildfiles`/`loadfiles`/`siblings`/
   `visible`/`rbuildfiles`; full implicit/toolchain-label fidelity (its own rung with a deviation
   list); daemon-backed query over the V2 snapshot (≠ the §12 expression verb — §13 naming).
+  **External glob/source-file fidelity** (surfaced by P5.3b `labels(compile_data, @crates…)`): glob'd
+  EXTERNAL source files are keyed `//:f` (repo prefix dropped) not `@crates__x//:f`; the glob walk
+  skips HIDDEN files (`.github/*`, `.gitignore`) bazel lists; materialize omits `REPO.bazel` and
+  surfaces a `cargo_toml_env_vars` generated target. q4 gates the select/alias/per-attr surface
+  (4/4); this glob+keying rung is its own follow-on.
 - **Build:** `rerun-if` narrowing (the dynamic-dependency model — a post-correctness optimization,
   §5.2/§10); **cross-compilation** (the exec/target split + transitions — §5.3/§10); the
   **build-script long tail** (sys-crates needing system libs, scripts that subprocess/probe outside

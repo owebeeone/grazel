@@ -614,7 +614,31 @@ libc/getrandom & incompatible negative (P4.4) + link_deps native-link/DEP_* prop
   natives (`rules/globals.rs`) now capture QUERY nodes (not just analysis targets), so a constraint_value
   reached as a default-arm value classifies by its rule_class. Kind correctness gate: q4_platform_slice
   (config_setting + constraint_value with correct `label_kind`). lib 82/0, query goldens + rust_graph_parity green.
-- **REMAINING:** P5.3 — q4 `@crates` query goldens (qg over @crates; needs external-`@`-pattern query
-  ENTRY, currently rejected in v1, + @crates query materialization + a `bazel query` golden battery).
-  P5.4 — dogfood the binaries (`razel build //crates/razel-cli:razel` with no Bazel; the self-hosting
-  capstone, ~iterative, WS gate).
+- `3ac8e04` **P5.3a — external `@`-pattern query ENTRY + `@crates` materialization** (§13, q4):
+  `razel query 'deps(@crates//:blake3)'` runs end-to-end. `packages_for_pattern` accepts a concrete
+  `@repo//pkg:target` (recursive `@repo//...` deferred — needs a materialized-tree walk);
+  `load_query_graph` seeds the lock + `.razel-crates` base (the prelude extracted to
+  `seed_crate_lock_and_base`, shared with the build driver) and broadens the traversal fixpoint to
+  materialized `@crates__*` packages when a crate base is present (workspace-only queries unchanged).
+  The apparent↔canonical duality: the loader canonicalizes `@crates` edges once the lock is seeded
+  (graph is `@@rules_rust++crate+…`-keyed), so `run()` canonicalizes the expression's `@crates`
+  pattern leaves up-front (`canonicalize_query_pattern` + lock-only `canonicalize_crate_repo_lock`).
+  `#[ignore]` driver `crates_query` (44-node closure). Gate: lib 82/0, query 22/0 + committed query
+  tests, rust_graph_parity 2/0, gates + perfgate (2.04).
+- **P5.3b — q4 `@crates` query golden battery** (§13/§9, q4): `cargo xtask capture-crates-query-goldens`
+  captures `bazel query --noimplicit_deps` over razel's OWN `@crates` graph (the repo ROOT) into
+  `parity/corpus/rust/crate_blake3/query_goldens.txt`; the `#[ignore]` `crates_query_parity` driver
+  runs the SAME exprs through `razel query` and asserts set-equality after normalizing the canonical
+  `@@rules_rust++crate+…`/`@@` repo display to apparent. **4/4 exprs full parity**: alias transparency
+  (`deps(@crates//:blake3, 1)` → apparent alias + canonical actual), `labels(deps,…)` (dep crates +
+  the `:build_script_build` alias), `labels(target_compatible_with,…)` = `@platforms//:incompatible`,
+  and the `config_setting` select-condition keys (the 7 triples). Covers spec bullets 1, 3, 4.
+  **DEFERRED (Phase 6, named):** `labels(compile_data,…)` glob() SourceFile parity diverges on three
+  separable non-q4-core points — (1) glob'd EXTERNAL source files keyed `//:c/blake3.c` (repo prefix
+  dropped) vs bazel's `@crates__blake3-1.8.2//:c/blake3.c`; (2) razel's glob skips HIDDEN files
+  (`.github/*`, `.gitignore`, `.cargo/config.toml`); (3) razel omits `REPO.bazel` + surfaces a
+  `cargo_toml_env_vars` generated target. External source-file label-keying + glob hidden-file
+  fidelity is its own rung. Gate: `crates_query_parity` 4/4; committed suite hermetic (both drivers
+  `#[ignore]`).
+- **REMAINING:** P5.4 — dogfood the binaries (`razel build //crates/razel-cli:razel` with no Bazel;
+  the self-hosting capstone, ~iterative, WS gate).

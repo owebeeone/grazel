@@ -119,6 +119,7 @@ fn main() -> ExitCode {
         }
         Some("capture-goldens") => capture_goldens(&rest),
         Some("capture-query-goldens") => capture_query_goldens(),
+        Some("capture-crates-query-goldens") => capture_crates_query_goldens(),
         Some("normalize-golden") => normalize_golden(&rest),
         Some("examples") if rest.first().map(String::as_str) == Some("--survey") => {
             match examples::survey(&workspace_root()) {
@@ -298,6 +299,76 @@ fn capture_query_goldens() -> ExitCode {
         }
     }
     let path = parity.join("corpus/rust/transitive/query_goldens.txt");
+    if let Err(e) = std::fs::write(&path, &blocks) {
+        eprintln!("FAIL write {}: {e}", path.display());
+        return ExitCode::from(1);
+    }
+    eprintln!("wrote {} ({} bytes)", path.display(), blocks.len());
+    if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
+}
+
+/// The q4 `@crates` query battery — LITERAL exprs (no `{P}`), each isolating ONE q4 feature over
+/// razel's own blake3 closure. `labels()` targets the CANONICAL crate label (the apparent
+/// `@crates//:blake3` is an alias with no `deps`/`target_compatible_with` of its own); `deps(...,1)`
+/// uses the apparent alias to exercise alias transparency. Both razel and bazel accept either form.
+const CRATES_QUERY_BATTERY: &[&str] = &[
+    // alias transparency: the apparent alias `@crates//:blake3` AND its canonical actual both appear.
+    "deps(@crates//:blake3, 1)",
+    // per-attr labels(deps): blake3's dep crates + the `:build_script_build` alias (P5.1).
+    "labels(deps, @@rules_rust++crate+crates__blake3-1.8.2//:blake3)",
+    // per-attr labels(target_compatible_with): the select's only value = @platforms//:incompatible.
+    "labels(target_compatible_with, @@rules_rust++crate+crates__blake3-1.8.2//:blake3)",
+    // select-condition edges: the `target_compatible_with` config_setting keys (the 7 triples).
+    "kind(\"config_setting rule\", deps(@@rules_rust++crate+crates__blake3-1.8.2//:blake3, 1))",
+    // DEFERRED (Phase 6, named) — `labels(compile_data, …)` glob() SourceFile edges over a real
+    // external crate diverge on three separable, non-q4-core points (NOT a select/alias/per-attr
+    // gap — those are gated above): (1) razel keys glob'd EXTERNAL source files `//:c/blake3.c`
+    // (repo prefix dropped) where bazel keys `@crates__blake3-1.8.2//:c/blake3.c`; (2) razel's
+    // glob walk skips HIDDEN files (`.github/*`, `.gitignore`, `.cargo/config.toml`) bazel lists;
+    // (3) razel's materialize omits `REPO.bazel` and surfaces a `cargo_toml_env_vars` generated
+    // target bazel's `labels()` does not. External source-file label-keying + glob hidden-file
+    // fidelity is its own rung (RazelCrateUniversePlan Phase 6 "glob fidelity").
+    // "labels(compile_data, @@rules_rust++crate+crates__blake3-1.8.2//:blake3)",
+];
+
+/// `cargo xtask capture-crates-query-goldens` runs `bazel query --noimplicit_deps <expr>` for
+/// [`CRATES_QUERY_BATTERY`] over razel's OWN `@crates` graph — the repo ROOT, the only workspace
+/// where `@crates` resolves — and writes `parity/corpus/rust/crate_blake3/query_goldens.txt` (same
+/// `@@ <expr>` + sorted-labels block format as [`capture_query_goldens`]). Dev/authoring-only (the
+/// bazel-touching step); the committed golden is consumed by the `#[ignore]` `crates_query_parity`
+/// driver (P5.3b, q4) which normalizes the canonical `@@rules_rust++crate+…` display to apparent.
+fn capture_crates_query_goldens() -> ExitCode {
+    let root = workspace_root();
+    let bazel = std::env::var("BAZEL").unwrap_or_else(|_| "bazel".into());
+    let mut blocks = String::new();
+    let mut failed = 0usize;
+    for expr in CRATES_QUERY_BATTERY {
+        eprintln!("query {expr} …");
+        let out = Command::new(&bazel)
+            .current_dir(&root)
+            .args(["query", "--noimplicit_deps", "--noshow_progress", expr])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let mut labels: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                labels.sort();
+                blocks.push_str(&format!("@@ {expr}\n{}\n\n", labels.join("\n")));
+            }
+            Ok(o) => {
+                eprintln!("  FAIL: {}", String::from_utf8_lossy(&o.stderr).trim_end());
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("  FAIL spawn bazel: {e}");
+                failed += 1;
+            }
+        }
+    }
+    let path = root.join("parity/corpus/rust/crate_blake3/query_goldens.txt");
     if let Err(e) = std::fs::write(&path, &blocks) {
         eprintln!("FAIL write {}: {e}", path.display());
         return ExitCode::from(1);
