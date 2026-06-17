@@ -773,3 +773,47 @@ lib 84/0, rust_graph_parity 2/0, xtask gates OK, perfgate scaling 1.91 (budget O
 now ALL ride live-bazel parity (label/package output + `deps`/`rdeps`/`kind`/`filter`/`attr`/`labels`/
 `somepath`/`siblings`/`same_pkg_direct_rdeps`/`tests`). Still deferred: implicit-all-tests `test_suite`
 expansion (a suite with no `tests` attr).
+
+## Phase 6 — `--output=graph` renderer (DONE)
+
+**P6 `--output=graph` (`ef98ae5`, 2026-06-18)** — the first NEW `--output` renderer since `label_kind`.
+`format_graph` (razel-query `output.rs`) emits a GraphViz digraph of the result set's INDUCED
+subgraph: every result node declared + an edge `N -> S` per direct successor S also in the set
+(`QueryGraph::successors`, now `pub(crate)`). `run` dispatches `Output::Graph` here (it needs the
+`implicit` flag — `Implicit` edges; the set-rendering modes don't); `Output::parse` moves `graph` out
+of the deferred list, so `razel query --output=graph` works via the CLI too.
+- **Deviation (documented):** razel emits the UNFACTORED form (one node per target). Bazel's default
+  node-factoring (`--graph:factored`) merges nodes with identical successors into one newline-joined
+  label — a DISPLAY grouping of the same logical graph. So the parity gate compares the node + edge
+  SETS (factoring- AND order-insensitive): the golden is captured `--output=graph --nograph:factored`,
+  and `live_query_parity::graph_sets` parses both sides to `(nodes, edges)`.
+- **Harness:** `bazel_query_block`/`capture_battery` generalized to `extra: &[&str]` (per-battery
+  flags); `GRAPH_QUERY_BATTERY` (deps(util) rich / deps(base) / `:all` rule-only) →
+  `query_goldens_graph.txt`. Label/package/tests goldens byte-unchanged.
+
+Gate: razel-query lib 28/0, `live_query_parity` 4/4 (label/package/tests/graph), xtask gates OK.
+
+## Phase 6 — the remaining fork (cheap + cleanly-autonomous rungs now EXHAUSTED)
+
+Empirically confirmed (probed `bazel query` + the loader), the rest each carry a **design call or
+substantial infra**, NOT a cheap rung — surface to Gianni, don't bulldoze the seam:
+- **`--output=build`** — bazel emits 3 comment blocks razel can't reproduce (the `# BUILD:line:col`
+  provenance + "Rule X instantiated at" + "Rule rust_library defined at `…/rust.bzl:925`"): razel
+  REIMPLEMENTS the rules in Rust and stubs the `.bzl`, so it has no source-location / `.bzl`-definition
+  to emit. A stanza-only renderer is feasible but needs a **provenance-deviation policy** (Gianni's
+  call, like the cc `CppModuleMap` omit), and the general attr-formatting (selects/dicts/escaping) is
+  unbounded beyond the corpus. **DEFERRED — named.**
+- **`buildfiles`/`loadfiles`/`rbuildfiles`** — return bazel's ENTIRE transitive `.bzl` load closure
+  (80+ rules_cc/rules_rust/skylib internal files). razel never loads those (it stubs them), so it
+  CANNOT reproduce the closure — an **architectural wall**, not a deviation. Needs a design call on
+  what these even MEAN in razel's stubbed-rules model. **BLOCKED — named.**
+- **`visible(x, y)`** — razel deliberately **Ignores** the `visibility` attr (`rust_attrs.rs`,
+  `cargo_support.rs`); a visibility model (capture specs + `//visibility:public|private` +
+  `__pkg__`/`__subpackages__` + package_group) is real new infra + a cross-package corpus, and
+  flipping visibility from Ignored→modeled is a product/seam decision. **DEFERRED — named.**
+- **`--output=proto`/`xml`** — each a full bazel-schema'd renderer (proto is binary → no textual
+  golden-diff; `--cbor`'s "mints a wire contract §13" concern partially applies). Substantial, low
+  consumer value. **DEFERRED — named.**
+- **Build track (meatiest):** `rerun-if` narrowing (dynamic-dep model), cross-compilation (exec/target
+  split + transitions), the build-script long tail, richer `DEP_*` — large, design-heavy, explicitly
+  Gianni-steered. **DEFERRED — named.**

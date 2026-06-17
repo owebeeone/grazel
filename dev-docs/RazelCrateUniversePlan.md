@@ -633,12 +633,15 @@ readers.
 Per the design's *deferred, named* discipline (§12/§13/§10). Each becomes its own plan when pulled
 forward:
 
-- **Query (q5+):** `tests()` (test_suite/manual/finer kinds); `--output=build`/`package`/`graph`/
-  `proto`/`xml` (each its own renderer + ordering); `--cbor` (would mint an unschematized wire
-  contract — §13); `cquery` (the analyzed/configured graph); the package verbs `buildfiles`/
-  `loadfiles`/`rbuildfiles`/`visible` (**`siblings` + `same_pkg_direct_rdeps` DONE — P6.Q2/Q3**); full
-  implicit/toolchain-label fidelity (its own rung with a deviation list); daemon-backed query over the
-  V2 snapshot (≠ the §12 expression verb — §13 naming).
+- **Query (q5+):** `tests()` (**DONE — P6.Q5, parity-gated**); `--output=` `package` (**DONE —
+  P6.Q4**) + `graph` (**DONE — P6 graph rung, unfactored + set-gated**); `--output=build`/`proto`/`xml`
+  (each its own renderer; `build` needs a `.bzl`-provenance deviation policy — DEFERRED, named);
+  `--cbor` (would mint an unschematized wire contract — §13); `cquery` (the analyzed/configured graph);
+  the package verbs `buildfiles`/`loadfiles`/`rbuildfiles` (**BLOCKED — razel stubs the rule `.bzl`, so
+  it can't reproduce bazel's `.bzl` load closure; needs a design call**) / `visible` (**needs a
+  visibility model — razel Ignores `visibility` today; DEFERRED, named**) (**`siblings` +
+  `same_pkg_direct_rdeps` DONE — P6.Q2/Q3**); full implicit/toolchain-label fidelity (its own rung with
+  a deviation list); daemon-backed query over the V2 snapshot (≠ the §12 expression verb — §13 naming).
   **External glob/source-file fidelity — DONE (P6.Q1**, the first Phase-6 rung pulled forward,
   2026-06-17): glob'd EXTERNAL source files now key `@crates__x//:f` not `//:f` (Q1.a — `query
   labels()` resolves relative attr values against the target's repo+package); the glob lists the
