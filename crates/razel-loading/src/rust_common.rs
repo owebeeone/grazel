@@ -180,13 +180,21 @@ pub(crate) fn transitive_rlibs(sess: &crate::state::Session, roots: &[String]) -
             continue;
         }
         let Some(t) = results.get(&canon) else { continue };
-        let Some(rlib) = t.default_info.iter().find(|l| l.ends_with(".rlib")) else {
-            continue; // not a crate (build-script bin / env file) → skip + don't recurse
-        };
-        if !rlibs.iter().any(|r| r == rlib) {
-            rlibs.push(rlib.clone());
+        if let Some(rlib) = t.default_info.iter().find(|l| l.ends_with(".rlib")) {
+            if !rlibs.iter().any(|r| r == rlib) {
+                rlibs.push(rlib.clone());
+            }
+            stack.extend(t.deps.iter().cloned()); // a crate's rlib deps are transitive
+        } else if let Some(dylib) = t.default_info.iter().find(|l| l.ends_with(".dylib")) {
+            // A re-exported PROC-MACRO dep (serde → serde_derive, `MacrosOnly`): a TRANSITIVE consumer
+            // must find it on `-Ldependency` to LOAD the re-exporting crate (else "can't find crate for
+            // serde"). Include the host dylib + its dir, but DON'T recurse — a proc-macro's own deps
+            // (syn/quote/proc-macro2) were linked into the dylib and are not the consumer's concern.
+            if !rlibs.iter().any(|r| r == dylib) {
+                rlibs.push(dylib.clone());
+            }
         }
-        stack.extend(t.deps.iter().cloned());
+        // else: build-script bin / env file → skip + don't recurse (BUILD-only deps stay excluded).
     }
     rlibs.sort();
     rlibs
