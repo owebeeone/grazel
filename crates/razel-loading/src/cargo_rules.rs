@@ -31,6 +31,9 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
         let compile = bs_attrs(eval, &name, &kw)?; // §5.2 verdict + compile/run attr split
+        // P5.1 (§11.2): capture the loading-phase query nodes (runner + `:_bs_`/`:_bs-` macro
+        // children) at DECLARE time, before `srcs`/`deps` are rebound from `Value` to parts.
+        crate::loaded::capture_cargo_build_script(eval, &label, &[("srcs", srcs), ("deps", deps)], &kw);
         let srcs = crate::values::str_attr_parts(eval, srcs)?;
         let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {

@@ -376,5 +376,57 @@ lib_rule(name = "math")
         resolves("@platforms//:incompatible", ":incompatible");
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn p51_cargo_build_script_macro_children_are_query_nodes() {
+        // P5.1 (§11.2): `cargo_build_script` macro-expands at load into the runner `:_bs`, the
+        // build-script `rust_binary` `:_bs_`, and the runfiles `:_bs-` — Bazel `deps()` traverses all
+        // three. So the native declares those child query nodes + synthetic Rule edges; `labels("deps")`
+        // on the consuming crate still shows ONLY the `:build_script_build` alias (the children are
+        // reached by TRAVERSAL: crate deps → alias → runner → children).
+        use crate::loaded::EdgeKind;
+        let tmp = std::env::temp_dir().join(format!("razel-p51-{}", std::process::id()));
+        let pkg = tmp.join("c");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(tmp.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(pkg.join("build.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(pkg.join("lib.rs"), "pub fn x() {}\n").unwrap();
+        std::fs::write(
+            pkg.join("BUILD"),
+            "load(\"@rules_rust//cargo:defs.bzl\", \"cargo_build_script\")\n\
+             load(\"@rules_rust//rust:defs.bzl\", \"rust_library\")\n\
+             cargo_build_script(name = \"_bs\", srcs = [\"build.rs\"])\n\
+             alias(name = \"build_script_build\", actual = \":_bs\")\n\
+             rust_library(name = \"mylib\", srcs = [\"lib.rs\"], deps = [\":build_script_build\"])\n",
+        )
+        .unwrap();
+
+        let (session, _r, _l) =
+            drive_tree(&tmp, GlobalFlags::default(), &["c".to_string()], Vec::new(), 1);
+        let g = session.loaded_targets.borrow();
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // The runner + both macro children are captured as query nodes with their rule_classes.
+        assert_eq!(g.get("//c:_bs").expect("runner node").rule_class, "cargo_build_script");
+        assert_eq!(g.get("//c:_bs_").expect(":_bs_ bin node").rule_class, "rust_binary");
+        assert_eq!(
+            g.get("//c:_bs-").expect(":_bs- runfiles node").rule_class,
+            "cargo_build_script_runfiles"
+        );
+        // deps() traverses runner → both children (synthetic Rule edges).
+        let re = &g.get("//c:_bs").unwrap().edges;
+        assert!(re.iter().any(|e| e.kind == EdgeKind::Rule && e.to == "//c:_bs_"), "runner→:_bs_: {re:?}");
+        assert!(re.iter().any(|e| e.kind == EdgeKind::Rule && e.to == "//c:_bs-"), "runner→:_bs-: {re:?}");
+        // labels("deps", //c:mylib) = ONLY the alias — the children are NOT in the crate's deps attr.
+        let mylib_deps: Vec<&str> = g
+            .get("//c:mylib")
+            .expect("mylib node")
+            .edges
+            .iter()
+            .filter(|e| e.attr == "deps")
+            .map(|e| e.to.as_str())
+            .collect();
+        assert_eq!(mylib_deps, vec!["//c:build_script_build"], "labels(deps) is only the alias: {mylib_deps:?}");
+    }
 }
 

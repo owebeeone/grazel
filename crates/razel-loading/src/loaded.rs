@@ -236,6 +236,11 @@ pub fn label_attrs(rule_class: &str) -> &'static [&'static str] {
             &["srcs", "deps", "proc_macro_deps", "aliases", "compile_data", "data"]
         }
         "cc_library" | "cc_binary" => &["srcs", "hdrs", "deps", "data"],
+        // P5.1 (§11.2): the build-script runner's label-valued attrs — its build-deps/srcs/data are
+        // `deps()` edges, plus `link_deps` (the §6 cross-build-script channel) + the `rustc_env_files`
+        // → `cargo_toml_env_vars` rule edge. (The `:_bs_`/`:_bs-` macro children are added as
+        // synthetic edges by `capture_cargo_build_script`, not via attrs.)
+        "cargo_build_script" => &["srcs", "deps", "data", "compile_data", "link_deps", "rustc_env_files"],
         _ => &[],
     }
 }
@@ -472,6 +477,37 @@ pub fn capture_rule<'v>(
         attrs.insert(k.clone(), *v);
     }
     capture_loaded(eval, label, rule_class, &attrs);
+}
+
+/// P5.1 (§11.2): capture a `cargo_build_script`'s loading-phase query nodes. The rules_rust macro
+/// expands at load into `:<name>` (the runner, `cargo_build_script`), `:<name>_` (the build-script
+/// `rust_binary`), and `:<name>-` (`cargo_build_script_runfiles`); Bazel `deps()` traverses into all
+/// three. So declare the two macro children as their own nodes and give the runner synthetic Rule
+/// edges to them — `deps(<crate>)` → `:build_script_build` (alias) → runner → children. `labels("deps")`
+/// is unaffected: the children are reached by TRAVERSAL, never listed in the consuming crate's `deps`
+/// attr (which carries only the `:build_script_build` alias, §12).
+pub fn capture_cargo_build_script<'v>(
+    eval: &mut Evaluator<'v, '_, '_>,
+    label: &str,
+    named: &[(&str, Option<Value<'v>>)],
+    kw: &SmallMap<String, Value<'v>>,
+) {
+    let bin = format!("{label}_"); // `:<name>_` — the host build-script bin (rust_binary)
+    let runfiles = format!("{label}-"); // `:<name>-` — its runfiles
+    // The children are leaf query nodes (their own attrs aren't q4-golden surface); declare them
+    // FIRST so the runner's synthetic refs resolve to `Rule` edges at `finalize_edges`.
+    let empty = SmallMap::new();
+    capture_loaded(eval, &bin, "rust_binary", &empty);
+    capture_loaded(eval, &runfiles, "cargo_build_script_runfiles", &empty);
+    // The runner, with its real label-attrs (build-deps/srcs/link_deps/…) per `label_attrs`.
+    capture_rule(eval, label, "cargo_build_script", named, kw);
+    // …plus the synthetic macro-child edges (not attr-derived).
+    let sess = session(eval);
+    if let Some(t) = sess.loaded_targets.borrow_mut().get_mut(label) {
+        for child in [bin, runfiles] {
+            t.raw_refs.push(RawLabelRef { label: child, attr: String::new(), in_select_condition: false });
+        }
+    }
 }
 
 /// Resolve every captured target's `raw_refs` into typed `edges` (the P0.4 pass over the whole
