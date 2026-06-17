@@ -320,15 +320,13 @@ const CRATES_QUERY_BATTERY: &[&str] = &[
     "labels(target_compatible_with, @@rules_rust++crate+crates__blake3-1.8.2//:blake3)",
     // select-condition edges: the `target_compatible_with` config_setting keys (the 7 triples).
     "kind(\"config_setting rule\", deps(@@rules_rust++crate+crates__blake3-1.8.2//:blake3, 1))",
-    // DEFERRED (Phase 6, named) — `labels(compile_data, …)` glob() SourceFile edges over a real
-    // external crate diverge on three separable, non-q4-core points (NOT a select/alias/per-attr
-    // gap — those are gated above): (1) razel keys glob'd EXTERNAL source files `//:c/blake3.c`
-    // (repo prefix dropped) where bazel keys `@crates__blake3-1.8.2//:c/blake3.c`; (2) razel's
-    // glob walk skips HIDDEN files (`.github/*`, `.gitignore`, `.cargo/config.toml`) bazel lists;
-    // (3) razel's materialize omits `REPO.bazel` and surfaces a `cargo_toml_env_vars` generated
-    // target bazel's `labels()` does not. External source-file label-keying + glob hidden-file
-    // fidelity is its own rung (RazelCrateUniversePlan Phase 6 "glob fidelity").
-    // "labels(compile_data, @@rules_rust++crate+crates__blake3-1.8.2//:blake3)",
+    // P6.Q1 (glob fidelity — was the deferred 5th): `labels(compile_data, …)` over a real external
+    // crate. Now byte-equal to bazel (modulo the canonical-repo norm) via: Q1.a external source files
+    // key at their crate repo (`@crates__blake3-1.8.2//:c/blake3.c`, not `//:`); Q1.b the glob lists
+    // the HIDDEN files bazel does (`.github/*`, `.gitignore`, `.cargo/config.toml`); Q1.c materialize
+    // writes bazel's empty `REPO.bazel` marker. (cargo_toml_env_vars was build-product leakage on a
+    // dirty tree — the parity driver strips products first.)
+    "labels(compile_data, @@rules_rust++crate+crates__blake3-1.8.2//:blake3)",
 ];
 
 /// `cargo xtask capture-crates-query-goldens` runs `bazel query --noimplicit_deps <expr>` for

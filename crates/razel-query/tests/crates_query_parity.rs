@@ -27,11 +27,41 @@ fn normset(lines: &str) -> Vec<String> {
     v
 }
 
+/// Strip build PRODUCTS razel wrote into the materialized `.razel-crates` repos (rlib/rmeta/dylib/.d,
+/// `_bs*` build-script outputs, the `cargo_toml_env_vars` env-file). bazel keeps outputs in bazel-out,
+/// so a clean SOURCE tree is what its glob sees — this keeps the `compile_data` glob comparison
+/// source-for-source regardless of whether a prior (dogfood) build ran in-place (P6.Q1; the
+/// outputs-in-source-tree separation is its own follow-on). One level (products sit at the repo root).
+fn clean_crate_build_products(root: &Path) {
+    let Ok(repos) = std::fs::read_dir(root.join(".razel-crates")) else { return };
+    for repo in repos.flatten().filter(|e| e.path().is_dir()) {
+        let Ok(files) = std::fs::read_dir(repo.path()) else { continue };
+        for f in files.flatten() {
+            let n = f.file_name().to_string_lossy().into_owned();
+            let product = n.ends_with(".rlib")
+                || n.ends_with(".rmeta")
+                || n.ends_with(".dylib")
+                || n.ends_with(".d")
+                || n.starts_with("_bs")
+                || n == "cargo_toml_env_vars";
+            if product {
+                let p = f.path();
+                let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore = "P5.3b dev gate: @crates query parity (materializes razel's @crates closure from the root)"]
 fn razel_query_matches_the_crates_query_goldens() {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root");
+    // Isolate SOURCE-glob fidelity from the separate "outputs in the source tree" concern: razel
+    // writes build PRODUCTS into the materialized `.razel-crates` repos (a build ran in-place); bazel
+    // keeps outputs in bazel-out, so its glob never sees them. Strip products so the `compile_data`
+    // glob compares source-for-source (P6.Q1; output-tree separation is its own follow-on).
+    clean_crate_build_products(&root);
     let goldens =
         std::fs::read_to_string(root.join("parity/corpus/rust/crate_blake3/query_goldens.txt"))
             .expect("crate_blake3/query_goldens.txt (run `cargo xtask capture-crates-query-goldens`)");
@@ -55,6 +85,6 @@ fn razel_query_matches_the_crates_query_goldens() {
         }
         cases += 1;
     }
-    assert_eq!(cases, 4, "expected the full @crates battery (4 exprs; compile_data deferred — Phase 6)");
+    assert_eq!(cases, 5, "expected the full @crates battery (5 exprs incl. labels(compile_data) — P6.Q1)");
     assert!(failures.is_empty(), "@crates query parity mismatches:\n\n{}", failures.join("\n\n"));
 }
