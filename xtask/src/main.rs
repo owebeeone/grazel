@@ -256,6 +256,8 @@ const QUERY_BATTERY: &[&str] = &[
     "rdeps({P}:all, {P}:base)",
     "labels(srcs, {P}:util)",
     "somepath({P}:util, {P}:base)",
+    // siblings: every target in base's package (== `{P}:*`) — gates the verb against bazel (P6.Q2).
+    "siblings({P}:base)",
 ];
 
 /// `cargo xtask capture-query-goldens` runs `bazel query --noimplicit_deps <expr>` for [`QUERY_BATTERY`]

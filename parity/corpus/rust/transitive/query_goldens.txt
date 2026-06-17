@@ -30,3 +30,10 @@
 //corpus/rust/transitive:base
 //corpus/rust/transitive:util
 
+@@ siblings(//corpus/rust/transitive:base)
+//corpus/rust/transitive:BUILD
+//corpus/rust/transitive:base
+//corpus/rust/transitive:base.rs
+//corpus/rust/transitive:util
+//corpus/rust/transitive:util.rs
+

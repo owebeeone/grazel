@@ -49,7 +49,8 @@ fn collect_patterns(expr: &Expr, out: &mut Vec<String>) {
         | Expr::Kind(_, x)
         | Expr::Filter(_, x)
         | Expr::Attr(_, _, x)
-        | Expr::Labels(_, x) => collect_patterns(x, out),
+        | Expr::Labels(_, x)
+        | Expr::Siblings(x) => collect_patterns(x, out),
         Expr::Rdeps(a, b, _)
         | Expr::SomePath(a, b)
         | Expr::AllPaths(a, b)
@@ -77,7 +78,8 @@ fn canonicalize_patterns(expr: &mut Expr, canon: &dyn Fn(&str) -> String) {
         | Expr::Kind(_, x)
         | Expr::Filter(_, x)
         | Expr::Attr(_, _, x)
-        | Expr::Labels(_, x) => canonicalize_patterns(x, canon),
+        | Expr::Labels(_, x)
+        | Expr::Siblings(x) => canonicalize_patterns(x, canon),
         Expr::Rdeps(a, b, _)
         | Expr::SomePath(a, b)
         | Expr::AllPaths(a, b)

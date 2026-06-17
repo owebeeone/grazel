@@ -25,6 +25,8 @@ pub enum Expr {
     SomePath(Box<Expr>, Box<Expr>),
     /// `allpaths(x, y)` — the x→y subgraph node set.
     AllPaths(Box<Expr>, Box<Expr>),
+    /// `siblings(x)` — every target in the same package(s) as `x` (Bazel's `:*` per package).
+    Siblings(Box<Expr>),
     /// `x + y` / `x union y`.
     Union(Box<Expr>, Box<Expr>),
     /// `x - y` / `x except y`.
@@ -208,7 +210,8 @@ impl Parser {
                     "attr" => self.parse_attr(),
                     "somepath" => self.parse_path2(|a, b| Expr::SomePath(a, b)),
                     "allpaths" => self.parse_path2(|a, b| Expr::AllPaths(a, b)),
-                    "tests" | "set" | "buildfiles" | "loadfiles" | "rbuildfiles" | "siblings"
+                    "siblings" => self.parse_unary(|x| Expr::Siblings(x)),
+                    "tests" | "set" | "buildfiles" | "loadfiles" | "rbuildfiles"
                     | "visible" | "same_pkg_direct_rdeps" => {
                         Err(format!("`{w}` is not supported in razel query v1 (deferred — §12)"))
                     }
@@ -309,6 +312,15 @@ impl Parser {
         let b = self.expr()?;
         self.expect(&Tok::RParen, "to close the function call")?;
         Ok(make(Box::new(a), Box::new(b)))
+    }
+
+    /// `f(expr)` → for single-argument verbs like `siblings`.
+    fn parse_unary(&mut self, make: fn(Box<Expr>) -> Expr) -> Result<Expr, String> {
+        self.next();
+        self.expect(&Tok::LParen, "after the function name")?;
+        let x = self.expr()?;
+        self.expect(&Tok::RParen, "to close the function call")?;
+        Ok(make(Box::new(x)))
     }
 
     /// An optional `, <number>` depth argument.

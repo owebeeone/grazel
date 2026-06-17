@@ -159,6 +159,17 @@ impl Eval<'_> {
                 let (a, b) = (self.go(a)?, self.go(b)?);
                 Ok(self.graph.allpaths(&a, &b, self.implicit))
             }
+            Expr::Siblings(x) => {
+                let set = self.go(x)?;
+                // Every target in the same package(s) as `x` — Bazel's `:*` per owning package
+                // (reuses the proven `match_pattern` `:*`: rules + source/generated + the BUILD file).
+                let pkgs: std::collections::BTreeSet<&str> = set.iter().map(|l| pkg_prefix(l)).collect();
+                let mut out = LabelSet::new();
+                for pkg in pkgs {
+                    out = &out | &self.graph.match_pattern(&format!("{pkg}:*"));
+                }
+                Ok(out)
+            }
         }
     }
 }
@@ -266,6 +277,26 @@ mod tests {
                 "@@rules_rust++crate+crates__blake3-1.8.2//:c/blake3.c",
                 "@@rules_rust++crate+crates__blake3-1.8.2//:src/lib.rs",
             ]
+        );
+    }
+
+    #[test]
+    fn siblings_returns_all_targets_in_the_same_package() {
+        // siblings(x) = every target in x's package(s) (Bazel's `:*` per package); reuses match_pattern.
+        let mut m = BTreeMap::new();
+        m.insert("//a:base".into(), target("//a:base", "a", "rust_library", &[]));
+        m.insert("//a:lib".into(), target("//a:lib", "a", "rust_library", &["//a:base"]));
+        m.insert("//b:x".into(), target("//b:x", "b", "rust_binary", &[]));
+        let g = QueryGraph::new(m);
+        let run =
+            |s: &str| eval(&g, &parse(s).unwrap(), false).unwrap().into_iter().collect::<Vec<_>>();
+        // every target in package `a` (the input + its siblings + the package's BUILD file, per
+        // Bazel's `:*` semantics), not `//b:x`.
+        assert_eq!(run("siblings(//a:base)"), ["//a:BUILD", "//a:base", "//a:lib"]);
+        // a multi-package input unions each package's `:*`.
+        assert_eq!(
+            run("siblings(//a:lib + //b:x)"),
+            ["//a:BUILD", "//a:base", "//a:lib", "//b:BUILD", "//b:x"]
         );
     }
 
