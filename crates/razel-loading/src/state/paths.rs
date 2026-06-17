@@ -108,20 +108,16 @@ pub(crate) fn qualify(sess: &Session, path: &str) -> String {
 }
 
 
-/// The path of a GENERATED output (rlib, bin, build-script files) as it appears in the action
-/// graph. Default: workspace-relative (`qualify`). Under `--bazel_build_compat` (the parity posture,
-/// RazelRustParityPlan A2): rooted in Bazel's output tree `bazel-out/<config>/bin/<pkg>/<name>` so
-/// razel's declared outputs + the argv paths that reference them (`--out-dir`, `--extern` rlibs, the
-/// build-script flags-file/`OUT_DIR`) match `bazel aquery`'s. Sources stay `qualify` (Bazel keeps
-/// them workspace-relative too). `normalize` tokenizes the `<config>` segment, so razel's single
-/// config matches Bazel's per-action exec/target configs.
+/// The path of a GENERATED output (rlib, bin, build-script files) as it appears in the action graph
+/// — `bin_prefix`-rooted, identical to [`qualify_output`] (B1 unified them so rust/cargo route through
+/// the same output-tree logic cc/js/py already used). Under `--bazel_build_compat` (the parity
+/// posture, RazelRustParityPlan A2): `bazel-out/<config>/bin/<pkg>/<name>` so razel's declared outputs
+/// + the argv paths that reference them (`--out-dir`, `--extern` rlibs, the build-script
+/// flags-file/`OUT_DIR`) match `bazel aquery`'s. Under the CLI's `bin_tree_layout`:
+/// `razel-out/<config>/bin/…` (P6.B1 — generated files never pollute the source tree). With neither
+/// (the bare-library default): workspace-relative `qualify` (in-tree). Sources always stay `qualify`.
 pub(crate) fn out_path(sess: &Session, name: &str) -> String {
-    let p = qualify(sess, name);
-    if sess.global.bazel_build_compat {
-        format!("bazel-out/{}/bin/{p}", bazel_config(sess))
-    } else {
-        p
-    }
+    bin_prefix(sess, &qualify(sess, name))
 }
 
 
