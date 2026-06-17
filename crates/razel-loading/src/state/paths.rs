@@ -15,15 +15,24 @@ pub(crate) fn canon_label(sess: &Session, s: &str) -> String {
 /// build seeded [`GlobalFlags::crate_lock`], and only for repos the lock defines (other repos —
 /// `@rules_rust`, `@platforms` — keep their single-`@` apparent form, untouched).
 pub(crate) fn canonicalize_crate_repo(sess: &Session, label: String) -> String {
-    let Some(lock) = &sess.global.crate_lock else { return label };
+    match &sess.global.crate_lock {
+        Some(lock) => canonicalize_crate_repo_lock(lock, &label),
+        None => label,
+    }
+}
+
+/// Lock-only core of [`canonicalize_crate_repo`] — no `Session` (the query driver canonicalizes
+/// patterns up-front from a seeded lock, §11.3 / q4). `@crates`/`@crates__*` → `@@rules_rust++crate+…`;
+/// a `//` label, the main repo, or a non-crate `@repo` (`@rules_rust`/`@platforms`) returns as-is.
+pub(crate) fn canonicalize_crate_repo_lock(lock: &crate::lock::CrateLock, label: &str) -> String {
     let trimmed = label.trim_start_matches('@');
-    let Some((repo, rest)) = trimmed.split_once("//") else { return label };
+    let Some((repo, rest)) = trimmed.split_once("//") else { return label.to_string() };
     if repo.is_empty() {
-        return label; // main repo (`@@//`, `//`) — never a crate repo
+        return label.to_string(); // main repo (`@@//`, `//`) — never a crate repo
     }
     match lock.canonical_repo(repo) {
         Some(canon) => format!("@@{canon}//{rest}"),
-        None => label,
+        None => label.to_string(),
     }
 }
 

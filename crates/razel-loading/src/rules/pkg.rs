@@ -163,6 +163,47 @@ pub fn analyze_workspace(root: &Path, top_label: &str) -> Result<Vec<AnalyzedTar
     analyze_workspace_with(root, top_label, GlobalFlags::default())
 }
 
+/// Seed the `@crates` materialization context onto `flags` — SHARED by the build driver
+/// ([`analyze_workspace_resolved`]) and the query driver ([`crate::load_query_graph`]) so both
+/// materialize `@crates` identically (§11.3 / RazelRustParityPlan B2). (1) Read the root
+/// `MODULE.bazel.lock` into `crate_lock` (read-if-present — a non-`@crates` workspace has no lock,
+/// an already-seeded caller/test wins; a malformed lock stays `None`, so a real `@crates` build
+/// fails later with a clear "not vendored", not a cryptic parse error). (2) With the lock seeded,
+/// point `fetched_external_base` at a workspace-local `.razel-crates` so `load_package_body`
+/// materializes each repo LAZILY on first demand (only the requested closure, not the whole lock).
+/// SKIPPED when a caller already pointed `fetched_external_base` at vendored dirs (parity/unit
+/// tests). Inert on a non-`@crates` workspace (no lock → no base).
+pub(crate) fn seed_crate_lock_and_base(root: &Path, flags: &mut GlobalFlags) {
+    if flags.crate_lock.is_none() {
+        let lock_path = root.join("MODULE.bazel.lock");
+        if lock_path.exists()
+            && let Ok(lock) = crate::lock::read_lock(&lock_path)
+        {
+            flags.crate_lock = Some(std::sync::Arc::new(lock));
+        }
+    }
+    if flags.fetched_external_base.is_none() && flags.crate_lock.is_some() {
+        flags.fetched_external_base = Some(root.join(".razel-crates"));
+    }
+}
+
+/// Canonicalize a query PATTERN's `@crates`-family repo to its `@@rules_rust++crate+…` identity
+/// (§11.3 / q4), so an apparent `@crates//:blake3` entry both MATERIALIZES (the loader + lock are
+/// canonical-keyed) and MATCHES the canonical-keyed loaded graph. Seeds the lock from `root` if
+/// `flags` carries none. A `//` workspace label or a non-crate `@repo` (`@rules_rust`/`@platforms`)
+/// returns verbatim. The query golden comparator normalizes the canonical display back to apparent.
+pub fn canonicalize_query_pattern(root: &Path, flags: &GlobalFlags, label: &str) -> String {
+    if !label.starts_with('@') {
+        return label.to_string();
+    }
+    let mut f = flags.clone();
+    seed_crate_lock_and_base(root, &mut f);
+    match &f.crate_lock {
+        Some(lock) => crate::state::canonicalize_crate_repo_lock(lock, label),
+        None => label.to_string(),
+    }
+}
+
 
 /// [`analyze_workspace`] with build-wide [`GlobalFlags`] applied to every cc action.
 pub fn analyze_workspace_with(
@@ -183,27 +224,10 @@ pub fn analyze_workspace_resolved(
     top_label: &str,
     mut flags: GlobalFlags,
 ) -> Result<(Vec<AnalyzedTarget>, String), String> {
-    // P3.1e: seed the `@crates` lock so `@crates` labels canonicalize (§11.3). Read-if-present —
-    // a non-`@crates` workspace has no lock (or no `@crates` labels), so this is inert there; an
-    // already-seeded `crate_lock` (a caller/test) wins. A malformed lock stays `None`: a real
-    // `@crates` build then fails later with a clear "not vendored", not a cryptic parse error here.
-    if flags.crate_lock.is_none() {
-        let lock_path = root.join("MODULE.bazel.lock");
-        if lock_path.exists()
-            && let Ok(lock) = crate::lock::read_lock(&lock_path)
-        {
-            flags.crate_lock = Some(std::sync::Arc::new(lock));
-        }
-    }
-    // RazelRustParityPlan B2 (§2.2/§5.6): with the `@crates` lock seeded, resolve external repos
-    // against a workspace-local `.razel-crates` dir; `load_package_body` materializes each repo from
-    // the lock LAZILY on first demand (root → inline; per-crate → `fetch_crate`), so only the
-    // requested closure (e.g. blake3's ~15 crates) is fetched — NOT the whole 140-crate lock. SKIPPED
-    // when a caller already pointed `fetched_external_base` at vendored dirs (the parity/unit tests).
-    // A non-`@crates` workspace has no lock (`read_lock` requires a root `@crates` repo) → inert here.
-    if flags.fetched_external_base.is_none() && flags.crate_lock.is_some() {
-        flags.fetched_external_base = Some(root.join(".razel-crates"));
-    }
+    // Seed the `@crates` materialization context (lock + `.razel-crates` base), shared with the
+    // query driver (§11.3 / RazelRustParityPlan B2). Inert on a non-`@crates` workspace; an
+    // already-seeded caller (parity/unit tests) wins.
+    seed_crate_lock_and_base(root, &mut flags);
     let session = Session::new(Some(root.to_path_buf()), flags);
     let top_canon = canon_label(&session, top_label);
     let top_pkg = pkg_of(&top_canon)

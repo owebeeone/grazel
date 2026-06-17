@@ -49,8 +49,22 @@ pub fn packages_for_pattern(
     pattern: &str,
     strict_bazel: bool,
 ) -> Result<Vec<String>, String> {
+    // q4 (§13): external `@repo//…` query ENTRY. A concrete label (`@crates//:blake3`) or a
+    // `@repo//pkg:all` form resolves to its external package via `pkg_of`; the caller filters the
+    // pattern's targets and `load_query_graph` materializes the repo (lock-seeded). A RECURSIVE
+    // external wildcard (`@repo//...`) needs a materialized-tree walk to enumerate packages —
+    // deferred (use a concrete `@repo//pkg:target`).
     if pattern.starts_with('@') {
-        return Err(format!("external pattern `{pattern}` is not supported in query v1 (q4 — §13)"));
+        if pattern.contains("...") {
+            return Err(format!(
+                "recursive external pattern `{pattern}` is not yet supported in query (q4 — §13); \
+                 use a concrete `@repo//pkg:target`"
+            ));
+        }
+        let pkg = crate::state::pkg_of(pattern).ok_or_else(|| {
+            format!("external query pattern `{pattern}` must be `@repo//pkg:target` (q4 — §13)")
+        })?;
+        return Ok(vec![pkg]);
     }
     let body = pattern.strip_prefix("//").unwrap_or(pattern);
     // A concrete `//pkg:x` (no wildcard) → just its package; the target is filtered by the caller.
@@ -78,21 +92,29 @@ pub fn packages_for_pattern(
 /// it does NOT mint the analyzed action graph for query's sake (query reads `loaded_targets`).
 pub fn load_query_graph(
     root: &Path,
-    flags: GlobalFlags,
+    mut flags: GlobalFlags,
     packages: &[String],
 ) -> BTreeMap<String, LoadedTarget> {
     use std::collections::BTreeSet;
+    // q4 (§13): query materializes `@crates` exactly as the build driver does — seed the lock +
+    // `.razel-crates` base so an `@crates//…` entry (and traversal into its closure) loads real
+    // targets. Inert on a non-`@crates` workspace (no lock → no base → no broadened traversal below).
+    crate::rules::seed_crate_lock_and_base(root, &mut flags);
+    let has_crate_base = flags.fetched_external_base.is_some();
     let (session, _report, _loaded) = crate::rules::drive_tree(root, flags, packages, Vec::new(), 1);
-    // P5.2 (§13/R6): query traversal MAY leave the entry packages. When a loaded edge / raw label-ref
-    // points into a VENDORED host-repo slice (`@rules_rust//rust/platform`, `@platforms//…` — the
-    // `select()`-condition config_settings + their `@platforms` constraint_values, P5.0), load that
-    // package too, so `deps()`/`rdeps()` reach the NODE with its real `rule_class`
-    // (config_setting/constraint_value), not a dangling edge. Close to a fixpoint (a config_setting
-    // pulls in its constraint_values); `host_build`-gated, so non-slice repos are untouched here
-    // (workspace already loaded; `@crates` materialization + the loud-error for unknown repos are
-    // q4/§13). Bounded against pathological cycles.
+    // P5.2/P5.3 (§13/R6): query traversal MAY leave the entry packages. Load a reached package when
+    // it is EITHER a VENDORED host-repo slice (`@rules_rust//rust/platform`, `@platforms//…` — the
+    // `select()`-condition config_settings + their `@platforms` constraint_values, P5.0) OR — for an
+    // `@crates` query (`has_crate_base`) — any external `@…` package, which `load_package_entry`
+    // materializes from the lock (the blake3 closure: `@crates__*`). So `deps()`/`rdeps()` reach the
+    // NODE with its real `rule_class`, not a dangling edge. Close to a fixpoint (a config_setting
+    // pulls in its constraint_values; a crate pulls in its dep crates). A workspace-only query keeps
+    // `has_crate_base == false` ⇒ host_build-gated, unchanged from P5.2. An edge into a repo that is
+    // neither workspace, materialized-`@crates`, nor a vendored slice is `load_package_entry`'s loud
+    // error (§13). The bound is the dep-graph DEPTH (each round loads the whole frontier), set well
+    // above any real crate closure; it breaks as soon as the frontier is empty.
     let mut attempted: BTreeSet<String> = packages.iter().cloned().collect();
-    for _ in 0..16 {
+    for _ in 0..64 {
         let want: BTreeSet<String> = {
             let g = session.loaded_targets.borrow();
             g.values()
@@ -103,7 +125,11 @@ pub fn load_query_graph(
                         .chain(t.edges.iter().map(|e| e.to.as_str()))
                         .filter_map(crate::state::pkg_of)
                 })
-                .filter(|pkg| !attempted.contains(pkg) && crate::host::host_build(pkg).is_some())
+                .filter(|pkg| {
+                    !attempted.contains(pkg)
+                        && (crate::host::host_build(pkg).is_some()
+                            || (has_crate_base && pkg.starts_with('@')))
+                })
                 .collect()
         };
         if want.is_empty() {
@@ -127,8 +153,21 @@ mod tests {
         // a concrete label → just its package (no discovery, no fs).
         assert_eq!(packages_for_pattern(Path::new("/x"), "//a/b:t", false).unwrap(), vec!["a/b"]);
         assert_eq!(packages_for_pattern(Path::new("/x"), "//:t", false).unwrap(), vec![""]);
-        // an external pattern is a named v1 error.
-        assert!(packages_for_pattern(Path::new("/x"), "@crates//:x", false).unwrap_err().contains("q4"));
+        // q4 (§13): a concrete external label resolves to its external package; canonical too.
+        assert_eq!(
+            packages_for_pattern(Path::new("/x"), "@crates//:blake3", false).unwrap(),
+            vec!["@crates//"]
+        );
+        assert_eq!(
+            packages_for_pattern(Path::new("/x"), "@crates__blake3-1.8.2//:lib", false).unwrap(),
+            vec!["@crates__blake3-1.8.2//"]
+        );
+        // a recursive external wildcard is a named, deferred error.
+        assert!(
+            packages_for_pattern(Path::new("/x"), "@crates//...", false)
+                .unwrap_err()
+                .contains("recursive external")
+        );
     }
 
     #[test]

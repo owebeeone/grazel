@@ -51,7 +51,7 @@ mod workspace; // S1 (V3sh1): E-mode boundary walk + BUILD.razel XOR + boundary 
 pub use fetch::{AttrV, RepoSpec, extract_workspace_repos};
 pub use rules::{
     analyze_bazel, analyze_bazel_with, analyze_starlark, analyze_workspace, analyze_workspace_resolved,
-    analyze_workspace_with,
+    analyze_workspace_with, canonicalize_query_pattern,
     load_tree_report, load_tree_report_prepared, load_tree_report_seeded,
     load_tree_report_with_targets, load_tree_report_with_threads, prepare_build_asts,
 };
