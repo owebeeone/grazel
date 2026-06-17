@@ -109,6 +109,19 @@ pub fn fetch_crate(spec: &CrateRepo, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Ensure bazel's repo-boundary marker in a materialized repo: an EMPTY `REPO.bazel` (a real 0-byte
+/// file in every bazel external repo, so `glob(["**"])` lists `@repo//:REPO.bazel`). The loader calls
+/// this for every external repo it resolves — a fresh fetch AND a pre-P6.Q1.c materialization both
+/// converge here — so razel's query view stays byte-equal to bazel's (P6.Q1.c). Idempotent; inert
+/// otherwise (razel never reads it).
+pub(crate) fn ensure_repo_marker(repo_dir: &Path) -> Result<(), String> {
+    let marker = repo_dir.join("REPO.bazel");
+    if !marker.exists() {
+        std::fs::write(&marker, b"").map_err(|e| format!("write REPO.bazel: {e}"))?;
+    }
+    Ok(())
+}
+
 // P4.6 (§9.4): the P2.7 INTERIM dev-only cache (`read_from_bazel_external` — copy Bazel's
 // already-fetched external tree instead of downloading) is RETIRED. It was a scaffold to defer
 // download/extract while the build landed, explicitly NOT parity-gating; by rung 4 the pure
@@ -166,6 +179,22 @@ mod tests {
         // A repo the lock does NOT define → Ok(false), no fetch attempted.
         assert!(!materialize_one_repo(&lock, "rules_rust++crate+crates__nope-9.9.9", &tmp).unwrap());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ensure_repo_marker_writes_empty_repo_bazel_idempotently() {
+        // P6.Q1.c: a materialized repo carries an empty REPO.bazel (bazel's repo-boundary marker),
+        // so glob(["**"]) lists `@repo//:REPO.bazel` — query parity. Idempotent.
+        let dir = std::env::temp_dir().join(format!("razel-p6q1c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ensure_repo_marker(&dir).unwrap();
+        let marker = dir.join("REPO.bazel");
+        assert!(marker.is_file(), "REPO.bazel must be materialized");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "", "REPO.bazel is bazel's empty marker");
+        ensure_repo_marker(&dir).unwrap(); // idempotent — no error, still the empty marker
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

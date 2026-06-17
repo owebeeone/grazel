@@ -101,6 +101,9 @@ pub(crate) fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> R
                 })?
             }
         };
+        // P6.Q1.c: every external repo carries bazel's empty REPO.bazel marker (a fresh fetch AND a
+        // pre-Q1.c materialization both converge here), so glob(["**"]) lists `@repo//:REPO.bazel`.
+        crate::materialize::ensure_repo_marker(&repo_dir).map_err(LoadErr::declare)?;
         repo_dir.join(sub)
     } else {
         sess.workspace
