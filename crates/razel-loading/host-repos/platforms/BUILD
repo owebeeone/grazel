@@ -6,3 +6,7 @@ package(default_visibility = ["//visibility:public"])
 constraint_setting(name = "incompatible_setting")
 
 constraint_value(name = "incompatible", constraint_setting = ":incompatible_setting")
+
+# Exposes this BUILD as compile_data for razel-loading's `include_str!` (host.rs bakes this slice in);
+# a sub-package's files need an explicit `:files` (the parent glob stops here). Inert for query (P5.4).
+filegroup(name = "files", srcs = ["BUILD"], visibility = ["//visibility:public"])

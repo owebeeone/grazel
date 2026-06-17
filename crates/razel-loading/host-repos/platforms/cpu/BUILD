@@ -9,3 +9,8 @@ constraint_setting(name = "cpu")
 constraint_value(name = "aarch64", constraint_setting = ":cpu")
 constraint_value(name = "wasm32", constraint_setting = ":cpu")
 constraint_value(name = "x86_64", constraint_setting = ":cpu")
+
+# Exposes this BUILD as compile_data for razel-loading's `include_str!` (host.rs bakes this slice
+# in). A sub-package's files can't be reached by the parent glob, so it's pulled in explicitly via
+# `:files` — like the other host-repos slices (P5.4 dogfood). Inert for query (additive target).
+filegroup(name = "files", srcs = ["BUILD"], visibility = ["//visibility:public"])

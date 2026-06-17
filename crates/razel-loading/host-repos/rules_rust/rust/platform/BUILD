@@ -45,3 +45,6 @@ config_setting(
     name = "x86_64-unknown-nixos-gnu",
     constraint_values = ["@platforms//cpu:x86_64", "@platforms//os:nixos"],
 )
+
+# Exposes this BUILD as compile_data for razel-loading's `include_str!` (P5.4 dogfood); inert for query.
+filegroup(name = "files", srcs = ["BUILD"], visibility = ["//visibility:public"])

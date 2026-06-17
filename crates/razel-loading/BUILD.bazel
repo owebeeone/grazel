@@ -25,6 +25,11 @@ rust_library(
         "//crates/razel-loading/host-repos/nvshmem:files",
         "//crates/razel-loading/host-repos/proto_bazel_features:files",
         "//crates/razel-loading/host-repos/rules_python/python:files",
+        # P5.0 query slice (host.rs `include_str!`s these for the q4 `@platforms`/`@rules_rust//rust/platform` graph).
+        "//crates/razel-loading/host-repos/platforms:files",
+        "//crates/razel-loading/host-repos/platforms/cpu:files",
+        "//crates/razel-loading/host-repos/platforms/os:files",
+        "//crates/razel-loading/host-repos/rules_rust/rust/platform:files",
     ],
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + [

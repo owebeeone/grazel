@@ -11,3 +11,6 @@ constraint_value(name = "none", constraint_setting = ":os")
 constraint_value(name = "wasi", constraint_setting = ":os")
 constraint_value(name = "windows", constraint_setting = ":os")
 constraint_value(name = "nixos", constraint_setting = ":os")
+
+# Exposes this BUILD as compile_data for razel-loading's `include_str!` (P5.4 dogfood); inert for query.
+filegroup(name = "files", srcs = ["BUILD"], visibility = ["//visibility:public"])
