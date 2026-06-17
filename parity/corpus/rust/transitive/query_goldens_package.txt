@@ -1,0 +1,10 @@
+@@ //corpus/rust/transitive:*
+corpus/rust/transitive
+
+@@ deps(//corpus/rust/transitive:util)
+corpus/rust/transitive
+
+@@ //corpus/rust/transitive:all + //corpus/rust/build_script:all
+corpus/rust/build_script
+corpus/rust/transitive
+

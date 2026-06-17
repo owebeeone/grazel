@@ -262,44 +262,78 @@ const QUERY_BATTERY: &[&str] = &[
     "same_pkg_direct_rdeps({P}:base)",
 ];
 
+/// The `--output=package` battery (P6.Q4) — LITERAL exprs (the cross-package union spans two corpus
+/// packages, so no `{P}` template). Gates razel's `Output::Package` renderer against bazel's actual
+/// `--output=package` text: the main-repo package FORM (no leading `//`, no repo) and the deduped,
+/// sorted MULTI-package render (the union case). The result SETS are already label-parity-gated by
+/// [`QUERY_BATTERY`]; this isolates the package projection.
+const PACKAGE_QUERY_BATTERY: &[&str] = &[
+    // single package: every result lands in `corpus/rust/transitive` — proves bazel's package form.
+    "//corpus/rust/transitive:*",
+    "deps(//corpus/rust/transitive:util)",
+    // cross-package union → two packages: the deduped, sorted multi-package render.
+    "//corpus/rust/transitive:all + //corpus/rust/build_script:all",
+];
+
+/// Run `bazel query --noimplicit_deps [--output=<mode>] <expr>` in `dir` (output base `ob`),
+/// returning the golden block `@@ <expr>\n<sorted result lines>\n\n`, or `None` (logged) on failure.
+/// The single bazel-touching primitive shared by the label + package batteries.
+fn bazel_query_block(
+    bazel: &str,
+    dir: &Path,
+    ob: &str,
+    output: Option<&str>,
+    expr: &str,
+) -> Option<String> {
+    eprintln!("query {}{expr} …", output.map(|o| format!("--output={o} ")).unwrap_or_default());
+    let mut cmd = Command::new(bazel);
+    cmd.current_dir(dir)
+        .arg(format!("--output_base={ob}"))
+        .args(["query", "--noimplicit_deps", "--noshow_progress"]);
+    if let Some(o) = output {
+        cmd.arg(format!("--output={o}"));
+    }
+    cmd.arg(expr);
+    match cmd.output() {
+        Ok(o) if o.status.success() => {
+            let mut lines: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect();
+            lines.sort();
+            Some(format!("@@ {expr}\n{}\n\n", lines.join("\n")))
+        }
+        Ok(o) => {
+            eprintln!("  FAIL: {}", String::from_utf8_lossy(&o.stderr).trim_end());
+            None
+        }
+        Err(e) => {
+            eprintln!("  FAIL spawn bazel: {e}");
+            None
+        }
+    }
+}
+
 /// `cargo xtask capture-query-goldens` runs `bazel query --noimplicit_deps <expr>` for [`QUERY_BATTERY`]
 /// over the dual-queryable `corpus/rust/transitive` package and writes `query_goldens.txt` (blocks:
-/// `@@ <expr>` then the SORTED result labels, blank-line separated). Dev/authoring-only — the only
-/// bazel-touching step; the `live_query_parity` test consumes the committed goldens with no bazel.
+/// `@@ <expr>` then the SORTED result labels, blank-line separated), plus the [`PACKAGE_QUERY_BATTERY`]
+/// captured `--output=package` into `query_goldens_package.txt` (P6.Q4). Dev/authoring-only — the only
+/// bazel-touching step; the `live_query_parity` tests consume the committed goldens with no bazel.
 fn capture_query_goldens() -> ExitCode {
     let parity = workspace_root().join("parity");
     let bazel = std::env::var("BAZEL").unwrap_or_else(|_| "bazel".into());
     let ob = std::env::var("RAZEL_GOLDEN_OB").unwrap_or_else(|_| "/tmp/razel-parity-ob".into());
     let pkg = "//corpus/rust/transitive";
 
-    let mut blocks = String::new();
     let mut failed = 0usize;
+
+    let mut blocks = String::new();
     for tmpl in QUERY_BATTERY {
         let expr = tmpl.replace("{P}", pkg);
-        eprintln!("query {expr} …");
-        let out = Command::new(&bazel)
-            .current_dir(&parity)
-            .arg(format!("--output_base={ob}"))
-            .args(["query", "--noimplicit_deps", "--noshow_progress", &expr])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                let mut labels: Vec<String> = String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect();
-                labels.sort();
-                blocks.push_str(&format!("@@ {expr}\n{}\n\n", labels.join("\n")));
-            }
-            Ok(o) => {
-                eprintln!("  FAIL: {}", String::from_utf8_lossy(&o.stderr).trim_end());
-                failed += 1;
-            }
-            Err(e) => {
-                eprintln!("  FAIL spawn bazel: {e}");
-                failed += 1;
-            }
+        match bazel_query_block(&bazel, &parity, &ob, None, &expr) {
+            Some(b) => blocks.push_str(&b),
+            None => failed += 1,
         }
     }
     let path = parity.join("corpus/rust/transitive/query_goldens.txt");
@@ -308,6 +342,21 @@ fn capture_query_goldens() -> ExitCode {
         return ExitCode::from(1);
     }
     eprintln!("wrote {} ({} bytes)", path.display(), blocks.len());
+
+    let mut pkg_blocks = String::new();
+    for expr in PACKAGE_QUERY_BATTERY {
+        match bazel_query_block(&bazel, &parity, &ob, Some("package"), expr) {
+            Some(b) => pkg_blocks.push_str(&b),
+            None => failed += 1,
+        }
+    }
+    let pkg_path = parity.join("corpus/rust/transitive/query_goldens_package.txt");
+    if let Err(e) = std::fs::write(&pkg_path, &pkg_blocks) {
+        eprintln!("FAIL write {}: {e}", pkg_path.display());
+        return ExitCode::from(1);
+    }
+    eprintln!("wrote {} ({} bytes)", pkg_path.display(), pkg_blocks.len());
+
     if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 

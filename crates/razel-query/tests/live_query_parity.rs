@@ -35,3 +35,37 @@ fn razel_query_matches_the_bazel_query_goldens() {
     }
     assert!(cases >= 7, "expected the full battery, captured {cases}");
 }
+
+/// P6.Q4: the `--output=package` renderer against LIVE `bazel query --output=package`. Same harness
+/// as the label parity, over the committed `query_goldens_package.txt`: the main-repo package form
+/// (no leading `//`, no repo) plus the cross-package union's deduped, sorted multi-package render.
+#[test]
+fn razel_query_package_output_matches_the_bazel_goldens() {
+    let parity = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../parity")
+        .canonicalize()
+        .expect("parity workspace");
+    let goldens =
+        std::fs::read_to_string(parity.join("corpus/rust/transitive/query_goldens_package.txt"))
+            .expect("query_goldens_package.txt (run `cargo xtask capture-query-goldens`)");
+
+    let mut cases = 0;
+    for block in goldens.split("@@ ").skip(1) {
+        let (expr, body) = block.split_once('\n').expect("an expr line then its packages");
+        let expr = expr.trim();
+        let mut want: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+        want.sort();
+
+        let out = run(&parity, GlobalFlags::default(), expr, Output::Package, false)
+            .unwrap_or_else(|e| panic!("razel query --output=package `{expr}`: {e}"));
+        let mut got: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        got.sort();
+
+        assert_eq!(
+            got, want,
+            "razel query --output=package `{expr}` diverges from the bazel-query golden"
+        );
+        cases += 1;
+    }
+    assert!(cases >= 3, "expected the full package battery, captured {cases}");
+}
