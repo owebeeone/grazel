@@ -31,7 +31,12 @@ pub(crate) fn do_glob(
     // so BOTH the apparent `@crates//` and the canonical `@@rules_rust++crate+crates//` (§11.3) forms
     // resolve — mirrors `load_package_body` (a lone `strip_prefix('@')` left the canonical `@@…` repo
     // name with a stray `@`, so `external_repo_dir` missed the vendored dir → B2 glob failure).
-    let dir = sess.current_pkg().and_then(|pkg| {
+    // EXTERNAL crate packages (`@repo//…`) include the hidden files bazel's glob lists (`.github/*`,
+    // `.gitignore`, `.cargo/config.toml`); the WORKSPACE walk keeps skipping dotfiles so `.git`/
+    // `.razel-*` infra never leaks into a source glob (P6.Q1.b).
+    let pkg = sess.current_pkg();
+    let include_hidden = pkg.as_deref().is_some_and(|p| p.starts_with('@'));
+    let dir = pkg.and_then(|pkg| {
         if pkg.starts_with('@') {
             let (repo, sub) = pkg.trim_start_matches('@').split_once("//")?;
             sess.global.external_repo_dir(repo).map(|r| r.join(sub))
@@ -49,7 +54,7 @@ pub(crate) fn do_glob(
     if let Some(hit) = sess.glob_cache.borrow().get(&key) {
         return Ok(hit.as_ref().clone());
     }
-    let files = crate::state::walk_cached(sess, &dir);
+    let files = crate::state::walk_cached(sess, &dir, include_hidden);
     let include: Vec<GlobPattern> = include.iter().map(|p| GlobPattern::new(p)).collect();
     let exclude: Vec<GlobPattern> = exclude.iter().map(|p| GlobPattern::new(p)).collect();
     let mut out = Vec::new();
@@ -96,9 +101,10 @@ fn star_match(pat: &str, s: &str) -> bool {
     }
 }
 
-/// Recursively collect files under `dir` as paths relative to `base` (skipping
-/// dot-directories like `.razel-sandbox`/`.razel-cache`).
-pub(crate) fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
+/// Recursively collect files under `dir` as paths relative to `base`. `include_hidden=false` (the
+/// workspace walk) skips dotfiles/dot-dirs so `.git`/`.razel-*` infra never leaks; `include_hidden=true`
+/// (external crate packages) lists them, matching bazel's glob (P6.Q1.b).
+pub(crate) fn walk_files(dir: &Path, base: &Path, include_hidden: bool, out: &mut Vec<String>) {
     if dir != base && (dir.join("BUILD").is_file() || dir.join("BUILD.bazel").is_file()) {
         return;
     }
@@ -107,12 +113,16 @@ pub(crate) fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
     };
     for e in rd.flatten() {
         let p = e.path();
-        let dot = p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with('.'));
-        if dot {
-            continue;
+        // bazel's glob lists dotfiles; the workspace walk prunes them so `.git`/`.razel-*` infra
+        // never leaks into a source glob (P6.Q1.b — external crate packages set `include_hidden`).
+        if !include_hidden {
+            let dot = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'));
+            if dot {
+                continue;
+            }
         }
         // file_type() comes from the readdir entry — no extra stat per entry. Symlinks
         // (the llvm-project overlay tree) still need the follow-stat.
@@ -122,9 +132,47 @@ pub(crate) fn walk_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
             Err(_) => false,
         };
         if is_dir {
-            walk_files(&p, base, out);
+            walk_files(&p, base, include_hidden, out);
         } else if let Ok(rel) = p.strip_prefix(base) {
             out.push(rel.to_string_lossy().replace('\\', "/"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P6.Q1.b: external crate packages include the dotfiles bazel's glob lists; the WORKSPACE walk
+    /// still prunes them (so `.git`/`.razel-*` never leak). `walk_files`'s `include_hidden` gates it.
+    #[test]
+    fn walk_files_hidden_inclusion_is_scoped_to_external() {
+        let base = std::env::temp_dir().join(format!("razel-p6q1b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let w = |rel: &str| {
+            let p = base.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "").unwrap();
+        };
+        w("lib.rs");
+        w(".gitignore");
+        w(".github/workflows/ci.yml");
+        w("c/blake3.c");
+        w("c/.gitignore");
+
+        let walk = |hidden: bool| {
+            let mut v = Vec::new();
+            walk_files(&base, &base, hidden, &mut v);
+            v.sort();
+            v
+        };
+        // Workspace (include_hidden=false): dotfiles + dot-dirs skipped (unchanged behavior).
+        assert_eq!(walk(false), ["c/blake3.c", "lib.rs"]);
+        // External crate (include_hidden=true): the hidden files bazel lists are included.
+        assert_eq!(
+            walk(true),
+            [".github/workflows/ci.yml", ".gitignore", "c/.gitignore", "c/blake3.c", "lib.rs"]
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

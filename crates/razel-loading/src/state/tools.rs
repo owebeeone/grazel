@@ -62,13 +62,19 @@ pub(crate) fn path_is_file(sess: &Session, p: &std::path::Path) -> bool {
 }
 
 
-/// Cached RECURSIVE file listing under `dir` (paths relative to it) for glob().
-pub(crate) fn walk_cached(sess: &Session, dir: &std::path::Path) -> std::sync::Arc<Vec<String>> {
+/// Cached RECURSIVE file listing under `dir` (paths relative to it) for glob(). `include_hidden`
+/// (P6.Q1.b) gates dotfile inclusion; it's keyed by `dir`, which is safe because a given dir is
+/// always external (`.razel-crates/…`, hidden ON) or workspace (hidden OFF) — never both.
+pub(crate) fn walk_cached(
+    sess: &Session,
+    dir: &std::path::Path,
+    include_hidden: bool,
+) -> std::sync::Arc<Vec<String>> {
     if let Some(hit) = sess.walk_cache.borrow().get(dir) {
         return hit.clone();
     }
     let mut files = Vec::new();
-    crate::glob::walk_files(dir, dir, &mut files);
+    crate::glob::walk_files(dir, dir, include_hidden, &mut files);
     let arc = std::sync::Arc::new(files);
     sess.walk_cache
         .borrow_mut()
