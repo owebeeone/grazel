@@ -697,7 +697,28 @@ failing set is exactly those 2 carve-outs.
   PRODUCTS first (`cargo_toml_env_vars`/`_bs*`/rlib were dirty-tree leakage, not a glob gap).
 
 Gate per step: razel-loading/-query lib green, rust_graph_parity 2/0, blake3 B3 analysis parity green,
-xtask gates + perfgate OK (scaling 1.97, budget OK — no perf regression). **Follow-on → Phase 6
-Build:** output-tree separation (razel build-in-place writes products into the source repos; `query`
-after `build` over-lists them — the driver strips products as a workaround; the fix is a real output
-tree).
+xtask gates + perfgate OK (scaling 1.97, budget OK — no perf regression). The follow-on it surfaced —
+output-tree separation — was pulled forward next and is now **DONE (P6.B, below)**.
+
+## Phase 6 — B: output-tree separation (DONE)
+
+**P6.B (2026-06-17)** — razel builds into a separate OUTPUT TREE (`razel-out` under the CLI's
+`bin_tree_layout`, `bazel-out` under parity), never in-place — so generated files never pollute the
+source tree and `query` after `build` no longer over-lists products (the Q1 follow-on, fixed at the
+root). Two green steps:
+- `09d038a` **B1** — rust/cargo `out_path`/`out_dir` honored only `bazel_build_compat`, ignoring
+  `bin_tree_layout` (an incomplete migration — cc/js/py already routed through `qualify_output` →
+  `bin_prefix`). Unify `out_path` with `bin_prefix(qualify(...))`: byte-identical under
+  `bazel_build_compat` (parity) and under neither flag (bare-lib in-place), redirects to
+  `razel-out/<cfg>/bin/…` under `bin_tree_layout`. New `output_tree` test: a rust build under
+  `bin_tree_layout` lands in `razel-out`, source tree clean, binary runs.
+- `afcd1b4` **B2** — the self-host dogfood now builds the FULL razel graph (400 actions) under
+  `bin_tree_layout`: binary in `razel-out`, the source tree (workspace + `.razel-crates`) pristine —
+  proving B1 at scale (external `--extern`/`-L` resolve under `razel-out`). With no test building
+  `@crates` in-place anymore (dogfood→`bin_tree_layout`, blake3_xp→`bazel-out`, blake3_closure
+  analysis-only, rust/sh/py_rules tempdir), the Q1.d query-driver product-clean workaround was
+  RETIRED — `crates_query_parity` is 5/5 on the clean source tree without it.
+
+Gate per step: razel-loading/-query lib green, rust_rules in-place (default) unchanged,
+rust_graph_parity 2/0, B3 analysis parity byte-unchanged, xtask gates + perfgate OK (2568ms; one
+3303ms reading was thermal variance from the preceding batch — 2 clean re-runs).

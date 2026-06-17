@@ -648,11 +648,13 @@ forward:
 - **Build:** `rerun-if` narrowing (the dynamic-dependency model — a post-correctness optimization,
   §5.2/§10); **cross-compilation** (the exec/target split + transitions — §5.3/§10); the
   **build-script long tail** (sys-crates needing system libs, scripts that subprocess/probe outside
-  the env allowlist, link ordering — §10); rich `DEP_*` beyond P4.5; **output-tree separation**
-  (surfaced by P6.Q1): razel writes build PRODUCTS into the materialized `.razel-crates` SOURCE repos
-  (build-in-place), so `query` after `build` on the same tree over-lists them where bazel (outputs in
-  `bazel-out`) does not — the Q1 parity driver strips products as a workaround; the fix is a real
-  output tree.
+  the env allowlist, link ordering — §10); rich `DEP_*` beyond P4.5.
+  - **Output-tree separation — DONE (P6.B1+B2**, 2026-06-17, surfaced by P6.Q1): rust/cargo `out_path`
+    only honored `bazel_build_compat`, so a `bin_tree_layout` (CLI) build wrote rust products in-place
+    into the source tree (cc/js/py already used the output tree via `qualify_output`). B1 unified
+    `out_path` with `bin_prefix` → outputs land in `razel-out/<cfg>/bin/…`, never in-place; B2 flipped
+    the self-host dogfood to `bin_tree_layout` (the full razel graph builds clean, source tree
+    pristine) and retired the Q1.d query-driver product-clean workaround.
 - **Lock:** the `cargo-bazel splice+generate` **offline** fallback (§2.4) — only if the lock format
   proves unstable; never at build time.
 - **Perf (deferred — investigate AFTER Phase 6, Gianni 2026-06-17):** the full `cargo test
