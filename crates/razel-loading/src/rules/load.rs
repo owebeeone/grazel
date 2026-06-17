@@ -82,9 +82,14 @@ pub(crate) fn external_bzl_path(global: &GlobalFlags, label: &str) -> Option<Pat
     let rest = label.strip_prefix('@')?;
     let (repo, pkgfile) = rest.split_once("//")?;
     let (pkg, file) = pkgfile.split_once(':')?;
-    global
-        .external_repo_dirs(repo)
-        .into_iter()
+    // `@crates//…` is APPARENT; the materialized repo dir is the lock-CANONICAL name
+    // (`rules_rust++crate+crates`, §11.3). Try the apparent repo first, then its canonical form —
+    // so a workspace BUILD's `load("@crates//:defs.bzl", …)` resolves to the materialized defs.bzl
+    // (the crate_universe macro layer: `aliases()`/`all_crate_deps()`). Inert without a seeded lock.
+    let canon = global.crate_lock.as_ref().and_then(|l| l.canonical_repo(repo));
+    std::iter::once(repo.to_string())
+        .chain(canon)
+        .flat_map(|r| global.external_repo_dirs(&r))
         .map(|dir| dir.join(pkg).join(file))
         .find(|p| p.exists())
 }

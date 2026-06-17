@@ -234,6 +234,35 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
+    /// `rust_test(name, srcs|crate, deps=[], edition=…)` — DECLARES + captures (rule_class
+    /// `rust_test`) so the 21 workspace BUILDs + razel-cli that `load()` and call it LOAD and QUERY
+    /// correctly. Its ANALYSIS — the `rustc --test` harness binary (plus the `crate=` lib-under-test
+    /// form) — is the test-verb rung, NOT the self-host build: no `rust_test` is in the `razel`
+    /// binary's dep closure (P5.4 dogfood), so this records a deferred-analysis native that is a
+    /// loud, named error only if a build actually demands a rust_test target.
+    fn native_rust_test<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] srcs: Option<Value<'v>>,
+        #[starlark(require = named)] deps: Option<Value<'v>>,
+        #[starlark(require = named)] _edition: Option<String>,
+        #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        crate::loaded::capture_rule(eval, &label, "rust_test", &[("srcs", srcs), ("deps", deps)], &_kw);
+        crate::dialect::record_native(eval, label, native_decl(move |eval| {
+            // rust_test ANALYZES to an EMPTY target (no actions). `drive_all` analyzes every target
+            // in a loaded package — so this must not error — but the `rustc --test` harness (and the
+            // `crate=` lib-under-test form) is the test-verb rung, NOT the self-host build (no
+            // rust_test is in the `razel` binary's closure). A `build` of a rust_test produces nothing.
+            let sess = session(eval);
+            let nm = canon_label(sess, &name);
+            record_target(sess, AnalyzedTarget { name: nm, ..Default::default() });
+            Ok(())
+        }))?;
+        Ok(NoneType)
+    }
+
     /// `rust_shared_library(name, srcs, deps=[], edition=…)` → one rustc cdylib
     /// action producing `lib<name>.dylib` (host posture: macOS suffix).
     fn native_rust_shared_library<'v>(
@@ -459,6 +488,7 @@ rust_binary = native_rust_binary
 rust_library = native_rust_library
 rust_shared_library = native_rust_shared_library
 rust_proc_macro = native_rust_proc_macro
+rust_test = native_rust_test
 rust_library_group = native_rust_library_group
 rust_doc = native_rust_doc
 rust_doc_test = native_rust_doc
@@ -484,6 +514,14 @@ def _with_or(input_dict, no_match_error = ""):
 
 def _config_setting_group(**kwargs):
     fail("selects.config_setting_group is not yet modeled in razel (no crate in scope needs it; lands when one does)")
+
+# crate_universe's generated `@crates//:defs.bzl` LOADs `local_crate_mirror` (a repo rule from
+# `crate_universe/private:local_crate_mirror.bzl`) but only USES it inside `crate_repositories()` —
+# the WORKSPACE/extension repo-declaration path. razel materializes `@crates` from the lock (P2.6),
+# never via repo rules, so the SYMBOL must exist for defs.bzl to load; calling it (BUILD-mode) is a
+# loud, named error.
+def local_crate_mirror(**kwargs):
+    fail("local_crate_mirror is a crate_universe WORKSPACE-mode repo rule; razel materializes @crates from the lock — not callable in BUILD analysis")
 
 selects = struct(
     with_or = _with_or,
