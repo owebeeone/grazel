@@ -793,10 +793,35 @@ of the deferred list, so `razel query --output=graph` works via the CLI too.
 
 Gate: razel-query lib 28/0, `live_query_parity` 4/4 (label/package/tests/graph), xtask gates OK.
 
-## Phase 6 — the remaining fork (cheap + cleanly-autonomous rungs now EXHAUSTED)
+## Phase 6 — `visible(predicate, x)` verb (DONE)
 
-Empirically confirmed (probed `bazel query` + the loader), the rest each carry a **design call or
-substantial infra**, NOT a cheap rung — surface to Gianni, don't bulldoze the seam:
+**P6 `visible` (`7ede20b`, 2026-06-18)** — the last self-contained query verb. `visible(predicate, x)`
+returns the targets in `x` visible to EVERY target in `predicate`.
+- **No loader change needed** — `capture_rule` already snapshots ALL kwargs, so the `visibility` attr
+  was ALREADY in the query graph (the earlier "Ignored" framing was about ANALYSIS — razel doesn't
+  ENFORCE visibility when building; for QUERY it's captured raw). Confirmed via `value_to_raw`:
+  `visibility = [...]` → `RawAttr::List([Str(...)])`, uncanonicalized.
+- **Model** (razel-query `eval.rs`, package-scoped): same package → always visible; else a spec must
+  grant it — `//visibility:public` (all), `//visibility:private` (none), `//PKG:__pkg__` (exactly
+  PKG), `//PKG:__subpackages__` (PKG or below); absent/default = package-private. A bare `//PKG:NAME`
+  is a `package_group` reference → a **loud, NAMED deferral** (`spec_grants` returns an Err — no
+  package_group model in v1). `parse` moves `visible` out of the deferred list (`parse_path2`, like
+  `somepath`); `run` threads it through both pattern-walkers.
+- **Gate:** 3-package `corpus/rust/visibility` (public / `__pkg__` / `__subpackages__` / private),
+  `VISIBLE_QUERY_BATTERY` from a package AND a subpackage (distinguishing `__pkg__` from
+  `__subpackages__`) vs live bazel. Factored the 4 line-oriented parity tests onto a shared
+  `assert_output_parity` harness (the 4th instance crossed the boilerplate threshold).
+
+Gate: razel-query lib 30/0 (incl 2 `visible` unit tests + the package_group deferral), `live_query_parity`
+5/5 (label/package/tests/visible/graph), xtask gates OK. Still deferred: `package_group` +
+`package(default_visibility)` (loud-named); the `visibility` attr is QUERY-captured but still
+analysis-Ignored.
+
+## Phase 6 — the remaining fork (query verbs DONE; what's left needs a steer)
+
+`visible` was the last cleanly-autonomous query rung (now done). Empirically confirmed (probed
+`bazel query` + the loader), everything still open carries a **design call or substantial infra**,
+NOT a cheap rung — surface to Gianni, don't bulldoze the seam:
 - **`--output=build`** — bazel emits 3 comment blocks razel can't reproduce (the `# BUILD:line:col`
   provenance + "Rule X instantiated at" + "Rule rust_library defined at `…/rust.bzl:925`"): razel
   REIMPLEMENTS the rules in Rust and stubs the `.bzl`, so it has no source-location / `.bzl`-definition
@@ -807,10 +832,9 @@ substantial infra**, NOT a cheap rung — surface to Gianni, don't bulldoze the 
   (80+ rules_cc/rules_rust/skylib internal files). razel never loads those (it stubs them), so it
   CANNOT reproduce the closure — an **architectural wall**, not a deviation. Needs a design call on
   what these even MEAN in razel's stubbed-rules model. **BLOCKED — named.**
-- **`visible(x, y)`** — razel deliberately **Ignores** the `visibility` attr (`rust_attrs.rs`,
-  `cargo_support.rs`); a visibility model (capture specs + `//visibility:public|private` +
-  `__pkg__`/`__subpackages__` + package_group) is real new infra + a cross-package corpus, and
-  flipping visibility from Ignored→modeled is a product/seam decision. **DEFERRED — named.**
+- **`visible(x, y)`** — **DONE** (`7ede20b`, see the section above). The visibility was already
+  query-captured, so it was a clean autonomous rung (not the seam decision first feared); only
+  `package_group` + `package(default_visibility)` stay loud-named-deferred.
 - **`--output=proto`/`xml`** — each a full bazel-schema'd renderer (proto is binary → no textual
   golden-diff; `--cbor`'s "mints a wire contract §13" concern partially applies). Substantial, low
   consumer value. **DEFERRED — named.**
