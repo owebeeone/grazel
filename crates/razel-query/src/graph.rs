@@ -124,6 +124,26 @@ impl QueryGraph {
         seen
     }
 
+    /// `same_pkg_direct_rdeps(x)` — every target in the SAME package as a target in `x` that
+    /// DIRECTLY depends on it (Bazel §12): the direct reverse-deps, restricted to the owning package.
+    pub fn same_pkg_direct_rdeps(&self, roots: &LabelSet) -> LabelSet {
+        fn pkg(l: &str) -> &str {
+            l.rsplit_once(':').map(|(p, _)| p).unwrap_or(l)
+        }
+        let mut out = LabelSet::new();
+        for t in roots {
+            let tpkg = pkg(t);
+            if let Some(preds) = self.rev.get(t) {
+                for p in preds {
+                    if pkg(p) == tpkg {
+                        out.insert(p.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// `allpaths(from, to)` = the node set on SOME path `from`→`to` = the forward closure of
     /// `from` intersected with what can still reach `to` (`rdeps` within that closure). An
     /// order-independent set — a clean golden (§13).

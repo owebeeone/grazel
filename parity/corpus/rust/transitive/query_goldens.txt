@@ -37,3 +37,6 @@
 //corpus/rust/transitive:util
 //corpus/rust/transitive:util.rs
 
+@@ same_pkg_direct_rdeps(//corpus/rust/transitive:base)
+//corpus/rust/transitive:util
+

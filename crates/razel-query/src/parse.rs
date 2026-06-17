@@ -27,6 +27,8 @@ pub enum Expr {
     AllPaths(Box<Expr>, Box<Expr>),
     /// `siblings(x)` — every target in the same package(s) as `x` (Bazel's `:*` per package).
     Siblings(Box<Expr>),
+    /// `same_pkg_direct_rdeps(x)` — same-package targets that directly depend on a target in `x`.
+    SamePkgDirectRdeps(Box<Expr>),
     /// `x + y` / `x union y`.
     Union(Box<Expr>, Box<Expr>),
     /// `x - y` / `x except y`.
@@ -211,8 +213,10 @@ impl Parser {
                     "somepath" => self.parse_path2(|a, b| Expr::SomePath(a, b)),
                     "allpaths" => self.parse_path2(|a, b| Expr::AllPaths(a, b)),
                     "siblings" => self.parse_unary(|x| Expr::Siblings(x)),
-                    "tests" | "set" | "buildfiles" | "loadfiles" | "rbuildfiles"
-                    | "visible" | "same_pkg_direct_rdeps" => {
+                    "same_pkg_direct_rdeps" => {
+                        self.parse_unary(|x| Expr::SamePkgDirectRdeps(x))
+                    }
+                    "tests" | "set" | "buildfiles" | "loadfiles" | "rbuildfiles" | "visible" => {
                         Err(format!("`{w}` is not supported in razel query v1 (deferred — §12)"))
                     }
                     _ if w.starts_with('$') => {

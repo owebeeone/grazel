@@ -258,6 +258,8 @@ const QUERY_BATTERY: &[&str] = &[
     "somepath({P}:util, {P}:base)",
     // siblings: every target in base's package (== `{P}:*`) — gates the verb against bazel (P6.Q2).
     "siblings({P}:base)",
+    // same_pkg_direct_rdeps: same-package targets that directly depend on base (P6.Q3).
+    "same_pkg_direct_rdeps({P}:base)",
 ];
 
 /// `cargo xtask capture-query-goldens` runs `bazel query --noimplicit_deps <expr>` for [`QUERY_BATTERY`]

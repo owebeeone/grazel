@@ -170,6 +170,10 @@ impl Eval<'_> {
                 }
                 Ok(out)
             }
+            Expr::SamePkgDirectRdeps(x) => {
+                let set = self.go(x)?;
+                Ok(self.graph.same_pkg_direct_rdeps(&set))
+            }
         }
     }
 }
@@ -298,6 +302,23 @@ mod tests {
             run("siblings(//a:lib + //b:x)"),
             ["//a:BUILD", "//a:base", "//a:lib", "//b:BUILD", "//b:x"]
         );
+    }
+
+    #[test]
+    fn same_pkg_direct_rdeps_finds_direct_callers_in_the_package() {
+        // bin → lib → base, all in package `a`; `//c:x` (other package) → //a:lib.
+        let mut m = BTreeMap::new();
+        m.insert("//a:base".into(), target("//a:base", "a", "rust_library", &[]));
+        m.insert("//a:lib".into(), target("//a:lib", "a", "rust_library", &["//a:base"]));
+        m.insert("//a:bin".into(), target("//a:bin", "a", "rust_binary", &["//a:lib"]));
+        m.insert("//c:x".into(), target("//c:x", "c", "rust_binary", &["//a:lib"]));
+        let g = QueryGraph::new(m);
+        let run =
+            |s: &str| eval(&g, &parse(s).unwrap(), false).unwrap().into_iter().collect::<Vec<_>>();
+        // DIRECT same-package rdeps of base = {lib} (lib→base); NOT bin (transitive), NOT base itself.
+        assert_eq!(run("same_pkg_direct_rdeps(//a:base)"), ["//a:lib"]);
+        // of lib = {bin}; //c:x depends on lib but is a DIFFERENT package → excluded.
+        assert_eq!(run("same_pkg_direct_rdeps(//a:lib)"), ["//a:bin"]);
     }
 
     #[test]
