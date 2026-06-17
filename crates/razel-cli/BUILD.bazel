@@ -15,6 +15,7 @@ rust_library(
         "//crates/razel-core:razel_core",
         "//crates/razel-daemon:razel_daemon",
         "//crates/razel-exec:razel_exec",
+        "//crates/razel-query:razel_query",  # the `razel query` engine (P5.4 dogfood: was Cargo-only)
         "//crates/razel-wire:razel_wire",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),

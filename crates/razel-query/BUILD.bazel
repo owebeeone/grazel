@@ -1,0 +1,29 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+# P5.4 (dogfood): razel-query had no Bazel BUILD — it's a Track-Q crate wired only via Cargo.toml,
+# which the self-host build surfaced (razel-cli `use razel_query` → unresolved). Deps are listed
+# EXPLICITLY (`@crates//:regex` + the two workspace crates) rather than via `all_crate_deps()`, so
+# razel-query needs no `crate.from_cargo` manifest entry (its only crates.io dep, regex, is already
+# in the lock).
+rust_library(
+    name = "razel_query",
+    srcs = ["src/lib.rs"] + glob(["src/**/*.rs"], exclude = ["src/lib.rs"], allow_empty = True),
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    deps = [
+        "@crates//:regex",
+        "//crates/razel-loading:razel_loading",
+        "//crates/razel-core:razel_core",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "razel_query_unit",
+    crate = ":razel_query",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+)
