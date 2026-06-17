@@ -170,6 +170,17 @@ pub fn run_rustc(opts: &RustcOpts) -> io::Result<i32> {
     for (k, v) in &opts.env {
         env.insert(k.clone(), v.clone());
     }
+    // `include!(concat!(env!("OUT_DIR"), …))` (e.g. serde_core's `private.rs`) resolves a RELATIVE
+    // OUT_DIR against the INCLUDING SOURCE file's dir — not the CWD — so a relative OUT_DIR doubles
+    // the path and ENOENTs. Cargo/Bazel always set OUT_DIR ABSOLUTE; razel passes it exec-root-
+    // relative, so absolutize against the runtime CWD (the exec-root) here. Runtime env mechanism,
+    // not the action graph (argv/inputs) → parity-neutral.
+    if let Some(out_dir) = env.get("OUT_DIR")
+        && std::path::Path::new(out_dir).is_relative()
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        env.insert("OUT_DIR".into(), cwd.join(out_dir).to_string_lossy().into_owned());
+    }
     // B4: razel compiles with the SYSTEM toolchain — it does NOT emit Bazel's `-Clinker=<abs cc>`
     // (a documented parity deviation), so when rustc LINKS (a `bin`, e.g. a build-script host bin) it
     // must resolve the linker `cc`/`ld` via PATH. The default-deny env carries no PATH on unix, so

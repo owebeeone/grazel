@@ -23,16 +23,39 @@ fn repo_root() -> std::path::PathBuf {
 fn wrapper_path() -> std::path::PathBuf {
     let exe = std::env::current_exe().expect("test exe");
     let dir = exe.parent().and_then(|p| p.parent()).expect("target/<profile>");
-    let wrapper = dir.join("razel-process-wrapper");
-    if !wrapper.exists() {
-        let ok = std::process::Command::new(env!("CARGO"))
-            .args(["build", "-p", "razel-process-wrapper"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        assert!(ok, "failed to `cargo build -p razel-process-wrapper`");
+    // ALWAYS (re)build so the wrapper reflects current source (`cargo test -p razel-build` does not
+    // rebuild a sibling BINARY crate); cargo no-ops when unchanged.
+    let ok = std::process::Command::new(env!("CARGO"))
+        .args(["build", "-p", "razel-process-wrapper"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(ok, "failed to `cargo build -p razel-process-wrapper`");
+    dir.join("razel-process-wrapper")
+}
+
+/// Re-run hygiene: razel writes external-crate build PRODUCTS into the materialized `.razel-crates`
+/// tree (rlibs/rmetas/dylibs, `_bs.out`/`_bs.out_dir`). A prior partial run's leftovers collide with
+/// a fresh build's exec-root staging (`File exists`), so clear the PRODUCTS (keep the materialized
+/// SOURCES) — the dogfood is then deterministically re-runnable. (Action idempotency-on-rerun, so no
+/// clean is needed at all, is a separate rung.) One level: products sit directly under each repo dir.
+fn clean_crate_build_products(root: &Path) {
+    let Ok(repos) = std::fs::read_dir(root.join(".razel-crates")) else { return };
+    for repo in repos.flatten().filter(|e| e.path().is_dir()) {
+        let Ok(files) = std::fs::read_dir(repo.path()) else { continue };
+        for f in files.flatten() {
+            let n = f.file_name().to_string_lossy().into_owned();
+            let product = n.ends_with(".rlib")
+                || n.ends_with(".rmeta")
+                || n.ends_with(".dylib")
+                || n.ends_with(".d")
+                || n.starts_with("_bs.out");
+            if product {
+                let p = f.path();
+                let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+            }
+        }
     }
-    wrapper
 }
 
 /// Stage 1 — does the FULL razel graph ANALYZE? (loading + analysis, no execution.) Reports the
@@ -61,6 +84,7 @@ fn probe_razel_cli_builds() {
     let root = repo_root();
     // SAFETY: single-threaded test setup; points wrapper-routed actions at the just-built binary.
     unsafe { std::env::set_var("RAZEL_PROCESS_WRAPPER", wrapper_path()) };
+    clean_crate_build_products(&root); // re-run hygiene (below)
     let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
     match build_workspace(&root, TOP, &cache) {
         Ok(report) => {

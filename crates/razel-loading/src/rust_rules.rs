@@ -111,7 +111,10 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper. P4.5: an
         // rlib is NOT a final link — it passes NO transitive link-flags-files (`&[]`); it only
         // PUBLISHES its own build script's flags-file (below) for a downstream binary to link.
-        let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, argv, &build_scripts, &[])?;
+        let (env_file_deps, env_files) = rustc_env_file_deps(eval, &compile.rustc_env_files)?;
+        let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, argv, &build_scripts, &env_files, &[])?;
+        let mut dep_names = dep_names;
+        dep_names.extend(env_file_deps); // build the env-file (cargo_toml_env_vars) target FIRST
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
@@ -211,7 +214,10 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         argv.extend(tail);
         // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper. P4.5: the
         // transitive build-script link channel does too (final link inherits the closure's libs).
-        let (argv, bs_inputs) = apply_build_script_edge("rust_binary", &name, argv, &build_scripts, &link_flags_files)?;
+        let (env_file_deps, env_files) = rustc_env_file_deps(eval, &compile.rustc_env_files)?;
+        let (argv, bs_inputs) = apply_build_script_edge("rust_binary", &name, argv, &build_scripts, &env_files, &link_flags_files)?;
+        let mut dep_names = dep_names;
+        dep_names.extend(env_file_deps); // build the env-file (cargo_toml_env_vars) target FIRST
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);
@@ -402,7 +408,10 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         argv.push("proc_macro".into());
         argv.extend(rustc_flags);
         // P4.5: a proc-macro is a HOST dylib, not a target final link — no transitive link channel.
-        let (argv, bs_inputs) = apply_build_script_edge("rust_proc_macro", &name, argv, &build_scripts, &[])?;
+        let (env_file_deps, env_files) = rustc_env_file_deps(eval, &compile.rustc_env_files)?;
+        let (argv, bs_inputs) = apply_build_script_edge("rust_proc_macro", &name, argv, &build_scripts, &env_files, &[])?;
+        let mut dep_names = dep_names;
+        dep_names.extend(env_file_deps); // build the env-file (cargo_toml_env_vars) target FIRST
 
         let mut inputs = srcs;
         inputs.extend(dep_rlibs);

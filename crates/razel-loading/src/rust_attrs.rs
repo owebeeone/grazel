@@ -113,7 +113,12 @@ pub(crate) fn compile_attrs<'v>(
                 "compile_data" => {
                     out.compile_data = crate::values::str_attr_parts(eval, Some(*val))? // P3.2b → inputs
                 }
-                _ => {} // env family — accepted, extraction in P3.5 (argv/env-inert here)
+                "rustc_env_files" => {
+                    // P5.4: cargo_toml_env_vars env-file TARGETS → `--env-file` on THIS crate's rustc
+                    // (the `CARGO_PKG_*` a crate may `env!()` at compile time, build script or not).
+                    out.rustc_env_files = crate::values::str_attr_parts(eval, Some(*val))?
+                }
+                _ => {} // remaining env family (rustc_env/version/pkg_name) — inert on the compile here
             },
             // `target_compatible_with` (P3.4) + `proc_macro_deps` (P4.1) semantics land HERE; the
             // other delegated attr (`link_deps` → P4.5) stays accepted + inert.

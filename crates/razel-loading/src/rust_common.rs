@@ -63,6 +63,7 @@ pub(crate) fn apply_build_script_edge(
     name: &str,
     argv: Vec<String>,
     build_scripts: &[crate::deps::BuildScriptRunInfo],
+    env_files: &[String],
     link_flags_files: &[String],
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
     // The OWN intra-target edge (§4.3, ≤1 in slice-1) supplies `--flags-file` (cfg+env+link to THIS
@@ -78,8 +79,8 @@ pub(crate) fn apply_build_script_edge(
              wrapper takes a single --flags-file)"
         ),
     };
-    if own.is_none() && link_flags_files.is_empty() {
-        return Ok((argv, Vec::new())); // no edge, no transitive link channel → argv unchanged
+    if own.is_none() && link_flags_files.is_empty() && env_files.is_empty() {
+        return Ok((argv, Vec::new())); // no edge, no transitive link channel, no env-file → unchanged
     }
     let mut it = argv.into_iter();
     let rustc_path =
@@ -92,6 +93,14 @@ pub(crate) fn apply_build_script_edge(
         inputs.push(bs.flags_file.clone());
         inputs.push(bs.out_dir.clone());
     }
+    // `rustc_env_files` (cargo_toml_env_vars-style env-file targets) apply to the crate's rustc even
+    // with NO build script — the `CARGO_PKG_*` a crate may `env!()` at COMPILE time (e.g.
+    // serde_derive's `CARGO_PKG_VERSION_PATCH`). rules_rust routes these through the wrapper's
+    // `--env-file`; matching it is what makes a pure-proc-macro/library crate that reads Cargo env compile.
+    for f in env_files {
+        wrapped.push(format!("--env-file={f}"));
+        inputs.push(f.clone());
+    }
     for f in link_flags_files {
         wrapped.push(format!("--link-flags-file={f}"));
         inputs.push(f.clone());
@@ -99,6 +108,25 @@ pub(crate) fn apply_build_script_edge(
     wrapped.push("--".into());
     wrapped.extend(it);
     Ok((wrapped, inputs))
+}
+
+/// Resolve `rustc_env_files` (cargo_toml_env_vars-style env-file TARGETS) → `(dep canon names, env-file
+/// OUTPUT paths)`. Each target's `default_info` is the generated `CARGO_PKG_*` env-file. The paths
+/// become `--env-file`s on the crate's compile (via [`apply_build_script_edge`]) + staged inputs; the
+/// NAMES must join the crate's `deps` so `collect_order` BUILDS the env-file action FIRST (else the
+/// `--env-file` is absent at compile time). Lets a crate's COMPILE see the Cargo env it may `env!()`.
+pub(crate) fn rustc_env_file_deps(
+    eval: &mut Evaluator<'_, '_, '_>,
+    parts: &[crate::values::StrAttrPart],
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    let labels = crate::values::resolve_str_parts(eval, parts)?;
+    let (mut names, mut files) = (Vec::new(), Vec::new());
+    for label in &labels {
+        let dep = crate::deps::resolve_dep(eval, label)?;
+        files.extend(dep.libs);
+        names.push(dep.canon);
+    }
+    Ok((names, files))
 }
 
 /// P4.5 (§5.5/§6): the TRANSITIVE set of build-script flags-file paths in `deps`' closure. Each
@@ -188,6 +216,12 @@ pub(crate) fn extern_args(
             let crate_name = crate_name_of(&dep.canon);
             for dylib in &dep.libs {
                 args.push(format!("--extern={crate_name}={dylib}"));
+                // The host dylib is a DECLARED INPUT — the per-action sandbox stages only declared
+                // inputs, so without this rustc reports "extern location does not exist" (e.g. ctor's
+                // `linktime_proc_macro`). Still kept OUT of `rlib_deps` (it's a host dylib, not a
+                // target rlib → never in the `-Ldependency` fold). `external/<repo>/` inputs are
+                // dropped by the parity diff → analysis-parity-neutral.
+                inputs.push(dylib.clone());
             }
             names.push(dep.canon);
             continue;
