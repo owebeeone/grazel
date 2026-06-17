@@ -174,6 +174,34 @@ impl Eval<'_> {
                 let set = self.go(x)?;
                 Ok(self.graph.same_pkg_direct_rdeps(&set))
             }
+            Expr::Tests(x) => {
+                // The test rules in `x`, expanding `test_suite` into its constituent tests (Bazel
+                // §12): follow a suite's `tests` attr (canonicalized against the suite's package);
+                // keep a `*_test` rule; drop anything else. (Implicit all-tests for a suite with no
+                // `tests` attr is a deferred follow-on.)
+                let mut stack: Vec<String> = self.go(x)?.into_iter().collect();
+                let mut visited: std::collections::BTreeSet<String> = stack.iter().cloned().collect();
+                let mut out = LabelSet::new();
+                while let Some(t) = stack.pop() {
+                    let Some(tgt) = self.graph.target(&t) else { continue };
+                    if tgt.rule_class == "test_suite" {
+                        let prefix = pkg_prefix(&t);
+                        let mut members = Vec::new();
+                        if let Some(a) = tgt.attrs.get("tests") {
+                            attr_labels(a, &mut members);
+                        }
+                        for m in members {
+                            let m = canonical_label(&m, prefix);
+                            if visited.insert(m.clone()) {
+                                stack.push(m);
+                            }
+                        }
+                    } else if tgt.rule_class.ends_with("_test") {
+                        out.insert(t);
+                    }
+                }
+                Ok(out)
+            }
         }
     }
 }
@@ -319,6 +347,33 @@ mod tests {
         assert_eq!(run("same_pkg_direct_rdeps(//a:base)"), ["//a:lib"]);
         // of lib = {bin}; //c:x depends on lib but is a DIFFERENT package → excluded.
         assert_eq!(run("same_pkg_direct_rdeps(//a:lib)"), ["//a:bin"]);
+    }
+
+    #[test]
+    fn tests_filters_test_rules_and_expands_test_suites() {
+        let mut m = BTreeMap::new();
+        m.insert("//a:lib".into(), target("//a:lib", "a", "rust_library", &[])); // non-test → dropped
+        m.insert("//a:lib_test".into(), target("//a:lib_test", "a", "rust_test", &[]));
+        m.insert("//a:itest".into(), target("//a:itest", "a", "rust_test", &[]));
+        let mut suite = target("//a:all_tests", "a", "test_suite", &[]);
+        suite.attrs.insert(
+            "tests".into(),
+            RawAttr::List(vec![RawAttr::Str(":lib_test".into()), RawAttr::Str("//a:itest".into())]),
+        );
+        m.insert("//a:all_tests".into(), suite);
+        let g = QueryGraph::new(m);
+        let run =
+            |s: &str| eval(&g, &parse(s).unwrap(), false).unwrap().into_iter().collect::<Vec<_>>();
+        // a `*_test` rule is kept; a non-test rule is dropped.
+        assert_eq!(run("tests(//a:lib_test)"), ["//a:lib_test"]);
+        assert!(run("tests(//a:lib)").is_empty());
+        // a `test_suite` expands to its (canonicalized) member tests.
+        assert_eq!(run("tests(//a:all_tests)"), ["//a:itest", "//a:lib_test"]);
+        // over a mixed set: suite expanded, the standalone test kept, the library dropped.
+        assert_eq!(
+            run("tests(//a:lib + //a:lib_test + //a:all_tests)"),
+            ["//a:itest", "//a:lib_test"]
+        );
     }
 
     #[test]

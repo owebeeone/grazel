@@ -29,6 +29,8 @@ pub enum Expr {
     Siblings(Box<Expr>),
     /// `same_pkg_direct_rdeps(x)` — same-package targets that directly depend on a target in `x`.
     SamePkgDirectRdeps(Box<Expr>),
+    /// `tests(x)` — the test rules in `x`, expanding `test_suite` into its constituent tests.
+    Tests(Box<Expr>),
     /// `x + y` / `x union y`.
     Union(Box<Expr>, Box<Expr>),
     /// `x - y` / `x except y`.
@@ -216,7 +218,8 @@ impl Parser {
                     "same_pkg_direct_rdeps" => {
                         self.parse_unary(|x| Expr::SamePkgDirectRdeps(x))
                     }
-                    "tests" | "set" | "buildfiles" | "loadfiles" | "rbuildfiles" | "visible" => {
+                    "tests" => self.parse_unary(|x| Expr::Tests(x)),
+                    "set" | "buildfiles" | "loadfiles" | "rbuildfiles" | "visible" => {
                         Err(format!("`{w}` is not supported in razel query v1 (deferred — §12)"))
                     }
                     _ if w.starts_with('$') => {
@@ -439,7 +442,7 @@ mod tests {
         assert!(parse("deps(//x").unwrap_err().contains("expected `)`"));
         assert!(parse("//a +").is_err()); // dangling operator
         assert!(parse("\"unterminated").unwrap_err().contains("unterminated"));
-        assert!(parse("tests(//x)").unwrap_err().contains("deferred"));
+        assert!(parse("buildfiles(//x)").unwrap_err().contains("deferred")); // still v1-deferred
         assert!(parse("//a //b").unwrap_err().contains("trailing")); // two primaries, no operator
         assert!(parse("deps(//x, foo)").unwrap_err().contains("depth")); // non-numeric depth
     }

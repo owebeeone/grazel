@@ -51,7 +51,8 @@ fn collect_patterns(expr: &Expr, out: &mut Vec<String>) {
         | Expr::Attr(_, _, x)
         | Expr::Labels(_, x)
         | Expr::Siblings(x)
-        | Expr::SamePkgDirectRdeps(x) => collect_patterns(x, out),
+        | Expr::SamePkgDirectRdeps(x)
+        | Expr::Tests(x) => collect_patterns(x, out),
         Expr::Rdeps(a, b, _)
         | Expr::SomePath(a, b)
         | Expr::AllPaths(a, b)
@@ -81,7 +82,8 @@ fn canonicalize_patterns(expr: &mut Expr, canon: &dyn Fn(&str) -> String) {
         | Expr::Attr(_, _, x)
         | Expr::Labels(_, x)
         | Expr::Siblings(x)
-        | Expr::SamePkgDirectRdeps(x) => canonicalize_patterns(x, canon),
+        | Expr::SamePkgDirectRdeps(x)
+        | Expr::Tests(x) => canonicalize_patterns(x, canon),
         Expr::Rdeps(a, b, _)
         | Expr::SomePath(a, b)
         | Expr::AllPaths(a, b)
