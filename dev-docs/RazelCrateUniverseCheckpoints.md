@@ -650,14 +650,22 @@ libc/getrandom & incompatible negative (P4.4) + link_deps native-link/DEP_* prop
   stub (a WORKSPACE-mode repo rule defs.bzl loads but uses only in `crate_repositories()`). New
   `#[ignore]` dogfood driver: `probe_razel_cli_analyzes` GREEN. Gate: lib 82/0, rust_graph_parity
   2/0, query 22/0, gates + perfgate (2584ms).
-- **P5.4b — the EXECUTION milestone (`probe_razel_cli_builds`), IN PROGRESS:** the self-host build
-  now EXECUTES — analysis → exec-root forest → the wrapper → crate compiles + build scripts. Two
-  execution gaps closed so far: (1) the driver wires `RAZEL_PROCESS_WRAPPER` to the just-built
-  `razel-process-wrapper` (built via cargo — no Bazel; mirrors `blake3_xp`), so wrapper-routed
-  actions resolve; (2) the `cargo_build_script` env now sets `RUSTC=<abs rustc>` (Cargo always does;
-  the wrapper `env_clear`s, so abs path) — allocative's `rustc --version` nightly-probe build script
-  now runs. The build advances past allocative (~7s of compilation) and currently stops at a terse
-  `File exists (os error 17)` (an exec-root/sandbox staging collision at @crates scale — its own
-  gap). **P5.4b is an iterative execution ROLL** (wrapper → RUSTC → staging → … → eventually the
-  named-deferred Phase-6 **build-script long tail** for razel's own sys-crate deps); the dogfood
-  driver leads it (`#[ignore]`, red — like the blake3 drivers led the B2 roll). WS gate.
+- **P5.4b — the EXECUTION milestone: RAZEL SELF-HOSTS.** `razel build //crates/razel-cli:razel` with
+  NO Bazel builds the razel binary — **400 actions, 458 outputs** (the full ~150-crate `@crates`
+  closure + all ~22 workspace crates + the final link) — and the produced 42 MB Mach-O `razel help`
+  RUNS. Driver `probe_razel_cli_builds_and_runs` (`#[ignore]`, WS gate). Fourteen execution gaps,
+  each a real general fix (commits `5c2dc8f`→`311e48c`): wrapper wiring + `RUSTC` build-script env
+  (allocative); re-run hygiene; proc-macro dep **dylib as a sandbox input** (ctor); **OUT_DIR
+  absolutized** at runtime (serde_core's `include!`); `rustc_env_files` CAPTURED + routed via
+  `--env-file` + the env-file target joins `deps` for build-order (serde_derive's
+  `CARGO_PKG_VERSION_PATCH`); **transitive proc-macro dylibs on a consumer's `-Ldependency`** (serde
+  re-exports serde_derive); `CARGO_MANIFEST_DIR` (schemafy's compile-time schema read); crate
+  **`aliases`** (`errno`→`libc_errno`); `CARGO_PKG_VERSION/NAME` for workspace crates (rules_rust's
+  `version` default — every compile now wraps, parity-stripped); the P5.0 host-repos slice as
+  razel-loading `compile_data`; **razel-query's missing BUILD.bazel + razel-cli dep** (dogfooding
+  caught a stale BUILD graph); and the build-script **OUT_DIR staged at the final link** so the
+  inherited `-L`/`-l` find blake3's `libblake3_neon.a`. The Phase-6 build-script "long tail" never
+  bit — the closure builds. Gate per gap: lib 82/0, rust_graph_parity 2/0, gates + perfgate.
+
+**Phase 5 DoD — DONE (milestone 5 + q4):** query over `@crates` matches `bazel query` (4/4, P5.3b);
+the razel binary self-hosts (P5.4). One loader, two readers — the §14 non-conflict contract is live.

@@ -77,28 +77,35 @@ fn probe_razel_cli_analyzes() {
     }
 }
 
-/// Stage 2 — the capstone: BUILD the razel binary with no Bazel. Asserts the binary is produced.
+/// Stage 2 — the CAPSTONE: BUILD the razel binary with no Bazel, then RUN it (§9.5 WS gate:
+/// "the binary builds and runs"). The link lands at `<root>/crates/razel-cli/razel` (through the
+/// exec-root symlink); we exec `razel help` and assert it works, then remove the artifact.
 #[test]
-#[ignore = "P5.4 dogfood: builds //crates/razel-cli:razel (the self-hosting capstone)"]
-fn probe_razel_cli_builds() {
+#[ignore = "P5.4 dogfood: builds + runs //crates/razel-cli:razel (the self-hosting capstone)"]
+fn probe_razel_cli_builds_and_runs() {
     let root = repo_root();
     // SAFETY: single-threaded test setup; points wrapper-routed actions at the just-built binary.
     unsafe { std::env::set_var("RAZEL_PROCESS_WRAPPER", wrapper_path()) };
     clean_crate_build_products(&root); // re-run hygiene (below)
     let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
-    match build_workspace(&root, TOP, &cache) {
-        Ok(report) => {
-            eprintln!(
-                "razel built: {} actions executed, {} outputs",
-                report.executed,
-                report.produced.len()
-            );
-            assert!(
-                report.default_outputs.iter().any(|p| p.contains("razel")),
-                "expected the razel binary output, got {:?}",
-                report.default_outputs
-            );
-        }
-        Err(e) => panic!("razel-cli build failed: {e}"),
-    }
+    let report = build_workspace(&root, TOP, &cache).unwrap_or_else(|e| panic!("razel-cli build failed: {e}"));
+    eprintln!("razel built: {} actions executed, {} outputs", report.executed, report.produced.len());
+    assert!(
+        report.default_outputs.iter().any(|p| p.contains("razel")),
+        "expected the razel binary output, got {:?}",
+        report.default_outputs
+    );
+
+    // RUN the self-hosted binary (built by razel, not cargo): it must execute + print its help.
+    let bin = root.join("crates/razel-cli/razel");
+    let size = std::fs::metadata(&bin).map(|m| m.len()).unwrap_or(0);
+    let out = std::process::Command::new(&bin).arg("help").output().expect("exec self-hosted razel");
+    let _ = std::fs::remove_file(&bin); // clean the artifact from the source tree
+    assert!(out.status.success(), "self-hosted razel `help` failed: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("razel") && text.contains("build"),
+        "self-hosted razel help output looks wrong:\n{text}"
+    );
+    eprintln!("SELF-HOST OK: built ({size} bytes) + ran razel");
 }
