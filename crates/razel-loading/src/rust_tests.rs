@@ -575,13 +575,23 @@ mod tests {
     }
 
     #[test]
-    fn p310_plain_crate_is_not_wrapped() {
-        // No build-script dep → the rustc argv is unchanged (additive: the edge only fires on a
-        // build-script dep), so argv[0] is rustc, not the wrapper.
+    fn p310_plain_crate_wraps_for_cargo_env_without_a_build_script() {
+        // P5.4: a plain crate (no build-script dep) now routes through the wrapper for the COMPILE
+        // env — `CARGO_MANIFEST_DIR` + `CARGO_PKG_VERSION`/`NAME` (rules_rust sets these on every
+        // compile; `version` defaults to "0.0.0"). The parity diff STRIPS the wrapper prefix
+        // (`canonicalize_rust_argv`), so this is analysis-parity-neutral. The build-script edge stays
+        // the meaningful distinction: NO `--flags-file` here.
         let build = format!("{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"])\n");
         let argv = argv_of(&analyze("p310_plain", &build).unwrap());
-        assert!(argv[0].ends_with("rustc"), "plain crate runs rustc directly: {argv:?}");
-        assert!(!argv[0].contains("razel-process-wrapper"), "not wrapped: {argv:?}");
+        assert!(argv[0].contains("razel-process-wrapper"), "wrapped for the compile env: {argv:?}");
+        assert!(
+            argv.iter().any(|a| a == "--env=CARGO_PKG_VERSION=0.0.0"),
+            "default CARGO_PKG_VERSION: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a.starts_with("--flags-file")),
+            "no build-script flags-file (no build-script dep): {argv:?}"
+        );
     }
 
     #[test]

@@ -61,7 +61,7 @@ pub(crate) fn process_wrapper() -> String {
 pub(crate) fn apply_build_script_edge(
     rule: &str,
     name: &str,
-    manifest_dir: &str,
+    extra_env: &[(String, String)],
     argv: Vec<String>,
     build_scripts: &[crate::deps::BuildScriptRunInfo],
     env_files: &[String],
@@ -80,8 +80,8 @@ pub(crate) fn apply_build_script_edge(
              wrapper takes a single --flags-file)"
         ),
     };
-    if own.is_none() && link_flags_files.is_empty() && env_files.is_empty() {
-        return Ok((argv, Vec::new())); // no edge, no transitive link channel, no env-file → unchanged
+    if own.is_none() && link_flags_files.is_empty() && env_files.is_empty() && extra_env.is_empty() {
+        return Ok((argv, Vec::new())); // nothing to inject → bare rustc unchanged
     }
     let mut it = argv.into_iter();
     let rustc_path =
@@ -106,12 +106,13 @@ pub(crate) fn apply_build_script_edge(
         wrapped.push(format!("--link-flags-file={f}"));
         inputs.push(f.clone());
     }
-    // CARGO_MANIFEST_DIR: a proc-macro may read it at macro-expansion (schemafy resolves
-    // `schemafy!("src/schema.json")` against it). Cargo always sets it; emit the crate's exec-root-
-    // relative package dir — the wrapper absolutizes it (like OUT_DIR). Added only when ALREADY
-    // wrapping (a bare compile stays bare → rust/transitive parity unchanged).
-    if !manifest_dir.is_empty() {
-        wrapped.push(format!("--env=CARGO_MANIFEST_DIR={manifest_dir}"));
+    // The compile's extra process env — `--env K=V` BEFORE `--` (stripped by `canonicalize_rust_argv`
+    // → parity-neutral). CARGO_MANIFEST_DIR (a proc-macro may read it: schemafy's schema path; the
+    // wrapper absolutizes it like OUT_DIR) + CARGO_PKG_VERSION/NAME for a crate WITHOUT a
+    // cargo_toml_env_vars env-file (workspace crates that `env!()` them — rules_rust's `version` attr
+    // default). A bare crate with no extra env stays bare (the guard above).
+    for (k, v) in extra_env {
+        wrapped.push(format!("--env={k}={v}"));
     }
     wrapped.push("--".into());
     wrapped.extend(it);
@@ -138,6 +139,27 @@ pub(crate) fn manifest_dir_rel(canon: &str) -> String {
         .and_then(|r| r.split_once(':'))
         .map(|(p, _)| p.to_string())
         .unwrap_or_default()
+}
+
+/// The extra `--env` a rust target's COMPILE needs (passed to [`apply_build_script_edge`]):
+/// `CARGO_MANIFEST_DIR` always (the per-crate pkg dir; the wrapper absolutizes it), plus — for a
+/// crate WITHOUT a `cargo_toml_env_vars` env-file — `CARGO_PKG_VERSION`/`CARGO_PKG_NAME` from the
+/// rule attrs (rules_rust's `version` default "0.0.0", pkg_name = crate name). A workspace crate
+/// that `env!()`s these (e.g. razel-daemon's `CARGO_PKG_VERSION`) compiles; an `@crates` crate
+/// carries the env-file (rustc_env_files), so we DON'T emit here (else `--env` would override it).
+pub(crate) fn compile_env(compile: &crate::rust_attrs::CompileAttrs, canon: &str) -> Vec<(String, String)> {
+    let mut env = vec![("CARGO_MANIFEST_DIR".to_string(), manifest_dir_rel(canon))];
+    if compile.rustc_env_files.is_empty() {
+        env.push((
+            "CARGO_PKG_VERSION".into(),
+            compile.version.clone().unwrap_or_else(|| "0.0.0".into()),
+        ));
+        env.push((
+            "CARGO_PKG_NAME".into(),
+            compile.pkg_name.clone().unwrap_or_else(|| crate_name_of(canon)),
+        ));
+    }
+    env
 }
 
 /// Resolve `rustc_env_files` (cargo_toml_env_vars-style env-file TARGETS) → `(dep canon names, env-file
