@@ -287,25 +287,34 @@ const TESTS_QUERY_BATTERY: &[&str] = &[
     "tests(//corpus/rust/tests:lib)",
 ];
 
-/// Run `bazel query --noimplicit_deps [--output=<mode>] <expr>` in `dir` (output base `ob`),
-/// returning the golden block `@@ <expr>\n<sorted result lines>\n\n`, or `None` (logged) on failure.
-/// The single bazel-touching primitive shared by the label + package batteries.
+/// The `--output=graph` battery (P6.Q-graph) over `corpus/rust/transitive` — LITERAL exprs. Captured
+/// `--nograph:factored` (one node per target) so the golden is the UNFACTORED digraph razel renders;
+/// the parity test compares the node + edge SETS (factoring- and order-insensitive). `deps(util)` is
+/// the rich case (rules + source files + edges); `:all` is the rule-only induced subgraph.
+const GRAPH_QUERY_BATTERY: &[&str] = &[
+    "deps(//corpus/rust/transitive:util)",
+    "deps(//corpus/rust/transitive:base)",
+    "//corpus/rust/transitive:all",
+];
+
+/// Run `bazel query --noimplicit_deps <extra…> <expr>` in `dir` (output base `ob`), returning the
+/// golden block `@@ <expr>\n<sorted result lines>\n\n`, or `None` (logged) on failure. `extra` carries
+/// per-battery flags (`--output=package`, `--output=graph --nograph:factored`, …). The single
+/// bazel-touching primitive shared by every battery.
 fn bazel_query_block(
     bazel: &str,
     dir: &Path,
     ob: &str,
-    output: Option<&str>,
+    extra: &[&str],
     expr: &str,
 ) -> Option<String> {
-    eprintln!("query {}{expr} …", output.map(|o| format!("--output={o} ")).unwrap_or_default());
+    eprintln!("query {} {expr} …", extra.join(" "));
     let mut cmd = Command::new(bazel);
     cmd.current_dir(dir)
         .arg(format!("--output_base={ob}"))
-        .args(["query", "--noimplicit_deps", "--noshow_progress"]);
-    if let Some(o) = output {
-        cmd.arg(format!("--output={o}"));
-    }
-    cmd.arg(expr);
+        .args(["query", "--noimplicit_deps", "--noshow_progress"])
+        .args(extra)
+        .arg(expr);
     match cmd.output() {
         Ok(o) if o.status.success() => {
             let mut lines: Vec<String> = String::from_utf8_lossy(&o.stdout)
@@ -329,18 +338,19 @@ fn bazel_query_block(
 
 /// Capture a battery of (already-templated) exprs through bazel into the golden file at `parity/<rel>`
 /// (block format), returning the failure count. The data-driven core of [`capture_query_goldens`].
+/// `extra` is the per-battery flag set (e.g. `["--output=package"]`).
 fn capture_battery(
     bazel: &str,
     parity: &Path,
     ob: &str,
     exprs: &[String],
-    output: Option<&str>,
+    extra: &[&str],
     rel: &str,
 ) -> usize {
     let mut blocks = String::new();
     let mut failed = 0usize;
     for expr in exprs {
-        match bazel_query_block(bazel, parity, ob, output, expr) {
+        match bazel_query_block(bazel, parity, ob, extra, expr) {
             Some(b) => blocks.push_str(&b),
             None => failed += 1,
         }
@@ -368,13 +378,17 @@ fn capture_query_goldens() -> ExitCode {
     let label_exprs: Vec<String> = QUERY_BATTERY.iter().map(|t| t.replace("{P}", pkg)).collect();
     let pkg_exprs: Vec<String> = PACKAGE_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
     let tests_exprs: Vec<String> = TESTS_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
+    let graph_exprs: Vec<String> = GRAPH_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
 
-    let failed = capture_battery(&bazel, &parity, &ob, &label_exprs, None,
+    let failed = capture_battery(&bazel, &parity, &ob, &label_exprs, &[],
             "corpus/rust/transitive/query_goldens.txt")
-        + capture_battery(&bazel, &parity, &ob, &pkg_exprs, Some("package"),
+        + capture_battery(&bazel, &parity, &ob, &pkg_exprs, &["--output=package"],
             "corpus/rust/transitive/query_goldens_package.txt")
-        + capture_battery(&bazel, &parity, &ob, &tests_exprs, None,
-            "corpus/rust/tests/query_goldens.txt");
+        + capture_battery(&bazel, &parity, &ob, &tests_exprs, &[],
+            "corpus/rust/tests/query_goldens.txt")
+        + capture_battery(&bazel, &parity, &ob, &graph_exprs,
+            &["--output=graph", "--nograph:factored"],
+            "corpus/rust/transitive/query_goldens_graph.txt");
 
     if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }

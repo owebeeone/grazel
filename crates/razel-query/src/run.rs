@@ -2,7 +2,7 @@
 //! evaluate over the §11 graph → format. Returns the output text (results → stdout); CLI-local
 //! (no daemon) in v1 (§13).
 
-use crate::{Expr, Output, QueryGraph, eval, format, parse};
+use crate::{Expr, Output, QueryGraph, eval, format, format_graph, parse};
 use razel_loading::{GlobalFlags, load_query_graph, packages_for_pattern};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -36,7 +36,12 @@ pub fn run(
     let pkgs: Vec<String> = packages.into_iter().collect();
     let graph = QueryGraph::new(load_query_graph(root, flags, &pkgs));
     let set = eval(&graph, &expr, implicit)?;
-    Ok(format(&graph, &set, output))
+    // `--output=graph` needs the `implicit` flag (to draw `Implicit` edges); the set-rendering modes
+    // don't. Dispatch the graph renderer here, the rest through `format`.
+    Ok(match output {
+        Output::Graph => format_graph(&graph, &set, implicit),
+        _ => format(&graph, &set, output),
+    })
 }
 
 /// The target-pattern literals an expression references (which packages to load). `$var`s and

@@ -17,7 +17,7 @@ mod run; // P1.6: the `razel query` entry (parse → load → eval → format)
 
 pub use eval::eval;
 pub use graph::{LabelSet, QueryGraph};
-pub use output::{Output, format};
+pub use output::{Output, format, format_graph};
 pub use parse::{Expr, parse};
 pub use razel_loading::GlobalFlags; // re-exported for callers of `run`
 pub use run::run;

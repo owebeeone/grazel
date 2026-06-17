@@ -61,8 +61,9 @@ impl QueryGraph {
     }
 
     /// Forward successors of a label: its edges' targets. Only rule targets have edges; files are
-    /// leaves. `implicit` includes `Implicit` edges (`--implicit_deps`).
-    fn successors(&self, label: &str, implicit: bool) -> Vec<String> {
+    /// leaves. `implicit` includes `Implicit` edges (`--implicit_deps`). `pub(crate)` so the
+    /// `--output=graph` renderer can draw each node's induced-subgraph edges (P6.Q-graph).
+    pub(crate) fn successors(&self, label: &str, implicit: bool) -> Vec<String> {
         match self.targets.get(label) {
             Some(t) => t
                 .edges

@@ -1,0 +1,28 @@
+@@ deps(//corpus/rust/transitive:util)
+  "//corpus/rust/transitive:base"
+  "//corpus/rust/transitive:base" -> "//corpus/rust/transitive:base.rs"
+  "//corpus/rust/transitive:base.rs"
+  "//corpus/rust/transitive:util"
+  "//corpus/rust/transitive:util" -> "//corpus/rust/transitive:base"
+  "//corpus/rust/transitive:util" -> "//corpus/rust/transitive:util.rs"
+  "//corpus/rust/transitive:util.rs"
+  node [shape=box];
+digraph mygraph {
+}
+
+@@ deps(//corpus/rust/transitive:base)
+  "//corpus/rust/transitive:base"
+  "//corpus/rust/transitive:base" -> "//corpus/rust/transitive:base.rs"
+  "//corpus/rust/transitive:base.rs"
+  node [shape=box];
+digraph mygraph {
+}
+
+@@ //corpus/rust/transitive:all
+  "//corpus/rust/transitive:base"
+  "//corpus/rust/transitive:util"
+  "//corpus/rust/transitive:util" -> "//corpus/rust/transitive:base"
+  node [shape=box];
+digraph mygraph {
+}
+
