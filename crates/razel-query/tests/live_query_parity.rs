@@ -69,3 +69,34 @@ fn razel_query_package_output_matches_the_bazel_goldens() {
     }
     assert!(cases >= 3, "expected the full package battery, captured {cases}");
 }
+
+/// P6.Q5: the `tests()` verb against LIVE `bazel query` over the test-bearing `corpus/rust/tests`
+/// package — a `test_suite` expanded to its members, a mixed `:all` (tests kept / suite expanded /
+/// library dropped), and a non-test target → empty. Gates the verb on a REAL loaded graph (the
+/// `test_suite` loader capture, P6.Q5), not just the synthetic eval unit test.
+#[test]
+fn razel_query_tests_verb_matches_the_bazel_goldens() {
+    let parity = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../parity")
+        .canonicalize()
+        .expect("parity workspace");
+    let goldens = std::fs::read_to_string(parity.join("corpus/rust/tests/query_goldens.txt"))
+        .expect("corpus/rust/tests/query_goldens.txt (run `cargo xtask capture-query-goldens`)");
+
+    let mut cases = 0;
+    for block in goldens.split("@@ ").skip(1) {
+        let (expr, body) = block.split_once('\n').expect("an expr line then its labels");
+        let expr = expr.trim();
+        let mut want: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+        want.sort();
+
+        let out = run(&parity, GlobalFlags::default(), expr, Output::Label, false)
+            .unwrap_or_else(|e| panic!("razel query `{expr}`: {e}"));
+        let mut got: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        got.sort();
+
+        assert_eq!(got, want, "razel query `{expr}` diverges from the bazel-query golden");
+        cases += 1;
+    }
+    assert!(cases >= 3, "expected the full tests() battery, captured {cases}");
+}

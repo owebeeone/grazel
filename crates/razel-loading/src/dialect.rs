@@ -669,14 +669,21 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
     }
     fn test_suite<'v>(
         #[starlark(require = named)] name: String,
+        #[starlark(require = named)] tests: Option<Value<'v>>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
+        let label = canon_label(session(eval), &name);
+        // Capture as a query node carrying its `tests` members so `query tests(<suite>)` expands the
+        // suite over a REAL loaded graph (P6.Q5), not just a synthetic one. Like `alias`'s `actual`,
+        // the `tests` label list is the only attr the query verb reads. ANALYSIS stays an empty
+        // target (a test_suite builds nothing here).
+        crate::loaded::capture_rule(eval, &label, "test_suite", &[("tests", tests)], &_kw);
         let sess = session(eval);
         record_target(
             sess,
             AnalyzedTarget {
-                name: canon_label(sess, &name),
+                name: label,
                 ..Default::default()
             },
         );

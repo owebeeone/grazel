@@ -275,6 +275,18 @@ const PACKAGE_QUERY_BATTERY: &[&str] = &[
     "//corpus/rust/transitive:all + //corpus/rust/build_script:all",
 ];
 
+/// The `tests()` battery (P6.Q5) over the test-bearing `corpus/rust/tests` package — LITERAL exprs.
+/// Gates razel's `tests()` verb against bazel: a `test_suite` EXPANDED to its members; a mixed `:all`
+/// (tests kept, suite expanded, library dropped); a non-test target → EMPTY.
+const TESTS_QUERY_BATTERY: &[&str] = &[
+    // a test_suite expands to its constituent tests.
+    "tests(//corpus/rust/tests:suite)",
+    // mixed package set: the two rust_test rules kept + the suite expanded; the library dropped.
+    "tests(//corpus/rust/tests:all)",
+    // a non-test target yields the empty set.
+    "tests(//corpus/rust/tests:lib)",
+];
+
 /// Run `bazel query --noimplicit_deps [--output=<mode>] <expr>` in `dir` (output base `ob`),
 /// returning the golden block `@@ <expr>\n<sorted result lines>\n\n`, or `None` (logged) on failure.
 /// The single bazel-touching primitive shared by the label + package batteries.
@@ -315,10 +327,37 @@ fn bazel_query_block(
     }
 }
 
-/// `cargo xtask capture-query-goldens` runs `bazel query --noimplicit_deps <expr>` for [`QUERY_BATTERY`]
-/// over the dual-queryable `corpus/rust/transitive` package and writes `query_goldens.txt` (blocks:
-/// `@@ <expr>` then the SORTED result labels, blank-line separated), plus the [`PACKAGE_QUERY_BATTERY`]
-/// captured `--output=package` into `query_goldens_package.txt` (P6.Q4). Dev/authoring-only — the only
+/// Capture a battery of (already-templated) exprs through bazel into the golden file at `parity/<rel>`
+/// (block format), returning the failure count. The data-driven core of [`capture_query_goldens`].
+fn capture_battery(
+    bazel: &str,
+    parity: &Path,
+    ob: &str,
+    exprs: &[String],
+    output: Option<&str>,
+    rel: &str,
+) -> usize {
+    let mut blocks = String::new();
+    let mut failed = 0usize;
+    for expr in exprs {
+        match bazel_query_block(bazel, parity, ob, output, expr) {
+            Some(b) => blocks.push_str(&b),
+            None => failed += 1,
+        }
+    }
+    let path = parity.join(rel);
+    if let Err(e) = std::fs::write(&path, &blocks) {
+        eprintln!("FAIL write {}: {e}", path.display());
+        return failed + 1;
+    }
+    eprintln!("wrote {} ({} bytes)", path.display(), blocks.len());
+    failed
+}
+
+/// `cargo xtask capture-query-goldens` runs `bazel query --noimplicit_deps <expr>` for three batteries
+/// and writes one golden per battery (block format: `@@ <expr>` then the SORTED result lines): the
+/// [`QUERY_BATTERY`] labels + [`PACKAGE_QUERY_BATTERY`] `--output=package` over `corpus/rust/transitive`
+/// (P6.Q4), and [`TESTS_QUERY_BATTERY`] over `corpus/rust/tests` (P6.Q5). Dev/authoring-only — the only
 /// bazel-touching step; the `live_query_parity` tests consume the committed goldens with no bazel.
 fn capture_query_goldens() -> ExitCode {
     let parity = workspace_root().join("parity");
@@ -326,36 +365,16 @@ fn capture_query_goldens() -> ExitCode {
     let ob = std::env::var("RAZEL_GOLDEN_OB").unwrap_or_else(|_| "/tmp/razel-parity-ob".into());
     let pkg = "//corpus/rust/transitive";
 
-    let mut failed = 0usize;
+    let label_exprs: Vec<String> = QUERY_BATTERY.iter().map(|t| t.replace("{P}", pkg)).collect();
+    let pkg_exprs: Vec<String> = PACKAGE_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
+    let tests_exprs: Vec<String> = TESTS_QUERY_BATTERY.iter().map(|s| s.to_string()).collect();
 
-    let mut blocks = String::new();
-    for tmpl in QUERY_BATTERY {
-        let expr = tmpl.replace("{P}", pkg);
-        match bazel_query_block(&bazel, &parity, &ob, None, &expr) {
-            Some(b) => blocks.push_str(&b),
-            None => failed += 1,
-        }
-    }
-    let path = parity.join("corpus/rust/transitive/query_goldens.txt");
-    if let Err(e) = std::fs::write(&path, &blocks) {
-        eprintln!("FAIL write {}: {e}", path.display());
-        return ExitCode::from(1);
-    }
-    eprintln!("wrote {} ({} bytes)", path.display(), blocks.len());
-
-    let mut pkg_blocks = String::new();
-    for expr in PACKAGE_QUERY_BATTERY {
-        match bazel_query_block(&bazel, &parity, &ob, Some("package"), expr) {
-            Some(b) => pkg_blocks.push_str(&b),
-            None => failed += 1,
-        }
-    }
-    let pkg_path = parity.join("corpus/rust/transitive/query_goldens_package.txt");
-    if let Err(e) = std::fs::write(&pkg_path, &pkg_blocks) {
-        eprintln!("FAIL write {}: {e}", pkg_path.display());
-        return ExitCode::from(1);
-    }
-    eprintln!("wrote {} ({} bytes)", pkg_path.display(), pkg_blocks.len());
+    let failed = capture_battery(&bazel, &parity, &ob, &label_exprs, None,
+            "corpus/rust/transitive/query_goldens.txt")
+        + capture_battery(&bazel, &parity, &ob, &pkg_exprs, Some("package"),
+            "corpus/rust/transitive/query_goldens_package.txt")
+        + capture_battery(&bazel, &parity, &ob, &tests_exprs, None,
+            "corpus/rust/tests/query_goldens.txt");
 
     if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }

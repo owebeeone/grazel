@@ -1,0 +1,11 @@
+@@ tests(//corpus/rust/tests:suite)
+//corpus/rust/tests:extra_test
+//corpus/rust/tests:lib_test
+
+@@ tests(//corpus/rust/tests:all)
+//corpus/rust/tests:extra_test
+//corpus/rust/tests:lib_test
+
+@@ tests(//corpus/rust/tests:lib)
+
+
