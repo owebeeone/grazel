@@ -45,8 +45,10 @@ pub(crate) fn metadata_hash(canon: &str) -> String {
 
 /// P3.8: the razel process wrapper bin (the build-script runner / the P3.9 rustc wrapper). Resolved
 /// like [`rustc`]: an explicit `RAZEL_PROCESS_WRAPPER` override, else the bare crate name (the
-/// executor / toolchain resolves it on the exec path). Parity normalizes the wrapper prefix
-/// (P3.11), so the exact path is not parity-gated.
+/// executor / toolchain resolves it on the exec path). Kept a STABLE token so the action argv is
+/// deterministic (not dependent on whether the wrapper binary happens to be built); P5.4 callers
+/// that build a real binary set `RAZEL_PROCESS_WRAPPER` to the co-located wrapper. Parity normalizes
+/// the wrapper prefix (`canonicalize_rust_argv`), so the exact path is not parity-gated.
 pub(crate) fn process_wrapper() -> String {
     std::env::var("RAZEL_PROCESS_WRAPPER").unwrap_or_else(|_| "razel-process-wrapper".into())
 }

@@ -19,6 +19,25 @@ fn have_rustc() -> bool {
             .unwrap_or(false)
 }
 
+/// P5.4: every rust compile now routes through `razel-process-wrapper` (it carries the per-compile
+/// CARGO env), so a real build needs the wrapper resolvable. It ships next to the razel binary; in
+/// tests it's the test exe's `target/<profile>/razel-process-wrapper` — build it (cargo, once) and
+/// return its ABSOLUTE path for `RAZEL_PROCESS_WRAPPER` (resolvable under the sandbox's minimal PATH).
+fn wrapper_path() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("test exe");
+    let dir = exe.parent().and_then(|p| p.parent()).expect("target/<profile>");
+    let wrapper = dir.join("razel-process-wrapper");
+    if !wrapper.exists() {
+        let ok = Command::new(env!("CARGO"))
+            .args(["build", "-p", "razel-process-wrapper"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "failed to `cargo build -p razel-process-wrapper`");
+    }
+    wrapper
+}
+
 #[test]
 fn builds_and_runs_rust_binary_with_library_dep() {
     if !have_rustc() {
@@ -55,6 +74,8 @@ rust_binary(name = "app", srcs = ["app.rs"], deps = ["//lib:greet"])
         "fn main() { println!(\"{}\", greet::greet()); }\n",
     );
 
+    // SAFETY: single test in this binary; point wrapper-routed compiles at the just-built wrapper.
+    unsafe { std::env::set_var("RAZEL_PROCESS_WRAPPER", wrapper_path()) };
     let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
 
     // Cross-package: //lib:greet is loaded on demand while analyzing app.
