@@ -233,7 +233,10 @@ pub fn label_attrs(rule_class: &str) -> &'static [&'static str] {
         "config_setting" => &["constraint_values", "flag_values"],
         "rust_library" | "rust_binary" | "rust_shared_library" | "rust_library_group"
         | "rust_proc_macro" => {
-            &["srcs", "deps", "proc_macro_deps", "aliases", "compile_data", "data"]
+            // P5.2 (§11.2): `target_compatible_with` is a label attr — its `select()` condition labels
+            // (`@rules_rust//rust/platform:*`) + the default-arm `@platforms//:incompatible` are
+            // `deps()` edges (every generated `@crates` target carries this select).
+            &["srcs", "deps", "proc_macro_deps", "aliases", "compile_data", "data", "target_compatible_with"]
         }
         "cc_library" | "cc_binary" => &["srcs", "hdrs", "deps", "data"],
         // P5.1 (§11.2): the build-script runner's label-valued attrs — its build-deps/srcs/data are

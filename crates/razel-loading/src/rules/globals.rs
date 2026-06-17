@@ -126,7 +126,13 @@ pub(crate) fn autoload_stub_globals(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<starlark::values::none::NoneType> {
-        crate::deps::record_named(crate::state::session(eval), &name);
+        let canon = {
+            let sess = crate::state::session(eval);
+            crate::deps::record_named(sess, &name);
+            crate::state::canon_label(sess, &name)
+        };
+        // P5.2 (§11.2): a query node too — q4 traversal reaches constraint nodes by their kind.
+        crate::loaded::capture_rule(eval, &canon, "constraint_setting", &[], &_kw);
         Ok(starlark::values::none::NoneType)
     }
 
@@ -138,14 +144,21 @@ pub(crate) fn autoload_stub_globals(b: &mut GlobalsBuilder) {
         #[starlark(kwargs)] _kw: starlark::collections::SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<starlark::values::none::NoneType> {
-        let sess = crate::state::session(eval);
-        crate::deps::record_named(sess, &name);
-        let canon = crate::state::canon_label(sess, &name);
-        let spec = crate::state::ConfigSpec {
-            constraint_values: vec![canon.clone()],
-            ..Default::default()
+        let canon = {
+            let sess = crate::state::session(eval);
+            crate::deps::record_named(sess, &name);
+            let canon = crate::state::canon_label(sess, &name);
+            let spec = crate::state::ConfigSpec {
+                constraint_values: vec![canon.clone()],
+                ..Default::default()
+            };
+            sess.config_specs.borrow_mut().insert(canon.clone(), spec);
+            canon
         };
-        sess.config_specs.borrow_mut().insert(canon, spec);
+        // P5.2 (§11.2): a query node too — so `deps()` reaching it (e.g. `@platforms//:incompatible`
+        // as a `target_compatible_with` default-arm VALUE) classifies it by its `constraint_value`
+        // rule_class instead of dropping the edge as unresolved.
+        crate::loaded::capture_rule(eval, &canon, "constraint_value", &[], &_kw);
         Ok(starlark::values::none::NoneType)
     }
 }

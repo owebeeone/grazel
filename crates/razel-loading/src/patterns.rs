@@ -81,7 +81,40 @@ pub fn load_query_graph(
     flags: GlobalFlags,
     packages: &[String],
 ) -> BTreeMap<String, LoadedTarget> {
+    use std::collections::BTreeSet;
     let (session, _report, _loaded) = crate::rules::drive_tree(root, flags, packages, Vec::new(), 1);
+    // P5.2 (§13/R6): query traversal MAY leave the entry packages. When a loaded edge / raw label-ref
+    // points into a VENDORED host-repo slice (`@rules_rust//rust/platform`, `@platforms//…` — the
+    // `select()`-condition config_settings + their `@platforms` constraint_values, P5.0), load that
+    // package too, so `deps()`/`rdeps()` reach the NODE with its real `rule_class`
+    // (config_setting/constraint_value), not a dangling edge. Close to a fixpoint (a config_setting
+    // pulls in its constraint_values); `host_build`-gated, so non-slice repos are untouched here
+    // (workspace already loaded; `@crates` materialization + the loud-error for unknown repos are
+    // q4/§13). Bounded against pathological cycles.
+    let mut attempted: BTreeSet<String> = packages.iter().cloned().collect();
+    for _ in 0..16 {
+        let want: BTreeSet<String> = {
+            let g = session.loaded_targets.borrow();
+            g.values()
+                .flat_map(|t| {
+                    t.raw_refs
+                        .iter()
+                        .map(|r| r.label.as_str())
+                        .chain(t.edges.iter().map(|e| e.to.as_str()))
+                        .filter_map(crate::state::pkg_of)
+                })
+                .filter(|pkg| !attempted.contains(pkg) && crate::host::host_build(pkg).is_some())
+                .collect()
+        };
+        if want.is_empty() {
+            break;
+        }
+        for pkg in &want {
+            attempted.insert(pkg.clone());
+            let _ = crate::rules::load_package_entry(&session, pkg);
+        }
+        crate::loaded::finalize_edges(&session, root);
+    }
     session.loaded_targets.borrow().clone()
 }
 
