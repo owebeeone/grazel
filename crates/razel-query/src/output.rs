@@ -10,6 +10,8 @@ pub enum Output {
     #[default]
     Label,
     LabelKind,
+    /// `--output=package` — the deduped, sorted PACKAGES of the result targets.
+    Package,
 }
 
 impl Output {
@@ -18,7 +20,8 @@ impl Output {
         match s {
             "label" => Ok(Output::Label),
             "label_kind" => Ok(Output::LabelKind),
-            "build" | "package" | "graph" | "proto" | "xml" | "cbor" => {
+            "package" => Ok(Output::Package),
+            "build" | "graph" | "proto" | "xml" | "cbor" => {
                 Err(format!("--output={s} is deferred in query v1 (§12)"))
             }
             other => Err(format!("unknown --output={other}")),
@@ -26,10 +29,21 @@ impl Output {
     }
 }
 
-/// Render a result set per the output mode — one label per line, lexicographically sorted. For
-/// `label_kind`, a label with no known kind prints bare (defensive; shouldn't happen for results
-/// drawn from the graph).
+/// The package of a label for `--output=package` — `//pkg:name` → `pkg` (Bazel's main-repo form);
+/// an external `@repo//pkg:name` keeps its repo prefix (`@repo//pkg`).
+fn package_of(label: &str) -> &str {
+    let pkg = label.rsplit_once(':').map(|(p, _)| p).unwrap_or(label);
+    pkg.strip_prefix("//").unwrap_or(pkg)
+}
+
+/// Render a result set per the output mode — one line per item, lexicographically sorted. `package`
+/// emits the DEDUPED packages of the results; `label_kind` prefixes the kind (a label with no known
+/// kind prints bare — defensive; shouldn't happen for results drawn from the graph).
 pub fn format(graph: &QueryGraph, set: &LabelSet, mode: Output) -> String {
+    if mode == Output::Package {
+        let pkgs: std::collections::BTreeSet<&str> = set.iter().map(|l| package_of(l)).collect();
+        return pkgs.into_iter().map(|p| format!("{p}\n")).collect();
+    }
     let mut out = String::new();
     for label in set {
         match mode {
@@ -42,6 +56,7 @@ pub fn format(graph: &QueryGraph, set: &LabelSet, mode: Output) -> String {
                 }
                 None => out.push_str(label),
             },
+            Output::Package => unreachable!("handled above"),
         }
         out.push('\n');
     }
@@ -84,9 +99,19 @@ mod tests {
     }
 
     #[test]
+    fn output_package_dedupes_to_package_names() {
+        let g = graph();
+        let set: LabelSet =
+            ["//a:lib".to_string(), "//a:lib.rs".to_string()].into_iter().collect();
+        // both targets live in package `a` → one deduped line, `//` stripped (Bazel's form).
+        assert_eq!(format(&g, &set, Output::Package), "a\n");
+    }
+
+    #[test]
     fn output_parse_accepts_v1_and_defers_the_rest() {
         assert_eq!(Output::parse("label").unwrap(), Output::Label);
         assert_eq!(Output::parse("label_kind").unwrap(), Output::LabelKind);
+        assert_eq!(Output::parse("package").unwrap(), Output::Package);
         assert!(Output::parse("build").unwrap_err().contains("deferred"));
         assert!(Output::parse("nonsense").unwrap_err().contains("unknown"));
     }

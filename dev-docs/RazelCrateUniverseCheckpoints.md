@@ -736,4 +736,9 @@ parity-gated against `bazel query` over `corpus/rust/transitive` (the non-`#[ign
 
 Gate: razel-query lib 25/0 (unit tests), live_query_parity 9/9, xtask gates OK. Remaining query verbs
 are meatier follow-ons: `tests` needs test fixtures; `buildfiles`/`loadfiles`/`rbuildfiles` need
-load-phase tracking; `visible` needs visibility; the `--output=` renderers are their own rungs.
+load-phase tracking; `visible` needs visibility.
+
+**Q4 — `--output=package`** (the first `--output` renderer): the deduped, sorted PACKAGES of a result
+(`Output::Package` + `package_of` strips `//pkg:name`→`pkg`, Bazel's main-repo form). Unit-gated like
+`label_kind` (the result SETS are already label-parity-gated; a bazel golden over the package-output
+mode would need the battery harness extended — a follow-on). razel-query lib 26/0, xtask gates OK.
