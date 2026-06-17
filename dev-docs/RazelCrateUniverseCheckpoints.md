@@ -678,3 +678,26 @@ Plan Phase 6 "Perf"). The pre-fix sweep enumerated the complete non-ignored fail
 regression (fixed in `82be6e0`) + the 2 known cc/java graph-parity carve-out reds (`live_cc_graph`,
 `java_graph` — separate track); the test-only fix can't perturb any other suite, so the post-fix
 failing set is exactly those 2 carve-outs.
+
+## Phase 6 — Q1: external glob / source-file query fidelity (DONE)
+
+**P6.Q1 (the first Phase-6 rung pulled forward, 2026-06-17)** — `razel query labels(compile_data,
+@crates//:blake3)` is now byte-equal to `bazel query` (the deferred 5th `@crates` battery expr; driver
+**5/5**, `c9108ad`). Four green steps:
+- `37ce02f` **Q1.a** — `query labels()` keys a target's RELATIVE attr values (glob'd source files) at
+  the target's repo+package (`@@<repo>//:c/blake3.c`), not the main repo `//:` (eval.rs: derive the
+  full repo prefix via `rsplit_once(':')`; main-repo behavior unchanged; razel-query lib 23/0).
+- `bf8a66a` **Q1.b** — `glob()` includes the HIDDEN files bazel lists (`.github/*`, `.gitignore`,
+  `.cargo/config.toml`) for EXTERNAL crate packages; the WORKSPACE walk still prunes dotfiles so
+  `.git`/`.razel-*` never leak (`walk_files` gains `include_hidden`; lib 83/0).
+- `9e469d9` **Q1.c** — materialize bazel's empty `REPO.bazel` marker (`ensure_repo_marker`, called by
+  the loader for every external repo — a fresh fetch AND a pre-Q1.c materialization both converge, so
+  stale trees self-heal in place; lib 84/0).
+- `c9108ad` **Q1.d** — capstone: golden captured (80 labels), battery 5/5; the driver strips build
+  PRODUCTS first (`cargo_toml_env_vars`/`_bs*`/rlib were dirty-tree leakage, not a glob gap).
+
+Gate per step: razel-loading/-query lib green, rust_graph_parity 2/0, blake3 B3 analysis parity green,
+xtask gates + perfgate OK (scaling 1.97, budget OK — no perf regression). **Follow-on → Phase 6
+Build:** output-tree separation (razel build-in-place writes products into the source repos; `query`
+after `build` over-lists them — the driver strips products as a workaround; the fix is a real output
+tree).

@@ -638,15 +638,21 @@ forward:
   contract — §13); `cquery` (the analyzed/configured graph); `buildfiles`/`loadfiles`/`siblings`/
   `visible`/`rbuildfiles`; full implicit/toolchain-label fidelity (its own rung with a deviation
   list); daemon-backed query over the V2 snapshot (≠ the §12 expression verb — §13 naming).
-  **External glob/source-file fidelity** (surfaced by P5.3b `labels(compile_data, @crates…)`): glob'd
-  EXTERNAL source files are keyed `//:f` (repo prefix dropped) not `@crates__x//:f`; the glob walk
-  skips HIDDEN files (`.github/*`, `.gitignore`) bazel lists; materialize omits `REPO.bazel` and
-  surfaces a `cargo_toml_env_vars` generated target. q4 gates the select/alias/per-attr surface
-  (4/4); this glob+keying rung is its own follow-on.
+  **External glob/source-file fidelity — DONE (P6.Q1**, the first Phase-6 rung pulled forward,
+  2026-06-17): glob'd EXTERNAL source files now key `@crates__x//:f` not `//:f` (Q1.a — `query
+  labels()` resolves relative attr values against the target's repo+package); the glob lists the
+  HIDDEN files bazel does (Q1.b — `.github/*`, `.gitignore`, `.cargo/config.toml`); materialize writes
+  bazel's empty `REPO.bazel` marker (Q1.c). `labels(compile_data, @crates//:blake3)` is byte-equal to
+  bazel — the battery is **5/5** (Q1.d). (`cargo_toml_env_vars` was build-PRODUCT leakage on a dirty
+  tree, NOT a materialize gap — absent on a clean tree; see the Build "output-tree separation" item.)
 - **Build:** `rerun-if` narrowing (the dynamic-dependency model — a post-correctness optimization,
   §5.2/§10); **cross-compilation** (the exec/target split + transitions — §5.3/§10); the
   **build-script long tail** (sys-crates needing system libs, scripts that subprocess/probe outside
-  the env allowlist, link ordering — §10); rich `DEP_*` beyond P4.5.
+  the env allowlist, link ordering — §10); rich `DEP_*` beyond P4.5; **output-tree separation**
+  (surfaced by P6.Q1): razel writes build PRODUCTS into the materialized `.razel-crates` SOURCE repos
+  (build-in-place), so `query` after `build` on the same tree over-lists them where bazel (outputs in
+  `bazel-out`) does not — the Q1 parity driver strips products as a workaround; the fix is a real
+  output tree.
 - **Lock:** the `cargo-bazel splice+generate` **offline** fallback (§2.4) — only if the lock format
   proves unstable; never at build time.
 - **Perf (deferred — investigate AFTER Phase 6, Gianni 2026-06-17):** the full `cargo test
