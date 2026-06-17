@@ -54,7 +54,7 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
             // All the `&mut eval` resolutions up front (compile argv + run env/inputs), before
             // re-taking `sess` for the path `qualify`s + `record_target`. (Build-deps of the bs bin
             // are normal crates, not build scripts → `_bs` edge unused here.)
-            let (extern_flags, dep_rlibs, mut dep_names, _bs) = extern_args(eval, deps.clone())?;
+            let (extern_flags, dep_rlibs, mut dep_names, _bs) = extern_args(eval, deps.clone(), &[])?;
             let (feature_cfgs, rustc_flags) = compile_extras(eval, &compile)?;
             let features = crate::values::resolve_str_parts(eval, &compile.crate_features)?;
             // §5.2 slice-1 run inputs: declared `data` + `compile_data`, resolved to files.

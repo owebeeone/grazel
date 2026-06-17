@@ -75,6 +75,10 @@ pub(crate) struct CompileAttrs {
     /// P4.5 (§5.5/§6): `link_deps` — the `links` crates whose `DEP_<LINKS>_*` metadata THIS build
     /// script inherits into its run env (the cross-build-script channel). `cargo_build_script` only.
     pub(crate) link_deps: Vec<crate::values::StrAttrPart>,
+    /// P5.4: `aliases` — (dep-label → `--extern` crate NAME) renames (Cargo's `package = "…"`). RAW
+    /// apparent labels (UNIONED across `select()` arms); `extern_args` canonicalizes the keys. E.g.
+    /// rustix renames `errno` → `libc_errno`, so its `use libc_errno::…` resolves.
+    pub(crate) aliases: Vec<(String, String)>,
 }
 
 
@@ -117,6 +121,11 @@ pub(crate) fn compile_attrs<'v>(
                     // P5.4: cargo_toml_env_vars env-file TARGETS → `--env-file` on THIS crate's rustc
                     // (the `CARGO_PKG_*` a crate may `env!()` at compile time, build script or not).
                     out.rustc_env_files = crate::values::str_attr_parts(eval, Some(*val))?
+                }
+                "aliases" => {
+                    // P5.4: dep-rename map (Cargo's `package = "…"`) → the `--extern` crate NAME.
+                    // RAW apparent labels; `extern_args` canonicalizes the keys to match dep canons.
+                    out.aliases = crate::values::alias_pairs(Some(*val))
                 }
                 _ => {} // remaining env family (rustc_env/version/pkg_name) — inert on the compile here
             },

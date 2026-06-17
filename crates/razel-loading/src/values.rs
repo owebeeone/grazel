@@ -730,6 +730,44 @@ pub(crate) enum StrAttrPart {
     Branches(Vec<(String, Vec<String>)>),
 }
 
+/// Flatten an `aliases`-style dict attr — a plain `{dep_label: alias}` OR `select({cfg: {…}})`
+/// (rules_rust's per-cfg renames) — to ALL its (dep_label, alias) string pairs, UNIONED across
+/// select arms. Sound because a dep's alias is identical in every arm it appears in, and only
+/// deps actually present in the resolved `deps` are looked up — so the arm need not be resolved.
+pub(crate) fn alias_pairs<'v>(v: Option<Value<'v>>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(v) = v {
+        collect_alias_dict(v, &mut out);
+    }
+    out
+}
+
+fn collect_alias_dict<'v>(v: Value<'v>, out: &mut Vec<(String, String)>) {
+    if let Some(d) = starlark::values::dict::DictRef::from_value(v) {
+        for (k, val) in d.iter() {
+            if let (Some(k), Some(val)) = (k.unpack_str(), val.unpack_str()) {
+                out.push((k.to_string(), val.to_string()));
+            }
+        }
+    } else if let Some(b) = v.downcast_ref::<crate::selects::SelectBranches>() {
+        for (_cond, dv) in &b.branches {
+            collect_alias_dict(*dv, out);
+        }
+    } else if let Some(b) = v.downcast_ref::<crate::selects::FrozenSelectBranches>() {
+        for (_cond, dv) in &b.branches {
+            collect_alias_dict(dv.to_value(), out);
+        }
+    } else if let Some(e) = v.downcast_ref::<crate::selects::SelectExpr>() {
+        for p in &e.parts {
+            collect_alias_dict(*p, out);
+        }
+    } else if let Some(e) = v.downcast_ref::<crate::selects::FrozenSelectExpr>() {
+        for p in &e.parts {
+            collect_alias_dict(p.to_value(), out);
+        }
+    }
+}
+
 /// Decompose a native-rule attr value into [`StrAttrPart`]s at DECLARE time.
 pub(crate) fn str_attr_parts<'v>(
     eval: &mut Evaluator<'v, '_, '_>,

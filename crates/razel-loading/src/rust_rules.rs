@@ -75,7 +75,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         // each by its DepInfo — a proc-macro dep becomes a host-dylib extern, not an rlib).
         let mut all_deps = deps.clone();
         all_deps.extend(crate::values::resolve_str_parts(eval, &compile.proc_macro_deps)?);
-        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps)?;
+        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps, &compile.aliases)?;
         let (feature_cfgs, rustc_flags) = compile_extras(eval, &compile)?;
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         let sess = session(eval);
@@ -191,7 +191,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         // each by its DepInfo — a proc-macro dep becomes a host-dylib extern, not an rlib).
         let mut all_deps = deps.clone();
         all_deps.extend(crate::values::resolve_str_parts(eval, &compile.proc_macro_deps)?);
-        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps)?;
+        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps, &compile.aliases)?;
         let tail = compile_tail(eval, &compile)?;
         let data = data_inputs(eval, &compile)?; // P3.2b: compile_data → inputs
         // P4.5 (§5.5/§6): a `rust_binary` is the FINAL link — it inherits the native-link directives
@@ -292,7 +292,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
             .clone();
         let edition = edition.unwrap_or_else(|| "2021".into());
         // rust_shared_library: build-script edge unused for slice-1 (blake3 is a rust_library).
-        let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
+        let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone(), &[])?;
         let sess = session(eval);
         let dylib = out_path(sess, &format!("lib{name}.dylib"));
         let mut argv = vec![
@@ -372,7 +372,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let crate_name = compile.crate_name.clone().unwrap_or_else(|| name.clone());
         let mut all_deps = deps.clone();
         all_deps.extend(crate::values::resolve_str_parts(eval, &compile.proc_macro_deps)?);
-        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps)?;
+        let (extern_flags, dep_rlibs, dep_names, build_scripts) = extern_args(eval, all_deps, &compile.aliases)?;
         let (feature_cfgs, rustc_flags) = compile_extras(eval, &compile)?;
         let data = data_inputs(eval, &compile)?;
         let sess = session(eval);
@@ -451,7 +451,7 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         let label = canon_label(session(eval), &name);
         let deps = unpack_strs(deps);
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
-        let (_, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone())?;
+        let (_, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone(), &[])?;
         let sess = session(eval);
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),

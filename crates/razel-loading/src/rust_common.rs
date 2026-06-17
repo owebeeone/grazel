@@ -237,10 +237,19 @@ pub(crate) fn transitive_rlibs(sess: &crate::state::Session, roots: &[String]) -
 pub(crate) fn extern_args(
     eval: &mut Evaluator<'_, '_, '_>,
     deps: Vec<String>,
+    aliases: &[(String, String)],
 ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>, Vec<crate::deps::BuildScriptRunInfo>)> {
     let (mut args, mut inputs, mut names, mut build_scripts) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut rlib_deps: Vec<String> = Vec::new(); // the `--extern`'d deps → roots for the -Ldependency fold
+    // P5.4: dep-rename map — the `aliases` keys are APPARENT labels, canonicalized here to match each
+    // resolved `dep.canon`. A dep present in this map is `--extern`'d under its ALIAS (rustix's
+    // `errno` → `libc_errno`); absent → the crate's own name (`crate_name_of`).
+    let alias_map: std::collections::HashMap<String, String> =
+        aliases.iter().map(|(k, v)| (canon_label(session(eval), k), v.clone())).collect();
+    let extern_name = |dep: &crate::deps::DepInfo| {
+        alias_map.get(&dep.canon).cloned().unwrap_or_else(|| crate_name_of(&dep.canon))
+    };
     for d in &deps {
         let dep = resolve_dep(eval, d)?;
         if let Some(bs) = dep.build_script {
@@ -251,7 +260,7 @@ pub(crate) fn extern_args(
         // P4.1 (§5.3): a `rust_proc_macro` dep is `--extern`'d as a HOST dylib, but is NOT a target
         // rlib — keep it OUT of `rlib_deps` so it never enters the transitive `-Ldependency` closure.
         if dep.proc_macro {
-            let crate_name = crate_name_of(&dep.canon);
+            let crate_name = extern_name(&dep);
             for dylib in &dep.libs {
                 args.push(format!("--extern={crate_name}={dylib}"));
                 // The host dylib is a DECLARED INPUT — the per-action sandbox stages only declared
@@ -264,7 +273,7 @@ pub(crate) fn extern_args(
             names.push(dep.canon);
             continue;
         }
-        let crate_name = crate_name_of(&dep.canon);
+        let crate_name = extern_name(&dep);
         // A rust_library exports exactly one rlib in default_info → dep.libs. rules_rust's faithful
         // form is `--extern=<name>=<rlib>` (joined) for the DIRECT dep.
         for rlib in &dep.libs {
