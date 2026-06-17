@@ -61,6 +61,7 @@ pub(crate) fn process_wrapper() -> String {
 pub(crate) fn apply_build_script_edge(
     rule: &str,
     name: &str,
+    manifest_dir: &str,
     argv: Vec<String>,
     build_scripts: &[crate::deps::BuildScriptRunInfo],
     env_files: &[String],
@@ -105,9 +106,38 @@ pub(crate) fn apply_build_script_edge(
         wrapped.push(format!("--link-flags-file={f}"));
         inputs.push(f.clone());
     }
+    // CARGO_MANIFEST_DIR: a proc-macro may read it at macro-expansion (schemafy resolves
+    // `schemafy!("src/schema.json")` against it). Cargo always sets it; emit the crate's exec-root-
+    // relative package dir — the wrapper absolutizes it (like OUT_DIR). Added only when ALREADY
+    // wrapping (a bare compile stays bare → rust/transitive parity unchanged).
+    if !manifest_dir.is_empty() {
+        wrapped.push(format!("--env=CARGO_MANIFEST_DIR={manifest_dir}"));
+    }
     wrapped.push("--".into());
     wrapped.extend(it);
     Ok((wrapped, inputs))
+}
+
+/// The exec-root-relative package (manifest) dir of a target's canonical label, for
+/// `CARGO_MANIFEST_DIR`. External `@repo//pkg:name` → `external/<repo>[/<pkg>]` (Bazel's exec-root
+/// form, trimming all leading `@` — §11.3); workspace `//pkg:name` → `pkg`.
+pub(crate) fn manifest_dir_rel(canon: &str) -> String {
+    if let Some(rest) = canon.strip_prefix('@') {
+        let rest = rest.trim_start_matches('@');
+        if let Some((repo, pkgname)) = rest.split_once("//") {
+            let pkg = pkgname.split_once(':').map(|(p, _)| p).unwrap_or("");
+            return if pkg.is_empty() {
+                format!("external/{repo}")
+            } else {
+                format!("external/{repo}/{pkg}")
+            };
+        }
+    }
+    canon
+        .strip_prefix("//")
+        .and_then(|r| r.split_once(':'))
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_default()
 }
 
 /// Resolve `rustc_env_files` (cargo_toml_env_vars-style env-file TARGETS) → `(dep canon names, env-file

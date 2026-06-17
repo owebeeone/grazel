@@ -112,7 +112,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         // rlib is NOT a final link — it passes NO transitive link-flags-files (`&[]`); it only
         // PUBLISHES its own build script's flags-file (below) for a downstream binary to link.
         let (env_file_deps, env_files) = rustc_env_file_deps(eval, &compile.rustc_env_files)?;
-        let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, argv, &build_scripts, &env_files, &[])?;
+        let manifest_dir = manifest_dir_rel(&canon_label(session(eval), &name));
+        let (argv, bs_inputs) = apply_build_script_edge("rust_library", &name, &manifest_dir, argv, &build_scripts, &env_files, &[])?;
         let mut dep_names = dep_names;
         dep_names.extend(env_file_deps); // build the env-file (cargo_toml_env_vars) target FIRST
 
@@ -215,7 +216,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         // P3.10 (§4.3): a build-script dep routes this rustc through the process wrapper. P4.5: the
         // transitive build-script link channel does too (final link inherits the closure's libs).
         let (env_file_deps, env_files) = rustc_env_file_deps(eval, &compile.rustc_env_files)?;
-        let (argv, bs_inputs) = apply_build_script_edge("rust_binary", &name, argv, &build_scripts, &env_files, &link_flags_files)?;
+        let manifest_dir = manifest_dir_rel(&canon_label(session(eval), &name));
+        let (argv, bs_inputs) = apply_build_script_edge("rust_binary", &name, &manifest_dir, argv, &build_scripts, &env_files, &link_flags_files)?;
         let mut dep_names = dep_names;
         dep_names.extend(env_file_deps); // build the env-file (cargo_toml_env_vars) target FIRST
 
@@ -409,7 +411,8 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         argv.extend(rustc_flags);
         // P4.5: a proc-macro is a HOST dylib, not a target final link — no transitive link channel.
         let (env_file_deps, env_files) = rustc_env_file_deps(eval, &compile.rustc_env_files)?;
-        let (argv, bs_inputs) = apply_build_script_edge("rust_proc_macro", &name, argv, &build_scripts, &env_files, &[])?;
+        let manifest_dir = manifest_dir_rel(&canon_label(session(eval), &name));
+        let (argv, bs_inputs) = apply_build_script_edge("rust_proc_macro", &name, &manifest_dir, argv, &build_scripts, &env_files, &[])?;
         let mut dep_names = dep_names;
         dep_names.extend(env_file_deps); // build the env-file (cargo_toml_env_vars) target FIRST
 
