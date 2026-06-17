@@ -741,10 +741,35 @@ load-phase tracking; `visible` needs visibility.
 **Q4 — `--output=package`** (the first `--output` renderer): the deduped, sorted PACKAGES of a result
 (`Output::Package` + `package_of` strips `//pkg:name`→`pkg`, Bazel's main-repo form). Unit-gated like
 `label_kind` (the result SETS are already label-parity-gated; a bazel golden over the package-output
-mode would need the battery harness extended — a follow-on). razel-query lib 26/0, xtask gates OK.
+mode would need the battery harness extended — **now DONE, see "Q4/Q5 parity consolidation" below**).
+razel-query lib 26/0, xtask gates OK.
 
 **Q5 — `tests(x)`** (`36705a5`): the test rules in x, expanding `test_suite` into its constituent
 tests (follow the `tests` attr canonicalized against the suite's package; keep `*_test`; drop others;
 cycle-guarded). Unit-gated on a synthetic graph (reuses `attr_labels`/`canonical_label`/`pkg_prefix`);
 razel-query lib 27/0, xtask gates OK. Follow-ons: a bazel-battery gate needs a test-bearing corpus +
-`test_suite` loader support; the implicit-all-tests `test_suite` (no `tests` attr) expansion is deferred.
+`test_suite` loader support — **now DONE, see "Q4/Q5 parity consolidation" below**; the
+implicit-all-tests `test_suite` (no `tests` attr) expansion is still deferred.
+
+## Phase 6 — Q4/Q5 parity consolidation (DONE)
+
+**P6.Q4/Q5 parity (2026-06-18)** — Q4 (`--output=package`) and Q5 (`tests()`) were unit-gated only;
+consolidated onto LIVE `bazel query` parity (the handoff's recommended lowest-risk rung). The
+`capture-query-goldens` xtask now captures three batteries through a data-driven `capture_battery`
+helper; both new goldens are committed + consumed by `live_query_parity` with no bazel at test time.
+- `8a77846` **Q4** — `PACKAGE_QUERY_BATTERY` captured `bazel query --output=package` →
+  `query_goldens_package.txt`: two single-package exprs prove the main-repo package FORM (no leading
+  `//`, no repo) + a cross-package union (`transitive:all + build_script:all` → two packages) proves
+  the deduped, sorted MULTI-package render. New `live_query_parity` test runs the same exprs through
+  razel `Output::Package`. Label golden byte-unchanged (the helper refactor is behavior-preserving).
+- `48fbc98` **Q5** — the loader gap closed: `test_suite` now `capture_rule`s a query node carrying its
+  `tests` members (like `alias`'s `actual`), so `tests(<suite>)` expands over a REAL loaded graph.
+  New `corpus/rust/tests` (library + two `rust_test` + a `test_suite`) + `TESTS_QUERY_BATTERY` →
+  `corpus/rust/tests/query_goldens.txt`; the test asserts razel == bazel for suite-expansion, mixed
+  `:all` (tests kept / suite expanded / library dropped), and a non-test → empty.
+
+Gate per step: razel-query lib 27/0, `live_query_parity` 3/3 (label + package + tests), razel-loading
+lib 84/0, rust_graph_parity 2/0, xtask gates OK, perfgate scaling 1.91 (budget OK). The query verbs
+now ALL ride live-bazel parity (label/package output + `deps`/`rdeps`/`kind`/`filter`/`attr`/`labels`/
+`somepath`/`siblings`/`same_pkg_direct_rdeps`/`tests`). Still deferred: implicit-all-tests `test_suite`
+expansion (a suite with no `tests` attr).
