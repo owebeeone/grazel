@@ -66,7 +66,7 @@ fn failing_test_reports_failed_and_exits_three() {
 fn js_test_rides_the_aspect_surface() {
     let w = ws("js");
     write(
-        &w.join("t/BUILD.razel"),
+        &w.join("t/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_test\")\n\
          js_test(name = \"jt\", entry_point = \"t.js\")\n",
     );

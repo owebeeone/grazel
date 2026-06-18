@@ -14,7 +14,7 @@ fn run_builds_and_executes_a_js_binary() {
     let ws = std::env::temp_dir().join(format!("razel-run-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&ws);
     write(
-        &ws.join("srv/BUILD.razel"),
+        &ws.join("srv/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
          js_binary(name = \"hello\", entry_point = \"server.js\")\n",
     );
@@ -43,7 +43,7 @@ fn run_propagates_the_program_exit_code() {
     let ws = std::env::temp_dir().join(format!("razel-run-exit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&ws);
     write(
-        &ws.join("a/BUILD.razel"),
+        &ws.join("a/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
          js_binary(name = \"x\", entry_point = \"x.js\")\n",
     );
@@ -62,7 +62,7 @@ fn run_fails_loud_when_the_build_fails() {
     let ws = std::env::temp_dir().join(format!("razel-run-fail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&ws);
     write(
-        &ws.join("a/BUILD.razel"),
+        &ws.join("a/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
          js_binary(name = \"x\", entry_point = \"missing.js\")\n",
     );

@@ -84,7 +84,7 @@ Local plumbing when both are installed on one machine:
   When output bases move out-of-tree the lock moves with them; same contract.
 
 The `razel_service(...)` hosting mechanism (supervised out-of-process services declared
-as E-mode targets) survives for ts/npm pieces gryth may add, but the p2p node does NOT
+as ordinary targets) survives for ts/npm pieces gryth may add, but the p2p node does NOT
 ride it — the node is in-process by construction (iroh is Rust; the node IS the daemon's
 fabric, not a supervised child). How much gryth server logic lives in the rust node vs
 hosted TS services is gryth-dev's call; this surface stays agnostic.
@@ -247,7 +247,8 @@ lock there).
   - **Lifecycle** — workspace open/status/invalidate, watch control, hosted-service
     supervision, shutdown.
 - **S-C: Workspace file contracts.** BUILD[.bazel]/MODULE.bazel/.bazelrc consumed with
-  Bazel semantics; `BUILD.razel`/`MODULE.razel`/`.razelrc` per the V3sh1 §3 definitions.
+  Bazel semantics; `MODULE.razel`/`.razelrc` per the V3sh1 §3 definitions (`BUILD.razel`
+  removed 2026-06-18 — no package-level `.razel` grammar; see RazelReleaseSpike §3c).
 - **S-D: Artifact formats.** `razel-lock.json`, the cache layouts (Bazel-mirrored below
   the root — the round-36 decision), output-tree conventions.
 
@@ -371,8 +372,8 @@ at its own tier.
 
 Ownership mapping: T0/T1 land with S3 (the server skeleton brings its harness with it —
 no skeleton without transcripts); T2 guards every step from S1; T3 lands with S4; T4 is
-continuous; T5 closes the bootstrap bar. S1's own exit fixture (E-mode workspace loads;
-XOR errors; strict mode hides E-packages) is a T2 citizen.
+continuous; T5 closes the bootstrap bar. S1's own exit fixture (BUILD.bazel-over-BUILD
+precedence; the MODULE.razel boundary walk) is a T2 citizen.
 
 ## §7 Anti-goals
 

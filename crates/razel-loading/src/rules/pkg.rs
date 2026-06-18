@@ -111,8 +111,8 @@ pub(crate) fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> R
             .ok_or_else(|| LoadErr::declare("load_package called outside workspace mode"))?
             .join(pkg)
     };
-    // Resolve the package file UNCONDITIONALLY (cheap stat probes): the E-mode XOR and
-    // boundary guard must hold even when the parallel pre-pass already cached the AST.
+    // Resolve the package file UNCONDITIONALLY (cheap stat probes) — bazel precedence
+    // must hold even when the parallel pre-pass already cached the AST.
     let build_path = crate::workspace::resolve_build_file(&pkg_dir, sess.global.strict_bazel)
         .map_err(LoadErr::declare)?
         .ok_or_else(|| {
@@ -121,20 +121,6 @@ pub(crate) fn load_package_body(sess: &Session, pkg: &str, drive_all: bool) -> R
                 pkg_dir.display()
             ))
         })?;
-    // E-package in the MAIN repo: the boundary guard (§3c rule 2 — warning during
-    // S1 only; a hard ERROR since S3d: boundary divergence must not be warnable).
-    if build_path.file_name().is_some_and(|f| f == "BUILD.razel") && !pkg.starts_with('@') {
-        if let Some(root) = sess.workspace.as_deref() {
-            let ignore = std::fs::read_to_string(root.join(".bazelignore")).ok();
-            if let Some(w) = crate::workspace::e_mode_guard(
-                crate::workspace::root_is_dual(root),
-                ignore.as_deref(),
-                pkg,
-            ) {
-                return Err(LoadErr::declare(w));
-            }
-        }
-    }
     // Pre-parsed AST present? Skip BOTH the read and the parse (the parallel pre-pass).
     let prepared = sess
         .ast_cache

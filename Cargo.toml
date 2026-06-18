@@ -9,6 +9,7 @@ members = ["crates/*", "xtask"]
 edition = "2024"
 license = "Apache-2.0 OR MIT"   # F10
 rust-version = "1.95"
+repository = "https://github.com/owebeeone/grazel"
 
 # §13.2 / §9: small single static binary.
 [profile.release]
@@ -16,3 +17,8 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

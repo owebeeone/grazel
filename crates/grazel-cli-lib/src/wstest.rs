@@ -629,7 +629,7 @@ cc_obj(name="widget", src="widget.c")
     let razel_bin = ctx.grazel_bin.parent().expect("bin dir").join("razel");
     if !razel_bin.is_file() {
         return Err(format!(
-            "razel binary missing at {} — build it (cargo build -p razel-cli); parity needs both CLIs",
+            "razel binary missing at {} — build it (cargo build -p razel); parity needs both CLIs",
             razel_bin.display()
         ));
     }
@@ -1126,7 +1126,7 @@ fn test_verb_protocol(ctx: &StageCtx) -> Result<(), String> {
     let (home, ws) = (ctx.tmp.join("home"), ctx.tmp.join("ws"));
     std::fs::create_dir_all(ws.join("t")).map_err(|e| e.to_string())?;
     std::fs::write(
-        ws.join("t/BUILD.razel"),
+        ws.join("t/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_test\")\n\
          js_test(name = \"ok\", entry_point = \"ok.js\")\n\
          js_test(name = \"bad\", entry_point = \"bad.js\")\n",

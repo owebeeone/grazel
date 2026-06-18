@@ -47,7 +47,7 @@ mod rust_common; // rust rules: shared toolchain/dep/edge helpers (split from ru
 #[cfg(test)]
 mod rust_tests; // tests for the rust + cargo rules (split from rust_rules)
 mod sh_rules;
-mod workspace; // S1 (V3sh1): E-mode boundary walk + BUILD.razel XOR + boundary guard
+mod workspace; // workspace boundary walk-up + package-file resolution (BUILD.bazel/BUILD)
 pub use fetch::{AttrV, RepoSpec, extract_workspace_repos};
 pub use rules::{
     analyze_bazel, analyze_bazel_with, analyze_starlark, analyze_workspace, analyze_workspace_resolved,
@@ -59,7 +59,7 @@ pub use state::{
     AnalyzedAction, AnalyzedTarget, CcToolchainMode, GlobalFlags, SchedHook, config_segment,
     convenience_symlinks,
 };
-pub use workspace::{e_mode_guard, find_workspace_root, resolve_build_file};
+pub use workspace::{find_workspace_root, resolve_build_file};
 // crate-universe Part B: the loading-phase graph types `razel-query` reads (P1.2).
 pub use loaded::{Edge, EdgeKind, LoadedTarget, QueryNode, RawAttr, RawLabelRef};
 pub use patterns::{discover_packages, load_query_graph, packages_for_pattern};

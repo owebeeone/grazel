@@ -201,7 +201,19 @@ boundaries). Four candidate designs, with their failure modes:
   server is razel-native (glade/derivation targets first-class, no shim ceremony), atop
   bazel-grammar deps.
 
-**DECISION: C + D + E; A and B rejected.** The package-mode matrix: pure-bazel (mimicry) ·
+**DECISION: C + D + E; A and B rejected.**
+
+> **AMENDED 2026-06-18 — design E (`BUILD.razel`) REVERTED.** One `BUILD.razel` pollutes the
+> *target space* and, via the boundary guard, forces its whole module razel-native/bazel-invisible
+> — the all-or-nothing fragmentation that defeats the bazel-compliance goal. Reverted to **C + D**.
+> `MODULE.razel` (module-level, target-space-neutral) and `--strict_bazel` (ignore `*.razel`) are
+> KEPT but currently DORMANT: `find_workspace_root` reads `MODULE.razel` only *off* the live path
+> (the live build takes its root from `--workspace`), so they are scaffolding for a future
+> `MODULE.razel`-settings feature, not a working capability. Removal: loader `resolve_build_file` no
+> longer recognizes `BUILD.razel`; `e_mode_guard` deleted; gryth-examples → `BUILD.bazel`. See
+> ws-grazel/inbox 0012.
+
+The package-mode matrix: pure-bazel (mimicry) ·
 dual-augmented (C: compat shim, congruent namespace, `razel-only` tags) · razel-native
 (E: BUILD.razel sole grammar, boundary-guarded) · third-party (D: repo patches). C's clinching property
 is namespace CONGRUENCE: shim-loaded razel-native targets EXIST under Bazel (as degraded

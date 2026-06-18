@@ -32,10 +32,10 @@ pub struct GlobalFlags {
     pub defines: Vec<(String, String)>,
     /// S2 test seam (see [`SchedHook`]). `None` in production.
     pub sched_hook: Option<SchedHook>,
-    /// `--strict_bazel` (V3sh1 §3d, the parity oracle switch): act as if this IS
-    /// bazel-7.7.0 — `.razel` files (`BUILD.razel`, `MODULE.razel`) are INVISIBLE,
-    /// never an error. Full rc/CLI wiring lands at S6; the engine honors the bool
-    /// from S1.
+    /// `--strict_bazel` (V3sh1 §3d, the parity oracle switch): act as if this IS bazel —
+    /// `*.razel` files are INVISIBLE. With `BUILD.razel` removed (2026-06-18) the only
+    /// `.razel` left is `MODULE.razel`, and its sole reader (`find_workspace_root`) is off
+    /// the live path — so this flag is a DORMANT hook today. Full rc/CLI wiring was for S6.
     pub strict_bazel: bool,
     /// `--jobs`/`-j` (S5x): max targets the executor runs CONCURRENTLY. `0`/`1` = serial
     /// (the default — no behaviour change); `N>1` enables the parallel action executor

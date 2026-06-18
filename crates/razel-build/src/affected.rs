@@ -5,7 +5,7 @@ use super::*;
 /// Expand a Bazel target PATTERN to concrete target labels under `root`. Supports `//...`,
 /// `//...:all`, `//pkg/...`, `//pkg/...:all`, and `//pkg:all`; a concrete label (`//pkg:name`,
 /// bare name — no `...`/`:all`) is returned as-is (no discovery). Discovers packages
-/// (BUILD/BUILD.bazel/BUILD.razel), keeps the ones the pattern's package part selects,
+/// (BUILD/BUILD.bazel), keeps the ones the pattern's package part selects,
 /// analyzes them once, and returns the matching target labels (sorted, deduped).
 pub fn expand_pattern(root: &Path, pattern: &str, flags: GlobalFlags) -> Result<Vec<String>, String> {
     if !pattern.contains("...") && !pattern.ends_with(":all") {

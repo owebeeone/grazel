@@ -1,10 +1,11 @@
-//! S1 (V3sh1): E-mode workspace structure — boundary walk-up, package-file resolution
-//! (the `BUILD.razel` XOR rule), and the `.bazelignore` boundary guard (spike §3c rule 2).
+//! Workspace structure — boundary walk-up and package-file resolution.
 //!
-//! Design E (ws-razel/RazelReleaseSpike §3c): `BUILD.razel` exists only as a package's
-//! SOLE grammar; razel-native packages live where Bazel is provably blind (razel-native
-//! modules, or `.bazelignore`d subtrees of dual workspaces). `--strict_bazel` (§3d) acts
-//! as if it IS bazel: `.razel` files are invisible, never an error.
+//! `BUILD.razel` removed (2026-06-18): there is no package-level `.razel` grammar — every
+//! package is `BUILD.bazel`/`BUILD`. `MODULE.razel` remains as the (dormant) razel-native
+//! module-root marker that `find_workspace_root` reads on the walk-up, and `--strict_bazel`
+//! the dormant hook that makes razel ignore `*.razel`. Neither is on the live path yet —
+//! the live build takes its root from `--workspace` — so they are scaffolding for a future
+//! `MODULE.razel`-settings feature, not a working capability today.
 
 use std::path::{Path, PathBuf};
 
@@ -22,69 +23,19 @@ pub fn find_workspace_root(start: &Path, strict_bazel: bool) -> Option<PathBuf> 
     })
 }
 
-/// Does `root` carry Bazel boundary grammar (i.e. is the workspace DUAL — openable by
-/// bazel — rather than razel-native)?
-pub(crate) fn root_is_dual(root: &Path) -> bool {
-    BAZEL_BOUNDARY.iter().any(|m| root.join(m).is_file())
-}
-
-/// Resolve a package directory to its build file. Encodes two rules:
-/// - **Bazel precedence** (ground truth 2026-06-12: both files present ⇒ `query` serves
-///   the BUILD.bazel target): `BUILD.bazel` over `BUILD`.
-/// - **The E-mode XOR** (§3c): `BUILD.razel` is a package's sole grammar — coexistence
-///   with bazel grammar is an error. Under `strict_bazel`, `.razel` files are invisible
-///   (no package, no error — bazel's view).
+/// Resolve a package directory to its build file: `BUILD.bazel` over `BUILD`
+/// (bazel precedence — both present ⇒ `query` serves the BUILD.bazel target).
 ///
-/// `Ok(None)` = not a package (no build file at all, from this mode's viewpoint).
+/// `BUILD.razel` removed (2026-06-18): razel no longer recognizes a package-level
+/// `.razel` grammar. It polluted the target space — one `BUILD.razel` made its targets
+/// bazel-invisible and (via the old boundary guard) forced the whole module razel-native,
+/// which defeats the bazel-compliance goal. `_strict_bazel` is retained as the dormant
+/// `.razel`-visibility hook for the `MODULE.razel` settings idea (not yet wired live).
+///
+/// `Ok(None)` = not a package (no build file).
 pub fn resolve_build_file(
     pkg_dir: &Path,
-    strict_bazel: bool,
+    _strict_bazel: bool,
 ) -> Result<Option<PathBuf>, String> {
-    let bazel = ["BUILD.bazel", "BUILD"].iter().map(|f| pkg_dir.join(f)).find(|p| p.is_file());
-    if strict_bazel {
-        return Ok(bazel);
-    }
-    let razel = pkg_dir.join("BUILD.razel");
-    if razel.is_file() {
-        if let Some(b) = bazel {
-            return Err(format!(
-                "package `{}` has both BUILD.razel and {} — BUILD.razel is a package's \
-                 SOLE grammar (E-mode XOR): remove one, or move the razel-native targets \
-                 to their own package",
-                pkg_dir.display(),
-                b.file_name().unwrap_or_default().to_string_lossy(),
-            ));
-        }
-        return Ok(Some(razel));
-    }
-    Ok(bazel)
-}
-
-/// The boundary guard (§3c rule 2), pure for testability: in a DUAL workspace, an
-/// E-package must sit under a `.bazelignore`d subtree, else the two engines disagree on
-/// package boundaries (glob/subpackage shadowing). Returns the diagnostic when the
-/// guard trips. Warning during S1 only; a hard ERROR since S3d.
-pub fn e_mode_guard(
-    root_is_dual: bool,
-    bazelignore: Option<&str>,
-    pkg: &str,
-) -> Option<String> {
-    if !root_is_dual {
-        return None; // razel-native module: bazel can't open the workspace at all.
-    }
-    let covered = bazelignore.is_some_and(|src| {
-        src.lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .any(|l| pkg == l || pkg.starts_with(&format!("{l}/")))
-    });
-    if covered {
-        return None;
-    }
-    Some(format!(
-        "razel-native package `{pkg}` (BUILD.razel) is not under a .bazelignore'd \
-         subtree of this dual workspace — bazel and razel would disagree on package \
-         boundaries there. Add the subtree to .bazelignore. (E-mode boundary guard, \
-         §3c rule 2.)"
-    ))
+    Ok(["BUILD.bazel", "BUILD"].iter().map(|f| pkg_dir.join(f)).find(|p| p.is_file()))
 }

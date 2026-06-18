@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 grazel-node = { version = "0.1.0", path = "../grazel-node" }
-razel-cli = { version = "0.1.0", path = "../razel-cli" }
+razel-cli = { package = "razel", version = "0.1.0", path = "../razel-cli" }
 razel-daemon = { version = "0.1.0", path = "../razel-daemon" }
 razel-wire = { version = "0.1.0", path = "../razel-wire" }
 

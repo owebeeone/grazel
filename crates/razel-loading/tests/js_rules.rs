@@ -15,14 +15,14 @@ fn fixture(tag: &str) -> std::path::PathBuf {
     root
 }
 
-/// `js_binary` in a BUILD.razel package: one action emitting the launcher (which
+/// `js_binary` in a BUILD.bazel package: one action emitting the launcher (which
 /// execs the SOURCE entry — node's walk-up finds the workspace node_modules);
 /// DefaultInfo = the launcher.
 #[test]
 fn js_binary_analyzes_with_launcher() {
     let ws = fixture("bin");
     write(
-        &ws.join("srv/BUILD.razel"),
+        &ws.join("srv/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
          js_binary(name = \"hello\", entry_point = \"server.js\")\n",
     );
@@ -47,7 +47,7 @@ fn js_binary_analyzes_with_launcher() {
 fn js_binary_minimal() {
     let ws = fixture("nodeps");
     write(
-        &ws.join("a/BUILD.razel"),
+        &ws.join("a/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
          js_binary(name = \"x\", entry_point = \"x.js\")\n",
     );
@@ -63,7 +63,7 @@ fn js_binary_minimal() {
 fn ts_project_lite_single_tsc_action() {
     let ws = fixture("ts");
     write(
-        &ws.join("lib/BUILD.razel"),
+        &ws.join("lib/BUILD.bazel"),
         "load(\"@aspect_rules_ts//ts:defs.bzl\", \"ts_project\")\n\
          ts_project(name = \"core\", srcs = [\"a.ts\", \"b.ts\"])\n",
     );
@@ -89,7 +89,7 @@ fn ts_project_lite_single_tsc_action() {
 fn js_binary_requires_entry() {
     let ws = fixture("noentry");
     write(
-        &ws.join("a/BUILD.razel"),
+        &ws.join("a/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_binary\")\n\
          js_binary(name = \"x\")\n",
     );
@@ -105,7 +105,7 @@ fn js_binary_requires_entry() {
 fn js_library_groups_srcs() {
     let ws = fixture("jslib");
     write(
-        &ws.join("lib/BUILD.razel"),
+        &ws.join("lib/BUILD.bazel"),
         "load(\"@aspect_rules_js//js:defs.bzl\", \"js_library\")\n\
          js_library(name = \"l\", srcs = [\"a.js\", \"b.js\"])\n",
     );

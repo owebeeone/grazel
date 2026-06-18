@@ -166,7 +166,7 @@ fn cmd_help(args: &[String]) {
             }
         }
         if c.args.contains("target") {
-            println!("\n  <target>   //pkg:name (workspace) or name/:name (single BUILD/.razel package)");
+            println!("\n  <target>   //pkg:name (workspace) or name/:name (single-package BUILD/BUILD.bazel)");
         }
         return;
     }
@@ -1178,14 +1178,14 @@ fn build_one(
         build_workspace_with(&o.workspace, target_arg, cache, flags)
     } else {
         // Bare name / :name → single-package build from the workspace's root package.
-        // Route through the canonical resolver so E-mode's `BUILD.razel` is found (and its
-        // XOR with bazel grammar enforced), not just BUILD/BUILD.bazel (RG 0011).
+        // Route through the canonical resolver (BUILD.bazel over BUILD) so the bare-name
+        // path matches package discovery, not a separate ad-hoc probe (RG 0011).
         let name = target_arg.rsplit(':').next().unwrap_or(target_arg);
         let build_path = match resolve_build_file(&o.workspace, flags.strict_bazel) {
             Ok(Some(p)) => p,
             Ok(None) => {
                 eprintln!(
-                    "razel build: no BUILD, BUILD.bazel, or BUILD.razel in {}",
+                    "razel build: no BUILD or BUILD.bazel in {}",
                     o.workspace.display()
                 );
                 return Err(ExitCode::FAILURE);
