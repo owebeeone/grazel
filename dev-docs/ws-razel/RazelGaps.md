@@ -4,6 +4,67 @@ A running collection of things razel will need that are **not on a phase plan** 
 yet), surfaced during development. Promote an item into a plan (e.g. `RazelStarlarkBoundaryPlan.md`
 §10) when it's scheduled. Keep entries actionable: what, why, and the known specifics.
 
+## `bazel` feature-parity gaps — verified inventory (2026-06-18)
+
+The cross-cutting map of substantial **`bazel` capabilities razel does not (yet) match**, verified
+against the code on 2026-06-18. razel's posture is *reimplement a slice natively + stay a valid bazel
+workspace by recognizing-but-not-acting-on the rest*, so each gap is one of three kinds:
+**[unimpl]** not built · **[inert]** parsed/recognized for compat but a no-op · **[non-goal]**
+deliberately outside the reimplement-a-slice model. Items with a deep entry below are cross-linked;
+the rest are specified here. (Two things this pass *corrected*: razel **does** have a `test` verb that
+runs tests, and **does** have a Starlark `rule()`/`provider()`/`aspect()` engine — so "no Starlark
+rules" / "no test runner" would both be wrong.)
+
+- **Cross-compilation — [unimpl], the meatiest.** `host == target` everywhere (`cargo_support.rs`,
+  `rust_rules.rs`, `cargo_rules.rs`); `--platforms` is recognized-and-diagnosed but **inert**
+  (`razel-cli/src/lib.rs:1447`). No exec/target config split, no transitions. A real design effort
+  (exec/target keying + the transition machinery), explicitly Phase-6-or-later.
+- **Hermetic toolchain fetch — [unimpl].** razel runs the **system** `rustc`/`cc` (the process-wrapper
+  takes `--rustc=PATH`; `rust_rules.rs:86` "razel's system rustc"; `cargo_rules.rs` `RUSTC={rustc()}`).
+  `register_toolchains` is a recorded builtin (`rules/globals.rs:245`) but nothing **downloads or pins**
+  a toolchain — bazel/rules_rust fetch a pinned toolchain; razel does not. Non-hermetic on toolchain
+  version; the cache-correctness consequence is the **`## Toolchain-change cache invalidation`** entry
+  below (digest the resolved tool into the action key).
+- **Visibility ENFORCEMENT — [unimpl].** Analysis *Ignores* `visibility` (`rust_attrs.rs:42`,
+  `cargo_support.rs:78`); `query visible()` landed the read side (2026-06-18, `RazelCrateUniverseDesign`
+  §12) but a build will **not fail** on a visibility violation. `package_group` +
+  `package(default_visibility)` are still loud-named-deferred even for query.
+- **Third-party ruleset fetch + `.bzl` execution — [partial → non-goal at bazel fidelity].** razel HAS
+  a Starlark `rule()`/`provider()`/`aspect()` engine (user `implementation=` impls run, providers/
+  `DefaultInfo`/select — "L2/L5 MVP", `decls/store.rs`, `provider_values.rs`). BUT the standard rulesets
+  (rules_rust/rules_cc) are **native reimplementations + host-repo stubs**, not fetched-and-run `.bzl`;
+  and `repository_rule` is a **spec RECORDER** (`fetch.rs` — no network, no `repository_ctx`), so repo
+  rules don't actually fetch (the `@crates` path is a hand-built `RepoFetch`). Consequence:
+  `buildfiles()`/`loadfiles()`/`rbuildfiles()` can't reproduce bazel's transitive `.bzl` load closure
+  (`RazelCrateUniverseDesign` §12 "Accepted DEVIATIONS"). "Fetch an arbitrary ruleset and run its
+  `.bzl` at bazel fidelity" is not the model.
+- **`rust_test` execution — [unimpl].** `razel test` genuinely runs (build → exec the test binary →
+  `testlogs/<pkg>/<name>/test.log` in bazel's shape, `razel-cli/src/lib.rs:827`), so sh/cc tests run —
+  but `rust_test` analyzes to an **empty target** (`rust_rules.rs:247`), so the `rustc --test` harness
+  is never emitted and `razel test //x:some_rust_test` yields "no runnable test output". The named
+  "test-verb rung".
+- **Remote execution / caching (RBE) — [non-goal].** Local only; no RBE/bytestream/gRPC action
+  protocol (the `grpc`/`remote_execution` hits are vendored host-repo `.bzl` stubs, not razel impl).
+  Distribution is the future **iroh/grazel** layer (a local `razel-daemon` exists; it is not RBE).
+- **bzlmod / module resolution — [unimpl].** `lock.rs` is a `MODULE.bazel.lock` **reader** — razel
+  *consumes* bazel's already-resolved lock; it does not run the registry / resolve the module-version
+  graph itself. bzlmod resolution = `RazelFetchPlan` §4; the not-locked-out doctrine = `RazelReleaseSpike`
+  §3b.
+- **`.bazelrc` / `.razelrc` processing — [unimpl].** Only the `--bazelrc` flag *name* is recognized; no
+  rc-file parsing → see **`## bazelrc / razelrc processing`** below (now correctness-relevant, not just
+  ergonomics).
+- **Language breadth — [partial].** rust is deep; cc is native (two backends, only Adopt-Bazel
+  golden-tested → see **`## Native cc path parity`**); js/py/sh are partial; **java is a carve-out** (the
+  two standing graph-parity reds). Not the full rules ecosystem.
+
+**Also tracked as their own deep entries below / elsewhere:** C++20 modules (`## C++20 modules`),
+first-class `fmt`/`lint` goals (`## Extensible cross-cutting goals`), the loader↔DDS parallel spine
+(`## Parallel-spine reconciliation`), `--[no]implicit_deps` query fidelity (`RazelCrateUniverseDesign`
+§13). **Calibration:** the genuinely substantial roadmap gaps are **cross-compile**, **toolchain
+fetch/hermeticity**, **bzlmod resolution**, and **`rust_test` execution**; visibility-enforcement +
+bazelrc are bounded; RBE and full third-party-ruleset fidelity read as **non-goals** of the
+reimplement-a-slice model, not roadmap debt.
+
 ## bazelrc / razelrc processing
 
 razel must eat both `.bazelrc` (Bazel-compatible) and `.razelrc` (razel extensions). Today only the
