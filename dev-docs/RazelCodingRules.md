@@ -2,7 +2,9 @@
 
 Short, enforceable rules. Each is a recurring failure mode the A0..B4 review caught; the goal is to
 *prevent* the class, not re-find instances. Companion to `AGENTS.md` (TDD/workflow) + `CLAUDE.md`.
-Format: **RULE** — why — `[findings]`.
+Format: **RULE** — why — `[findings]`. The final section carries the durable **V2 architecture
+invariants** (the load-bearing seams, consolidated here from the now-archived V2 arch-of-record;
+current enforcement status in `RazelDevStatus.md` §6).
 
 ## State & lifecycle
 1. **No process-global *request/analysis* state — compile-time-constant data is fine.** The sin is **not
@@ -91,3 +93,26 @@ Format: **RULE** — why — `[findings]`.
 ## Discipline (carried from AGENTS.md, reinforced)
 19. **Roll-build green-gated; commits ≤3 lines; commit only when asked.** A green test that passes by
     cutting a corner is a regression in disguise — verify the test proves what it claims before tagging.
+
+## Architecture invariants (V2 — the durable seams)
+Consolidated from the archived V2 arch-of-record (`history/RazelV2FinalArchProposal.md` +
+`history/RazelV2Contracts.md`). These are the load-bearing architectural rules; AD2 + the boundary
+rule + no-language-in-core are **CI-enforced** today via `cargo xtask gates` (status:
+`RazelDevStatus.md` §6). Rules 1–2 (no ambient state), 4 (no stranded infra), 6 (no language in
+core), 9–10 (consumer-rooted folds / declared order) are the code-smell faces of these same seams.
+20. **Depend DOWN toward the spine.** The crate DAG has one dependency rule: everything depends down
+    toward `razel-dds` (L1); the spine imports `razel-core` + `razel-wire` **only** — never an
+    adapter / engine / rulepack / CLI / MCP / mesh / Starlark surface. That inversion keeps the spine
+    from becoming the next gravity well. *Gate:* the `razel-dds` boundary check + the grazel-arrow
+    check (no `razel-*`→grazel/iroh). `[AD2 / V2 §3 / S0]`
+21. **Forcing: producers RETURN, never write.** A razel-authored extension point (a rule-pack `lower`,
+    a matcher, a derivation) takes a **read-only** fact view (`DdsRead`/`&FactView`) and **returns**
+    its facts; only the assembler / engine-commit code holds the writer (`DdsWrite`). No reachable
+    mutable store, no globals — the imperative shortcut must not type-check; the easy path must be the
+    *forced* path. (Live note: the `razel-dds` read/write wall is the parked spine; the live
+    `razel-loading` producers are pure-returning but don't yet route through it — rule 4.) `[AD3 / V2 §0]`
+22. **Canonical keys + deterministic encoding for anything hashed / memoized / merged.** No bare
+    display-string keys (use typed keys — rule 18); depsets carry explicit order (rule 10), sets sort
+    by canonical element encoding, action argv is declared-order + env sorted-by-key, CBOR is canonical
+    (re-encode byte-identical). Required because facts/providers are content-keyed for early-cutoff and
+    merge across the mesh — order-dropping breaks both. `[V2 §1 / §10]`
