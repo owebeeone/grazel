@@ -638,6 +638,10 @@ graph razel has; the rest are deferred (named, not silently dropped).
 | `filter(regex, x)` | filter the set by a regex over labels |
 | `attr(name, regex, x)` | filter by the canonical stringification of a `RawAttr` (§11.1) |
 | `labels(attr, x)` | the **raw** label literals of `attr` (§ below) |
+| `siblings(x)` | every target in x's package(s) — Bazel's `:*` per package (P6) |
+| `same_pkg_direct_rdeps(x)` | same-package targets that directly depend on x (P6) |
+| `tests(x)` | the test rules in x, expanding `test_suite` into its members (P6) |
+| `visible(predicate, x)` | the targets in x visible to every target in predicate (P6) |
 | set algebra | `x + y`, `x - y`, `x intersect y`, `x union y`, `let v = e in e`, `( … )` |
 
 **`kind()` / `--output=label_kind` strings (review 55-4 P1-kind + A-1 P2-kind), verified against
@@ -661,19 +665,41 @@ deps/labels asymmetry is literally that one parameter: `deps()` = `includeSelect
 result is attr-specific, the contract is **per-attr goldens** (at minimum `labels(deps,…)` and
 `labels(target_compatible_with,…)` on blake3), not one recursive walk.
 
-**Flags / output (v1):** `--output=label` (default) / `label_kind`. **`--[no]implicit_deps`
-defaults to `--implicit_deps` (true)** — Bazel 9.1.1's verified default — but the **core q-goldens
-run with `--noimplicit_deps`** (§13) to decouple from implicit-label fidelity, which is its own
-rung. `--cbor` is **deferred** (§13), not a v1 surface.
+**Flags / output:** `--output=label` (default) / `label_kind` / `package` / `graph` (the last two
+P6). **`--[no]implicit_deps` defaults to `--implicit_deps` (true)** — Bazel 9.1.1's verified
+default — but the **core q-goldens run with `--noimplicit_deps`** (§13) to decouple from
+implicit-label fidelity, which is its own rung. `--output=build`/`xml`/`proto` + `--cbor` are
+**deferred deviations** (see below + §13), not a v1 surface.
 
-**Deferred (named, with reason):**
-- `tests(x)` — needs `test_suite` expansion + suite tags + `manual` handling + finer kind
-  classification than `Library/Binary/Test`. (Own rung.)
-- `--output=build` — needs a stable renderer over the **macro-expanded loaded** target (`RawAttr`,
-  §11.1), not source text. `--output=package` — package metadata + deterministic formatting.
-  `--output=graph` — graphviz formatting. `--output=proto`/`xml`. (Each its own rung, §13.)
-- `cquery` (the *configured/analyzed* graph — a separate verb over Part A's analyzed layer),
-  `buildfiles()`/`loadfiles()`, `siblings()`, `visible()`, `rbuildfiles()`.
+**Implemented since v1 (Phase 6, each parity-gated vs LIVE `bazel query`):** `tests(x)` (with
+`test_suite` expansion), `siblings(x)`, `same_pkg_direct_rdeps(x)`, `visible(predicate, x)` (a
+package-scoped visibility model); `--output=package` and `--output=graph`. See the `live_query_parity`
+battery + `RazelCrateUniverseCheckpoints.md`.
+
+**Accepted DEVIATIONS (Phase-6 close-out — razel intentionally does NOT match `bazel query` here):**
+- **`buildfiles()` / `loadfiles()` / `rbuildfiles()` — ARCHITECTURAL.** Bazel returns the transitive
+  `.bzl` **load closure** (the BUILD file + every `.bzl` it transitively `load()`s — 80+
+  rules_cc/rules_rust/skylib internal files for a single `rust_library`). razel **reimplements** the
+  rule logic natively in Rust and **stubs the `.bzl`**, so it never loads that closure — the graph
+  these verbs report **does not exist** in razel's model. Not a renderer gap; a deliberate model
+  difference, and no faithful result is possible without running the real rule `.bzl` (which razel
+  does not). **Won't-fix in razel's reimplemented-rules model.**
+- **`--output=build` / `--output=xml` — PROVENANCE.** Both embed the target's **source location**
+  (`# <BUILD>:line:col`) and the **rule-definition site** (`Rule rust_library defined at
+  …/rust.bzl:925`). razel stubs `rust.bzl` and tracks **no source locations**, so the provenance is
+  unreproducible. The macro-expanded `RawAttr` STANZA is available; a stanza-only renderer (no comment
+  blocks) would itself be a documented deviation — consistent with the rust-argv deviation discipline
+  (§9). **Deferred; ships only with a stanza-vs-provenance deviation policy if pulled forward.**
+- **`--output=proto` — WIRE CONTRACT.** A binary schema; like `--cbor` (§13) it would mint a wire
+  contract — **not a v1 surface.**
+- **`visible()` sub-deviations:** `package_group` membership specs (`//pkg:group`) and
+  `package(default_visibility=…)` are **loud, NAMED deferrals** — the implemented `visible()` covers
+  `//visibility:public|private`, `//pkg:__pkg__`, `//pkg:__subpackages__`, and same-package; a
+  `package_group` spec returns a named error, not a wrong answer.
+- **`--[no]implicit_deps` fidelity** — the core goldens run `--noimplicit_deps`; full
+  implicit/toolchain-label parity is its own named rung with an allowlisted-deviation list (§13).
+- **`cquery`** — a separate verb over Part A's *analyzed/configured* graph; **out of query-v1 scope**
+  (a different surface, not a deviation).
 
 ## 13. `razel query` — execution
 

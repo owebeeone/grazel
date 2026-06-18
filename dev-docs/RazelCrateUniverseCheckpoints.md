@@ -817,27 +817,30 @@ Gate: razel-query lib 30/0 (incl 2 `visible` unit tests + the package_group defe
 `package(default_visibility)` (loud-named); the `visibility` attr is QUERY-captured but still
 analysis-Ignored.
 
-## Phase 6 — the remaining fork (query verbs DONE; what's left needs a steer)
+## Phase 6 — CLOSED (2026-06-18): query track complete + accepted deviations
 
-`visible` was the last cleanly-autonomous query rung (now done). Empirically confirmed (probed
-`bazel query` + the loader), everything still open carries a **design call or substantial infra**,
-NOT a cheap rung — surface to Gianni, don't bulldoze the seam:
-- **`--output=build`** — bazel emits 3 comment blocks razel can't reproduce (the `# BUILD:line:col`
-  provenance + "Rule X instantiated at" + "Rule rust_library defined at `…/rust.bzl:925`"): razel
-  REIMPLEMENTS the rules in Rust and stubs the `.bzl`, so it has no source-location / `.bzl`-definition
-  to emit. A stanza-only renderer is feasible but needs a **provenance-deviation policy** (Gianni's
-  call, like the cc `CppModuleMap` omit), and the general attr-formatting (selects/dicts/escaping) is
-  unbounded beyond the corpus. **DEFERRED — named.**
-- **`buildfiles`/`loadfiles`/`rbuildfiles`** — return bazel's ENTIRE transitive `.bzl` load closure
-  (80+ rules_cc/rules_rust/skylib internal files). razel never loads those (it stubs them), so it
-  CANNOT reproduce the closure — an **architectural wall**, not a deviation. Needs a design call on
-  what these even MEAN in razel's stubbed-rules model. **BLOCKED — named.**
-- **`visible(x, y)`** — **DONE** (`7ede20b`, see the section above). The visibility was already
-  query-captured, so it was a clean autonomous rung (not the seam decision first feared); only
-  `package_group` + `package(default_visibility)` stay loud-named-deferred.
-- **`--output=proto`/`xml`** — each a full bazel-schema'd renderer (proto is binary → no textual
-  golden-diff; `--cbor`'s "mints a wire contract §13" concern partially applies). Substantial, low
-  consumer value. **DEFERRED — named.**
-- **Build track (meatiest):** `rerun-if` narrowing (dynamic-dep model), cross-compilation (exec/target
-  split + transitions), the build-script long tail, richer `DEP_*` — large, design-heavy, explicitly
-  Gianni-steered. **DEFERRED — named.**
+**Decision (Gianni): close out Phase 6 — document the remainder as deviations.** The query-verb track
+is COMPLETE and parity-gated (Q4/Q5 + `--output=graph` + `visible`, this session); every supported
+verb/output rides live-`bazel query` parity. The rest are now **accepted deviations**, recorded
+authoritatively in `RazelCrateUniverseDesign.md` §12 ("Accepted DEVIATIONS"). What razel deliberately
+does NOT match `bazel query` on, with the reason:
+- **`buildfiles`/`loadfiles`/`rbuildfiles` — ARCHITECTURAL (won't-fix in this model).** They return
+  bazel's transitive `.bzl` LOAD closure (80+ rules_cc/rules_rust/skylib files for one rule); razel
+  reimplements the rules in Rust and STUBS the `.bzl`, so that load graph does not exist in its model.
+  No faithful result without running the real rule `.bzl` (which razel does not).
+- **`--output=build`/`xml` — PROVENANCE.** Both embed the source location + the `.bzl`-definition
+  site; razel stubs `rust.bzl` and tracks no source locations. The macro-expanded `RawAttr` stanza is
+  available, but a stanza-only renderer ships only with a documented provenance-deviation policy (like
+  the cc `CppModuleMap` / rust-argv deviations, §9). Not pursued in v1.
+- **`--output=proto` — WIRE CONTRACT** (binary; like `--cbor`, §13). Not a v1 surface.
+- **`visible()` sub-deviations:** `package_group` + `package(default_visibility)` stay loud-named
+  deferrals (the verb covers public/private/`__pkg__`/`__subpackages__` + same-package).
+- **`--[no]implicit_deps` fidelity** — its own named rung with an allowlisted-deviation list (§13).
+
+**NOT a query deviation — separate future work (out of Phase 6 scope):** the **build track** —
+`rerun-if` narrowing (dynamic-dep model), cross-compilation (exec/target split + transitions), the
+build-script long tail, richer `DEP_*`. Large, design-heavy, explicitly Gianni-steered; promote into
+its own plan when scheduled. **Perf review** (deferred until after Phase 6, plan §"Perf") is now DUE —
+re-baseline with `xtask tfload` + the `PL` scaling gate before further build-track work. Phase tag
+`razelv3-rust/p6` not yet cut (RR's `BUILD.razel`-removal lane has uncommitted tree changes; tag on a
+coherent state).

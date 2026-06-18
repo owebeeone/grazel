@@ -631,7 +631,12 @@ readers.
 ## Phase 6 — Named-deferred backlog (not decomposed — listed with reason)
 
 Per the design's *deferred, named* discipline (§12/§13/§10). Each becomes its own plan when pulled
-forward:
+forward.
+
+**Query track CLOSED (2026-06-18, Gianni):** the supported query surface is complete + live-bazel
+parity-gated; the remaining query items are **accepted deviations** recorded in
+`RazelCrateUniverseDesign.md` §12 ("Accepted DEVIATIONS") — not pursued further. The **build** items
+below remain open future work (own plans when scheduled); the post-Phase-6 **perf review is now due**.
 
 - **Query (q5+):** `tests()` (**DONE — P6.Q5, parity-gated**); `--output=` `package` (**DONE —
   P6.Q4**) + `graph` (**DONE — P6 graph rung, unfactored + set-gated**); `--output=build`/`proto`/`xml`
