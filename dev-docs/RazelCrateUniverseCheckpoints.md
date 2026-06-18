@@ -367,7 +367,7 @@ parity normalizer. Wiring:
   (verify-first, no speculative edits).
 
 **Remaining for `razelv3-rust/p3`:** P3.6→P3.10 done (build-script pipeline wired end-to-end at
-analysis). **P3.11/P3.12 are SUPERSEDED by [`RazelRustParityPlan.md`](RazelRustParityPlan.md)**
+analysis). **P3.11/P3.12 are SUPERSEDED by [`RazelRustParityPlan.md`](history/RazelRustParityPlan.md)**
 (2026-06-16) — the P3.11 probe found razel's rust argv is a lean ORIGINAL (`19321b7`), structurally
 far from rules_rust's (syntax + the hashed-output model + ~15 flags), and rust parity was never gated
 (cc/java have a parity test, rust never did). So blake3 parity is a faithful-argv rework with a rust

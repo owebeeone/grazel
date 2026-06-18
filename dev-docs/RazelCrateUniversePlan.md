@@ -528,7 +528,7 @@ check (R5).
   `--extern`; `:build_script_build` is never passed as `--extern`. Touch `deps.rs:38` +
   `rust_rules.rs`. Gate: **unit** — the lib's rustc action consumes the flags-file, not an extern.
 
-- **P3.11 / P3.12 — SUPERSEDED by [`RazelRustParityPlan.md`](RazelRustParityPlan.md)** (2026-06-16).
+- **P3.11 / P3.12 — SUPERSEDED by [`RazelRustParityPlan.md`](history/RazelRustParityPlan.md)** (2026-06-16).
   The P3.11 probe (`razel build @crates//:blake3` → `unknown target`) found these were under-scoped:
   razel's rust rustc argv is a lean *original* shape (`19321b7`), structurally far from rules_rust's
   (syntax + the hashed-output model + ~15 flags), and rust parity was never gated (cc/java have a
