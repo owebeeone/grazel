@@ -22,3 +22,8 @@ action-graph parity plan — Phase A+B executed; inbound links updated to `histo
 Model-G** docs `GrazelProposal.md` + `GrazelForecast.md` (the OLD clean-slate-surface idea per their
 own naming notes — superseded by, and UNRELATED to, the current grazel distribution in
 `../RazelPublicSurfaces.md` §1b).
+
+**The RR/RG two-lane split apparatus** — retired into `rr-rg-split/` (the persona prompts + the
+cross-lane inbox coordination messages + the lane READMEs). The split was closed 2026-06-18;
+development is single-lane now. The lanes' *technical* content stays live under `../ws-razel/` +
+`../ws-grazel/`. See `rr-rg-split/README.md`.
