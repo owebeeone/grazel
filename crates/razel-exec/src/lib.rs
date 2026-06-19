@@ -26,6 +26,26 @@ pub struct RunResult {
     pub outputs: Vec<PathBuf>,
 }
 
+/// A canonical output manifest: `(path, digest)` per PRESENT declared output, sorted by path,
+/// unique. Same shape as the engine's `NodeValue::Manifest` (C1) — a transparent `Vec<(String,
+/// Digest)>` alias, so `razel-build`'s `add_action` closure wraps an [`execute_action`] result
+/// with no conversion and `razel-exec` needs no dependency on `razel-engine`.
+pub type Manifest = Vec<(String, Digest)>;
+
+/// The outcome of [`execute_action`] (C2). Carries the output [`Manifest`] so the engine's
+/// output-level early cutoff has teeth. A failure carries its MESSAGE (composes with both the
+/// warm engine's `Result<_, ComputeError>` action closure and the cold path's error handling);
+/// the boundary never returns `io::Result` for an action failure — only `Failed`.
+#[derive(Debug)]
+pub enum ExecOutcome {
+    /// Served from cache — `actions_executed += 0`, `action_cache_hits += 1`.
+    Cached(Manifest),
+    /// Ran in the sandbox — `actions_executed += 1`.
+    Executed(Manifest),
+    /// Nonzero action exit, or an internal exec error; the string describes it.
+    Failed(String),
+}
+
 /// A content-addressed output cache: `<root>/<action-key-hex>/<output-paths>`.
 pub struct Cache {
     root: PathBuf,
@@ -103,6 +123,44 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Canonical digest of an output (or input) path: a FILE's content blake3, or a DIRECTORY's
+/// deterministic tree-hash — sorted `(relpath, file-digest)` pairs concatenated `relpath\0hex\0`
+/// then blake3'd. ABSENT → `None`. This is the ONE path-digest algorithm: `razel-build`'s input
+/// `digest_input` is migrated (WS-C) to call this, so a generated directory consumed downstream
+/// compares byte-for-byte with the same tree read as an input (C2 §4.2 / the C1 manifest).
+pub fn digest_path(path: &Path) -> Option<Digest> {
+    let md = fs::metadata(path).ok()?;
+    if md.is_dir() {
+        let mut files: Vec<(String, Digest)> = Vec::new();
+        digest_tree_into(path, path, &mut files)?;
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut buf = Vec::new();
+        for (rel, dg) in files {
+            buf.extend_from_slice(rel.as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(dg.to_hex().as_bytes());
+            buf.push(0);
+        }
+        Some(Digest::of(&buf))
+    } else {
+        fs::read(path).ok().map(|b| Digest::of(&b))
+    }
+}
+
+fn digest_tree_into(root: &Path, dir: &Path, acc: &mut Vec<(String, Digest)>) -> Option<()> {
+    for entry in fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let p = entry.path();
+        if fs::metadata(&p).ok()?.is_dir() {
+            digest_tree_into(root, &p, acc)?;
+        } else {
+            let rel = p.strip_prefix(root).ok()?.to_string_lossy().into_owned();
+            acc.push((rel, Digest::of(&fs::read(&p).ok()?)));
+        }
+    }
+    Some(())
+}
+
 /// Spawn the action's `argv` in `exec_root` with a default-deny env (only `action.env`).
 pub fn run_action(action: &Action, exec_root: &Path) -> io::Result<i32> {
     let (prog, rest) = action
@@ -135,17 +193,29 @@ pub fn build_action_in(
     exec_root: &Path,
     sandbox: &mut Sandbox,
 ) -> io::Result<RunResult> {
+    let (cached, exit_code) = restore_or_run(action, cache, exec_root, sandbox)?;
+    Ok(RunResult {
+        exit_code,
+        cached,
+        outputs: action.outputs.iter().map(|o| exec_root.join(o)).collect(),
+    })
+}
+
+/// The shared executor core (C2): cache hit → restore; miss → materialize declared inputs, run
+/// isolated, capture + store on success. Returns `(cached, exit_code)` and does NOT digest
+/// outputs, so the cold [`build_action_in`] path is byte-for-byte unchanged. The ONE seam the
+/// cold path (`run_one_target`) and the warm engine closure (`add_action`) share — RULE 3
+/// (tested == run), RULE 5 (one owner); the two paths cannot drift.
+fn restore_or_run(
+    action: &Action,
+    cache: &Cache,
+    exec_root: &Path,
+    sandbox: &mut Sandbox,
+) -> io::Result<(bool, i32)> {
     let key = action.content_key();
-    let out_paths = || action.outputs.iter().map(|o| exec_root.join(o)).collect();
-
     if cache.restore(&key, &action.outputs, exec_root)? {
-        return Ok(RunResult {
-            exit_code: 0,
-            cached: true,
-            outputs: out_paths(),
-        });
+        return Ok((true, 0));
     }
-
     // Miss: materialize only declared inputs, run isolated, capture outputs.
     let inputs: Vec<String> = action.inputs.keys().cloned().collect();
     sandbox.sync_inputs(exec_root, &inputs)?;
@@ -155,11 +225,42 @@ pub fn build_action_in(
         sandbox.capture_outputs(exec_root, &action.outputs)?;
         cache.store(&key, &action.outputs, exec_root)?;
     }
-    Ok(RunResult {
-        exit_code: code,
-        cached: false,
-        outputs: out_paths(),
-    })
+    Ok((false, code))
+}
+
+/// Execute one action and return its [`ExecOutcome`] + output [`Manifest`] (C2). The warm
+/// engine's `add_action` closure calls THIS and maps `Cached`/`Executed` → `Ok(Manifest)` and
+/// `Failed(msg)` → `Err(msg)`; the cold path uses [`build_action_in`]. Same core
+/// (`restore_or_run`), so the warm and cold executions cannot drift. The output manifest is
+/// digested only when the action actually restores/runs — on a true no-op the engine's early
+/// cutoff firewalls the action node, so this is never called.
+pub fn execute_action(
+    action: &Action,
+    cache: &Cache,
+    exec_root: &Path,
+    sandbox: &mut Sandbox,
+) -> ExecOutcome {
+    match restore_or_run(action, cache, exec_root, sandbox) {
+        Ok((true, _)) => ExecOutcome::Cached(output_manifest(action, exec_root)),
+        Ok((false, 0)) => ExecOutcome::Executed(output_manifest(action, exec_root)),
+        Ok((false, code)) => {
+            ExecOutcome::Failed(format!("action failed (rc={code}): {:?}", action.argv))
+        }
+        Err(e) => ExecOutcome::Failed(format!("razel internal: exec error: {e}")),
+    }
+}
+
+/// The canonical output manifest: `(path, digest)` for each PRESENT declared output (absent
+/// outputs omitted — A7), sorted by path. File digest = content blake3; directory digest = the
+/// deterministic tree-hash, both via [`digest_path`].
+fn output_manifest(action: &Action, exec_root: &Path) -> Manifest {
+    let mut m: Manifest = action
+        .outputs
+        .iter()
+        .filter_map(|o| digest_path(&exec_root.join(o)).map(|dg| (o.clone(), dg)))
+        .collect();
+    m.sort_by(|a, b| a.0.cmp(&b.0));
+    m
 }
 
 #[cfg(test)]
@@ -328,5 +429,74 @@ mod tests {
         assert_eq!(r.exit_code, 0, "cc failed");
         assert!(exec.path().join("a.o").exists());
         assert!(fs::metadata(exec.path().join("a.o")).unwrap().len() > 0);
+    }
+
+    // ---- C2: execute_action / ExecOutcome / Manifest ----
+
+    #[test]
+    fn execute_action_reports_cached_executed_failed() {
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let exec = tempfile::tempdir().unwrap();
+        let mut sb = Sandbox::transient(&exec.path().join(".razel-sandbox"), "k").unwrap();
+        let action = Action {
+            argv: vec!["/bin/sh".into(), "-c".into(), "echo hi > out.txt".into()],
+            outputs: vec!["out.txt".into()],
+            env: path_env(),
+            ..Default::default()
+        };
+        // miss → Executed(manifest)
+        match execute_action(&action, &cache, exec.path(), &mut sb) {
+            ExecOutcome::Executed(m) => {
+                assert_eq!(m.len(), 1);
+                assert_eq!(m[0].0, "out.txt");
+            }
+            other => panic!("expected Executed, got {other:?}"),
+        }
+        // hit → Cached(manifest) in a fresh exec root
+        let exec2 = tempfile::tempdir().unwrap();
+        let mut sb2 = Sandbox::transient(&exec2.path().join(".razel-sandbox"), "k").unwrap();
+        assert!(matches!(
+            execute_action(&action, &cache, exec2.path(), &mut sb2),
+            ExecOutcome::Cached(_)
+        ));
+        // failing action → Failed(msg) carrying the rc
+        let boom = Action {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 7".into()],
+            outputs: vec![],
+            env: path_env(),
+            ..Default::default()
+        };
+        let exec3 = tempfile::tempdir().unwrap();
+        let mut sb3 = Sandbox::transient(&exec3.path().join(".razel-sandbox"), "b").unwrap();
+        match execute_action(&boom, &cache, exec3.path(), &mut sb3) {
+            ExecOutcome::Failed(msg) => assert!(msg.contains("rc=7"), "msg: {msg}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// G13: a directory output → one `(path, tree-hash)` entry (== `digest_path` read back); an
+    /// absent declared output → omitted (not a sentinel, not an error); entries sorted by path.
+    #[test]
+    fn manifest_has_dir_treehash_and_omits_absent_output() {
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let exec = tempfile::tempdir().unwrap();
+        let mut sb = Sandbox::transient(&exec.path().join(".razel-sandbox"), "d").unwrap();
+        let action = Action {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo f > file.out && mkdir -p d.out/sub && echo x > d.out/sub/x".into(),
+            ],
+            outputs: vec!["file.out".into(), "d.out".into(), "absent.dSYM".into()],
+            env: path_env(),
+            ..Default::default()
+        };
+        let ExecOutcome::Executed(m) = execute_action(&action, &cache, exec.path(), &mut sb) else {
+            panic!("expected Executed");
+        };
+        let paths: Vec<&str> = m.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, vec!["d.out", "file.out"]); // sorted; absent omitted
+        let dir_dg = m.iter().find(|(p, _)| p == "d.out").unwrap().1;
+        assert_eq!(Some(dir_dg), digest_path(&exec.path().join("d.out")));
     }
 }
