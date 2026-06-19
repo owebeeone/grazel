@@ -113,6 +113,10 @@ pub(crate) fn run_one_target(
         }
         if !r.cached {
             executed += 1;
+            // Progress — so a build isn't silent (Bazel/cargo-style, on stderr): the action's
+            // mnemonic + primary output as it runs.
+            let out = act.outputs.first().map(String::as_str).unwrap_or(t.name.as_str());
+            eprintln!("  {} {out}", act.mnemonic);
         }
         produced.extend(act.outputs.clone());
     }

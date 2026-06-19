@@ -582,6 +582,11 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
     let target_arg = o.positionals[0].clone();
 
+    // A build isn't silent: announce the target up front (so even a fully-cached build shows it's
+    // working before the elapsed/result lines); per-action progress streams during execution.
+    if !o.cbor {
+        eprintln!("Building {target_arg} …");
+    }
     let t0 = std::time::Instant::now();
     let result = if o.daemon {
         let socket = o
@@ -1312,7 +1317,16 @@ fn hex(bytes: &[u8]) -> String {
 /// `--bazel_build_compat`). Best-effort + idempotent; only ever replaces a symlink we own —
 /// never clobbers a real file/dir a user placed at that name.
 fn ensure_convenience_symlinks(workspace: &std::path::Path, flags: &GlobalFlags) {
-    for (link, target) in convenience_symlinks(flags) {
+    let mut links = convenience_symlinks(flags);
+    // When the build ran in the exec-root forest (`.razel-exec`, used when `@crates` is materialized),
+    // outputs land under `.razel-exec/<out>`, not the workspace — so the reported `…-out/…` paths and
+    // the `…-bin` symlink would dangle. Surface the output tree at the workspace `<out>` (like Bazel's
+    // `bazel-out` → the output base) so both resolve.
+    if workspace.join(".razel-crates").is_dir() {
+        let out = if flags.bazel_build_compat { "bazel-out" } else { "razel-out" };
+        links.push((out.to_string(), format!(".razel-exec/{out}")));
+    }
+    for (link, target) in links {
         let link_path = workspace.join(&link);
         match std::fs::symlink_metadata(&link_path) {
             Ok(m) if m.file_type().is_symlink() => {

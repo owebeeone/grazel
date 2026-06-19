@@ -50,10 +50,16 @@ pub fn build_workspace_with(
     flags: GlobalFlags,
 ) -> Result<BuildReport, String> {
     let jobs = flags.jobs;
+    let prof = std::env::var_os("RAZEL_PROFILE").is_some();
+    let ta = std::time::Instant::now();
     // B4: an external-repo top label is an ALIAS (`@crates//:blake3`) whose analysis keys the target
     // under its RESOLVED canonical name (`@@rules_rust++crate+crates__blake3-1.8.2//:blake3`). Start
     // execution from that resolved name — `collect_order` would otherwise not find the apparent alias.
     let (targets, resolved) = analyze_workspace_resolved(root, top_label, flags)?;
+    if prof {
+        eprintln!("PROFILE analyze: {:.3}s ({} targets)", ta.elapsed().as_secs_f64(), targets.len());
+    }
+    let tp = std::time::Instant::now();
     // B4: an external (`@crates`) build executes in a PROPER exec-root forest (workspace sources +
     // `external/<repo>` → the fetched repos) so external crate sources resolve at the declared path and
     // outputs land in `bazel-out/`, never the source cache. A pure-local build (no `.razel-crates`
@@ -65,7 +71,15 @@ pub fn build_workspace_with(
     } else {
         root
     };
-    execute_jobs(&targets, &resolved, exec_root, cache, jobs)
+    if prof {
+        eprintln!("PROFILE prepare_exec_root: {:.3}s", tp.elapsed().as_secs_f64());
+    }
+    let te = std::time::Instant::now();
+    let r = execute_jobs(&targets, &resolved, exec_root, cache, jobs);
+    if prof {
+        eprintln!("PROFILE execute_jobs: {:.3}s", te.elapsed().as_secs_f64());
+    }
+    r
 }
 
 
