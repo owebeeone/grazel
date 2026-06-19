@@ -28,6 +28,7 @@ razel-query = { path = "../razel-query" } # the `razel query` engine (Part B)
 razel-exec = { path = "../razel-exec" }
 razel-core = { path = "../razel-core" }
 razel-daemon = { path = "../razel-daemon" }
+razel-process-wrapper = { path = "../razel-process-wrapper" } # the `razel process-wrapper` subcommand (folded-in exec wrapper)
 
 [dev-dependencies]
 tempfile = "3"

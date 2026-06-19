@@ -241,7 +241,14 @@ impl Sandbox {
                 c
             }
         };
-        let status = cmd.current_dir(&self.dir).env_clear().envs(env).status()?;
+        // Name the program on spawn failure — a bare "No such file or directory (os error 2)" from a
+        // missing tool (e.g. an unresolved `razel-process-wrapper`) is otherwise undiagnosable.
+        let status = cmd
+            .current_dir(&self.dir)
+            .env_clear()
+            .envs(env)
+            .status()
+            .map_err(|e| io::Error::new(e.kind(), format!("cannot spawn `{prog}`: {e}")))?;
         Ok(status.code().unwrap_or(-1))
     }
 

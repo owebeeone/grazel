@@ -4,3 +4,90 @@ exports_files([
     "Cargo.toml",
     "Cargo.lock",
 ])
+
+# Top-level convenience handles for the two shipped binaries. The canonical rust_binary
+# targets live in their crates; these aliases make `bazel build //:razel` / `bazel run //:grazel`
+# work from the workspace root without duplicating the dep lists.
+alias(
+    name = "razel",
+    actual = "//crates/razel-cli:razel",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "grazel",
+    actual = "//crates/grazel-cli:grazel",
+    visibility = ["//visibility:public"],
+)
+
+# `bazel test //:test_all` — every NON-manual rust_test across the workspace.
+#
+# Manual-tagged tests are intentionally excluded (they're sandbox-hostile and run via cargo):
+# the cc/java graph-parity carve-outs (`razel-loading:{graph,java_graph}_parity_test`), the
+# node-spawning cli verbs (`razel-cli:{run,test}_verb_test`), the daemon/socket e2e
+# (`grazel-cli:ws_test_test`, `razel-cli:cli_test`), the cargo-spawning
+# `razel-build:rust_rules_test`, and `grazel-cli-lib:grazel_cli_lib_unit`.
+#
+# This is an explicit list (the named target requested); `bazel test //...` is the
+# always-current equivalent that needs no maintenance. Refresh this list when tests are
+# added: `kind("rust_test rule", //crates/...) except attr(tags, "manual", //crates/...)`.
+test_suite(
+    name = "test_all",
+    tests = [
+        "//crates/grazel-node:grazel_node_unit",
+        "//crates/razel-actions:razel_actions_unit",
+        "//crates/razel-analysis:razel_analysis_unit",
+        "//crates/razel-build:py_rules_test",
+        "//crates/razel-build:razel_build_unit",
+        "//crates/razel-build:sh_rules_test",
+        "//crates/razel-cc-toolchain:razel_cc_toolchain_unit",
+        "//crates/razel-cli:cli_build_test",
+        "//crates/razel-cli:razel_cli_unit",
+        "//crates/razel-conformance:razel_conformance_unit",
+        "//crates/razel-core:razel_core_unit",
+        "//crates/razel-daemon:razel_daemon_unit",
+        "//crates/razel-daemon:rpc_socket_test",
+        "//crates/razel-daemon:transcript_test",
+        "//crates/razel-dds:razel_dds_unit",
+        "//crates/razel-deps-engine:facts_test",
+        "//crates/razel-deps-engine:seam_test",
+        "//crates/razel-engine:razel_engine_unit",
+        "//crates/razel-exec:razel_exec_unit",
+        "//crates/razel-ir:razel_ir_unit",
+        "//crates/razel-loading:actions_mnemonic_test",
+        "//crates/razel-loading:args_fidelity_test",
+        "//crates/razel-loading:aspects_test",
+        "//crates/razel-loading:attr_schema_test",
+        "//crates/razel-loading:cc_defs_logic_test",
+        "//crates/razel-loading:cc_info_provider_test",
+        "//crates/razel-loading:cc_test_rule_test",
+        "//crates/razel-loading:characterization_test",
+        "//crates/razel-loading:cross_package_providers_test",
+        "//crates/razel-loading:demand_characterization_test",
+        "//crates/razel-loading:external_repo_test",
+        "//crates/razel-loading:fetch_extract_test",
+        "//crates/razel-loading:fetched_base_test",
+        "//crates/razel-loading:forward_ref_test",
+        "//crates/razel-loading:genrule_test",
+        "//crates/razel-loading:glob_test",
+        "//crates/razel-loading:java_defs_logic_test",
+        "//crates/razel-loading:js_rules_test",
+        "//crates/razel-loading:label_files_test",
+        "//crates/razel-loading:parallel_parity_test",
+        "//crates/razel-loading:provider_def_test",
+        "//crates/razel-loading:provider_flow_test",
+        "//crates/razel-loading:razel_build_command_line_test",
+        "//crates/razel-loading:razel_loading_unit",
+        "//crates/razel-loading:sched_seam_test",
+        "//crates/razel-loading:select_config_test",
+        "//crates/razel-loading:workspace_test",
+        "//crates/razel-parity:razel_parity_unit",
+        "//crates/razel-query:razel_query_unit",
+        "//crates/razel-rulepack:razel_rulepack_unit",
+        "//crates/razel-vfs:razel_vfs_unit",
+        "//crates/razel-wire:cbor_runtime_test",
+        "//crates/razel-wire:razel_wire_unit",
+        "//crates/razel-wire:wire_goldens_test",
+    ],
+    visibility = ["//visibility:public"],
+)

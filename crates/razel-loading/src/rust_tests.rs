@@ -46,6 +46,19 @@ mod tests {
     fn inputs_of(targets: &[AnalyzedTarget]) -> Vec<String> {
         action_of(targets).inputs.clone()
     }
+    /// The wrapper subcommand (`rustc` / `build-script`) of a wrapper-routed action argv, found by
+    /// MEANING not position — handles the self-invoke shape (`[<razel>, "process-wrapper", <sub>, …]`)
+    /// and a standalone wrapper bin (`[<…process-wrapper>, <sub>, …]`). Assert on this instead of a
+    /// hardcoded `argv[0]`/`argv[1]`, which shifts whenever the wrapper prefix changes.
+    fn wrapper_subcommand(argv: &[String]) -> Option<&str> {
+        if let Some(i) = argv.iter().position(|t| t == "process-wrapper") {
+            return argv.get(i + 1).map(String::as_str);
+        }
+        if argv.first().is_some_and(|t| t.contains("process-wrapper")) {
+            return argv.get(1).map(String::as_str);
+        }
+        None
+    }
 
     #[test]
     fn p32_compile_affecting_attrs_shape_the_argv() {
@@ -383,9 +396,8 @@ mod tests {
         let argv = argv_of(&targets);
         // B4: `version` declares a COMPILE-time Cargo env (`env!(CARGO_PKG_VERSION)` in `build.rs`),
         // so the bin compile routes through the wrapper's `rustc` subcommand —
-        // `[wrapper, rustc, --rustc=…, --env=CARGO_PKG_VERSION=…, --, <bare rustc args>]`.
-        assert_eq!(argv.first().map(String::as_str), Some("razel-process-wrapper"), "wrapped compile: {argv:?}");
-        assert_eq!(argv.get(1).map(String::as_str), Some("rustc"), "the rustc subcommand: {argv:?}");
+        // `[<razel>, process-wrapper, rustc, --rustc=…, --env=CARGO_PKG_VERSION=…, --, <bare args>]`.
+        assert_eq!(wrapper_subcommand(&argv), Some("rustc"), "wrapped rustc compile: {argv:?}");
         assert!(argv.iter().any(|a| a.starts_with("--rustc=") && a.ends_with("rustc")), "carries the rustc binary: {argv:?}");
         assert!(argv.contains(&"--env=CARGO_PKG_VERSION=1.2.3".to_string()), "version → compile-time CARGO_PKG_VERSION: {argv:?}");
         // The bare rustc args (after `--`) are rules_rust's faithful bin compile (A3):
@@ -444,9 +456,8 @@ mod tests {
         let run = &t.actions[1];
         assert_eq!(run.mnemonic, "CargoBuildScriptRun", "action 2 is the run");
         let a = &run.argv;
-        // argv = [wrapper, build-script, --flags-out F, --out-dir D, --env…, --, bin]
-        assert!(a[0].contains("razel-process-wrapper"), "the wrapper bin: {a:?}");
-        assert_eq!(a[1], "build-script", "the runner subcommand: {a:?}");
+        // argv = [<razel>, process-wrapper, build-script, --flags-out F, --out-dir D, --env…, --, bin]
+        assert_eq!(wrapper_subcommand(a), Some("build-script"), "the build-script runner: {a:?}");
         let fo = a.iter().position(|x| x == "--flags-out").expect("--flags-out");
         assert_eq!(a[fo + 1], "app/t.out", "§6.1 <name>.out flags file: {a:?}");
         let od = a.iter().position(|x| x == "--out-dir").expect("--out-dir");
@@ -554,9 +565,8 @@ mod tests {
         let targets = analyze("p310_edge", &build).unwrap();
         let t = targets.iter().find(|t| t.name == "//app:t").expect("crate analyzed");
         let argv = &t.actions[0].argv;
-        // The crate's rustc is wrapped: [wrapper, rustc, --rustc=…, --flags-file=…, --env=OUT_DIR=…, --, <rustc argv>].
-        assert!(argv[0].contains("razel-process-wrapper"), "routed through the wrapper: {argv:?}");
-        assert_eq!(argv[1], "rustc", "the rustc subcommand: {argv:?}");
+        // The crate's rustc is wrapped: [<razel>, process-wrapper, rustc, --rustc=…, --flags-file=…, --env=OUT_DIR=…, --, <rustc argv>].
+        assert_eq!(wrapper_subcommand(argv), Some("rustc"), "routed through the wrapper: {argv:?}");
         assert!(argv.iter().any(|a| a.starts_with("--rustc=")), "carries the real rustc: {argv:?}");
         assert!(argv.contains(&"--flags-file=app/bs.out".to_string()), "consumes the flags file: {argv:?}");
         assert!(argv.contains(&"--env=OUT_DIR=app/bs.out_dir".to_string()), "points OUT_DIR at the tree: {argv:?}");
@@ -583,7 +593,7 @@ mod tests {
         // the meaningful distinction: NO `--flags-file` here.
         let build = format!("{LOAD}rust_library(name = \"t\", srcs = [\"lib.rs\"])\n");
         let argv = argv_of(&analyze("p310_plain", &build).unwrap());
-        assert!(argv[0].contains("razel-process-wrapper"), "wrapped for the compile env: {argv:?}");
+        assert_eq!(wrapper_subcommand(&argv), Some("rustc"), "wrapped for the compile env: {argv:?}");
         assert!(
             argv.iter().any(|a| a == "--env=CARGO_PKG_VERSION=0.0.0"),
             "default CARGO_PKG_VERSION: {argv:?}"

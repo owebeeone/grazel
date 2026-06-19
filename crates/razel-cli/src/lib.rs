@@ -22,8 +22,7 @@
 //! does **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
 use razel_build::{
-    GlobalFlags, build_bazel_with, build_workspace_with, config_segment, convenience_symlinks,
-    resolve_build_file,
+    GlobalFlags, build_workspace_with, config_segment, convenience_symlinks, resolve_build_file,
 };
 use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
@@ -56,6 +55,10 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("subscribe") => cmd_subscribe(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
         Some("daemon") => cmd_daemon(&args[1..]),
+        // The exec-time build-script / rustc wrapper, folded into the razel binary so razel
+        // self-invokes it (`razel process-wrapper rustc …`) via `current_exe()` — no separate
+        // co-located tool. Internal: not user-facing, not in `cmd_help`.
+        Some("process-wrapper") => cmd_process_wrapper(&args[1..]),
         Some("help") => {
             cmd_help(&args[1..]);
             ExitCode::SUCCESS
@@ -68,6 +71,20 @@ pub fn run(args: &[String]) -> ExitCode {
             eprintln!("razel: unknown command {other:?}\n");
             cmd_help(&[]);
             ExitCode::from(EX_USAGE)
+        }
+    }
+}
+
+/// `razel process-wrapper <build-script|rustc> …` — the exec-time wrapper, folded into the razel
+/// binary (was the standalone `razel-process-wrapper`). razel's own build actions spawn `razel
+/// process-wrapper …` via `current_exe()`, so there is no separate co-located tool to resolve.
+/// Internal/leaf: invoked by the executor, not by users.
+fn cmd_process_wrapper(args: &[String]) -> ExitCode {
+    match razel_process_wrapper::dispatch(args) {
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Err(e) => {
+            eprintln!("razel process-wrapper: {e}");
+            ExitCode::from(2)
         }
     }
 }
@@ -1177,12 +1194,15 @@ fn build_one(
         // path seeds the `@crates` lock + follows the alias chain to the versioned crate repo.
         build_workspace_with(&o.workspace, target_arg, cache, flags)
     } else {
-        // Bare name / :name → single-package build from the workspace's root package.
-        // Route through the canonical resolver (BUILD.bazel over BUILD) so the bare-name
-        // path matches package discovery, not a separate ad-hoc probe (RG 0011).
+        // Bare name / :name → a target in the workspace's ROOT package. Confirm a root BUILD exists
+        // (clear error otherwise), then route through the WORKSPACE path so cross-package aliases are
+        // FOLLOWED (e.g. `//:razel` → `//crates/razel-cli:razel`) and dependency packages load on
+        // demand. The old single-package `build_bazel_with` analyzed an alias to an empty,
+        // action-less target — which `build_one` then reported as a vacuous "up-to-date". (RG 0011:
+        // canonical BUILD.bazel-over-BUILD discovery.)
         let name = target_arg.rsplit(':').next().unwrap_or(target_arg);
-        let build_path = match resolve_build_file(&o.workspace, flags.strict_bazel) {
-            Ok(Some(p)) => p,
+        match resolve_build_file(&o.workspace, flags.strict_bazel) {
+            Ok(Some(_)) => {}
             Ok(None) => {
                 eprintln!(
                     "razel build: no BUILD or BUILD.bazel in {}",
@@ -1194,39 +1214,56 @@ fn build_one(
                 eprintln!("razel build: {e}");
                 return Err(ExitCode::FAILURE);
             }
-        };
-        let build_src = std::fs::read_to_string(&build_path).map_err(|e| {
-            eprintln!("razel build: cannot read {}: {e}", build_path.display());
-            ExitCode::FAILURE
-        })?;
-        build_bazel_with(&build_src, name, &o.workspace, cache, flags)
+        }
+        build_workspace_with(&o.workspace, &format!("//:{name}"), cache, flags)
     };
 
     Ok(match report {
-        Ok(report) => BuildResult {
-            target: target_arg.to_string(),
-            // executed == 0 → fully served from cache.
-            status: if report.executed == 0 {
-                BuildStatus::Cached
-            } else {
-                BuildStatus::Built
-            },
-            recomputes: report.executed as i64,
-            // The target's DefaultInfo, not every intermediate (bazel semantics —
-            // `run` execs outputs[0]); empty default_info falls back to produced.
-            outputs: if report.default_outputs.is_empty() {
+        Ok(report) => {
+            // The target's DefaultInfo, not every intermediate (bazel semantics — `run` execs
+            // outputs[0]); empty default_info falls back to produced.
+            let effective: &[String] = if report.default_outputs.is_empty() {
                 &report.produced
             } else {
                 &report.default_outputs
+            };
+            if report.executed == 0 && effective.is_empty() {
+                // 0 actions AND 0 outputs ⇒ nothing was built. Do NOT report "up-to-date": that is
+                // a vacuous success (the silent lie). It happens for an action-less target — e.g. an
+                // `alias` the bare-name path didn't follow across packages (see build_one's bare
+                // branch), or a stub target. Fail loudly so `clean && build X` can't claim success
+                // while producing nothing.
+                BuildResult {
+                    target: target_arg.to_string(),
+                    status: BuildStatus::Failed,
+                    recomputes: 0,
+                    outputs: vec![],
+                    message: Some(format!(
+                        "`{target_arg}` ran no actions and produced no outputs — nothing was built \
+                         (an alias or action-less target?), so it is not up-to-date"
+                    )),
+                }
+            } else {
+                BuildResult {
+                    target: target_arg.to_string(),
+                    // executed == 0 (with outputs present) → fully served from cache.
+                    status: if report.executed == 0 {
+                        BuildStatus::Cached
+                    } else {
+                        BuildStatus::Built
+                    },
+                    recomputes: report.executed as i64,
+                    outputs: effective
+                        .iter()
+                        .map(|p| OutputArtifact {
+                            path: p.clone(),
+                            digest: digest_of(&o.workspace.join(p)),
+                        })
+                        .collect(),
+                    message: None,
+                }
             }
-            .iter()
-            .map(|p| OutputArtifact {
-                path: p.clone(),
-                digest: digest_of(&o.workspace.join(p)),
-            })
-            .collect(),
-            message: None,
-        },
+        }
         Err(e) => BuildResult {
             target: target_arg.to_string(),
             status: BuildStatus::Failed,

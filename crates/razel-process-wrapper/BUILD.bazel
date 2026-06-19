@@ -1,0 +1,20 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+exports_files(["Cargo.toml"])  # crate_universe reads this
+
+# The exec-time process wrapper (build-script runner + rustc wrapper), folded INTO the razel binary
+# as the `razel process-wrapper` subcommand — so this is a LIBRARY only (no rust_binary): razel-cli
+# depends on it and dispatches `razel_process_wrapper::dispatch`. The standalone
+# `razel-process-wrapper` bin (src/main.rs) stays a cargo-only dev/test fixture, not a bazel target.
+rust_library(
+    name = "razel_process_wrapper",
+    srcs = ["src/lib.rs"] + glob(["src/**/*.rs"], exclude = ["src/lib.rs", "src/main.rs"], allow_empty = True),
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//visibility:public"],
+)

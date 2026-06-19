@@ -211,8 +211,13 @@ pub fn canonicalize_rust_argv(argv: &[String]) -> Vec<String> {
     let is_wrapper = |t: &str| {
         t == "razel-process-wrapper" || t.ends_with("process_wrapper") || t.ends_with("process-wrapper")
     };
+    // A wrapper-routed argv is either a standalone wrapper bin at argv[0] (Bazel's `…/process_wrapper`,
+    // razel's old `razel-process-wrapper` bin) OR razel's SELF-INVOKE form `[<razel>, "process-wrapper",
+    // …]` (the wrapper folded into the razel binary). Both: drop up to AND including the first `--`.
+    let wrapped = argv.first().is_some_and(|t| is_wrapper(t.as_str()))
+        || argv.get(1).is_some_and(|t| t.as_str() == "process-wrapper");
     let mut start = 0;
-    if argv.first().is_some_and(|t| is_wrapper(t.as_str())) {
+    if wrapped {
         if let Some(i) = argv.iter().position(|t| t.as_str() == "--") {
             start = i + 1;
         }
@@ -552,11 +557,17 @@ mod tests {
             "razel-process-wrapper", "rustc", "--rustc=/t/rustc", "--flags-file=f",
             "--env=OUT_DIR=d", "--", "--crate-name=x", "--edition=2021",
         ]);
+        // razel (self-invoke): the wrapper folded into razel → `<razel> process-wrapper rustc … -- <args>`.
+        let razel_self = argv(&[
+            "/abs/path/razel", "process-wrapper", "rustc", "--rustc=/t/rustc", "--flags-file=f",
+            "--env=OUT_DIR=d", "--", "--crate-name=x", "--edition=2021",
+        ]);
         // razel (plain crate): bare `rustc <args>` → the args.
         let razel_bare = argv(&["/usr/bin/rustc", "--crate-name=x", "--edition=2021"]);
         let want = argv(&["--crate-name=x", "--edition=2021"]);
         assert_eq!(canonicalize_rust_argv(&bazel), want, "bazel wrapper stripped");
         assert_eq!(canonicalize_rust_argv(&razel_wrapped), want, "razel wrapper stripped");
+        assert_eq!(canonicalize_rust_argv(&razel_self), want, "razel self-invoke wrapper stripped");
         assert_eq!(canonicalize_rust_argv(&razel_bare), want, "bare rustc binary dropped");
     }
 

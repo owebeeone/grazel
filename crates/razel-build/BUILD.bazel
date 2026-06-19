@@ -56,6 +56,7 @@ rust_test(
     srcs = ["tests/rust_rules.rs"],
     crate_root = "tests/rust_rules.rs",
     edition = "2024",
+    tags = ["manual"],  # spawns `cargo build -p razel-process-wrapper` (env!("CARGO")) — run via cargo
     compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True),
     aliases = aliases(),
     deps = all_crate_deps(normal_dev = True) + [

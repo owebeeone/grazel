@@ -43,14 +43,24 @@ pub(crate) fn metadata_hash(canon: &str) -> String {
 }
 
 
-/// P3.8: the razel process wrapper bin (the build-script runner / the P3.9 rustc wrapper). Resolved
-/// like [`rustc`]: an explicit `RAZEL_PROCESS_WRAPPER` override, else the bare crate name (the
-/// executor / toolchain resolves it on the exec path). Kept a STABLE token so the action argv is
-/// deterministic (not dependent on whether the wrapper binary happens to be built); P5.4 callers
-/// that build a real binary set `RAZEL_PROCESS_WRAPPER` to the co-located wrapper. Parity normalizes
-/// the wrapper prefix (`canonicalize_rust_argv`), so the exact path is not parity-gated.
-pub(crate) fn process_wrapper() -> String {
-    std::env::var("RAZEL_PROCESS_WRAPPER").unwrap_or_else(|_| "razel-process-wrapper".into())
+/// P3.8: the exec-time process-wrapper command PREFIX (the build-script runner / the P3.9 rustc
+/// wrapper), prepended to a wrapped action's argv. The wrapper is folded INTO the razel binary as the
+/// `process-wrapper` subcommand, so the live/shipped path is **SELF-INVOKE**: `[current_exe(),
+/// "process-wrapper"]` — razel finds the wrapper via its own path, never a separate co-located tool
+/// on PATH / in runfiles (the fix for `razel build` failing with a bare `os error 2`). An explicit
+/// `RAZEL_PROCESS_WRAPPER` override is used as a STANDALONE wrapper bin (the in-process test drivers
+/// point here, since their `current_exe()` is the test binary, not razel) — it takes the
+/// rustc/build-script subcommand directly, with no `process-wrapper` token. Parity normalizes the
+/// prefix (`canonicalize_rust_argv` handles both shapes), so the exact path is not parity-gated.
+pub(crate) fn process_wrapper_prefix() -> Vec<String> {
+    if let Ok(p) = std::env::var("RAZEL_PROCESS_WRAPPER") {
+        return vec![p];
+    }
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "razel".into());
+    vec![exe, "process-wrapper".into()]
 }
 
 
@@ -88,7 +98,9 @@ pub(crate) fn apply_build_script_edge(
     let mut it = argv.into_iter();
     let rustc_path =
         it.next().ok_or_else(|| anyhow::anyhow!("{rule} `{name}`: empty rustc argv"))?;
-    let mut wrapped = vec![process_wrapper(), "rustc".into(), format!("--rustc={rustc_path}")];
+    let mut wrapped = process_wrapper_prefix();
+    wrapped.push("rustc".into());
+    wrapped.push(format!("--rustc={rustc_path}"));
     let mut inputs = Vec::new();
     if let Some(bs) = own {
         wrapped.push(format!("--flags-file={}", bs.flags_file));

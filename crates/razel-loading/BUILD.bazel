@@ -277,9 +277,9 @@ rust_test(
 )
 
 rust_test(
-    name = "e_mode_test",
-    srcs = ["tests/e_mode.rs"],
-    crate_root = "tests/e_mode.rs",
+    name = "workspace_test",
+    srcs = ["tests/workspace.rs"],
+    crate_root = "tests/workspace.rs",
     edition = "2024",
     compile_data = glob(["**/*"], exclude = ["**/*.rs", "BUILD.bazel", "Cargo.toml"], allow_empty = True) + [
         "//parity/corpus/cc/transitive:golden.txt",

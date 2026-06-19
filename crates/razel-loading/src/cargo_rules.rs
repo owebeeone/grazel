@@ -129,7 +129,9 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
                 || compile.version.is_some()
                 || compile.pkg_name.is_some()
             {
-                let mut w = vec![process_wrapper(), "rustc".into(), format!("--rustc={}", rustc())];
+                let mut w = process_wrapper_prefix();
+                w.push("rustc".into());
+                w.push(format!("--rustc={}", rustc()));
                 for ef in &env_files {
                     w.push(format!("--env-file={ef}"));
                 }
@@ -159,8 +161,8 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
             // otherwise); the wrapper chdir's the bin there + sets `CARGO_MANIFEST_DIR`. Absolute
             // OUT_DIR/program are the wrapper's job (cwd-independent, like cargo).
             let crate_dir = qualify(sess, "").trim_end_matches('/').to_string();
-            let mut run_argv = vec![
-                process_wrapper(),
+            let mut run_argv = process_wrapper_prefix();
+            run_argv.extend([
                 "build-script".into(),
                 "--flags-out".into(),
                 flags_out.clone(),
@@ -168,7 +170,7 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
                 out_dir.clone(),
                 "--rundir".into(),
                 crate_dir,
-            ];
+            ]);
             // P3.8c: env-files FIRST (lower precedence than the literal `--env` below, §6.2).
             for ef in &env_files {
                 run_argv.push("--env-file".into());

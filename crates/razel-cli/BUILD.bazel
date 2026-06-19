@@ -12,6 +12,7 @@ rust_library(
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + [
         "//crates/razel-build:razel_build",
+        "//crates/razel-process-wrapper:razel_process_wrapper",  # the `razel process-wrapper` subcommand
         "//crates/razel-core:razel_core",
         "//crates/razel-daemon:razel_daemon",
         "//crates/razel-exec:razel_exec",
@@ -54,6 +55,7 @@ rust_test(
     srcs = ["tests/cli.rs"],
     crate_root = "tests/cli.rs",
     edition = "2024",
+    tags = ["manual"],  # *_through_a_spawned_daemon bind a /tmp socket — sandbox-hostile; run via cargo
     # Cargo sets CARGO_BIN_EXE_razel for integration tests; bazel doesn't — provide it
     # (compile-time, since the test uses env!) + stage the binary in runfiles via data.
     data = ["//crates/razel-cli:razel"],
