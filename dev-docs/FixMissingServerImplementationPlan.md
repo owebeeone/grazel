@@ -1,7 +1,16 @@
 # FixMissingServerImplementationPlan — wire the warm server that was built but never connected
 
-**Status:** DRAFT rev3 — self-review augmented (2026-06-20). Owner: RR.
+**Status:** DRAFT rev4 — WS-D design spike (2026-06-20). Owner: RR.
 Scope: design + parallelized execution plan + the regression-prevention gate suite.
+
+**rev4 note.** The PAR-7/R-9/§5-WS-D "design-before-coding" blocker is **discharged**: the
+three coupled WS-D sub-designs — the single-writer actor mechanics (§3.5), the persistent
+exec-root incremental fixup (§3.6a), and the cached-analysis key + invalidation rule (§3.6b)
+— are now concrete and codeable (algorithms + data structures + exact file:line seams + edge
+cases + gates). §5 WS-D drops the DESIGN-HEAVY blocker and lists implementable sub-tasks.
+New gates **G24–G27** (§7.2). NO-CANCEL stays **FROZEN** (R-9.5); the one actor-loop line
+that changes if Gianni flips to cancel-and-restart is marked in §3.5. Resolutions logged in
+§12.1.
 Subordinate to `RazelDepsEngineV2.md` (the message-driven engine seam),
 `RazelPublicSurfaces.md` (§1 "the CLI is a CLIENT, with no privileged in-process path";
 §1c actor + single-writer queue; §4b the streaming/invalidation loop), `RazelDevStatus.md`
@@ -288,6 +297,103 @@ a **frozen Wave-0 deliverable**, not an aspiration:
   shape the actor adopts, but the **standalone toy type is deleted/repurposed** so warm
   infra is not stranded a second time (see §5 WS-D, §8).
 
+#### 3.5a Concrete actor shape (rev4 — codeable)
+
+The §3.5 contract above is now a concrete design. The actor is a dedicated OWNER thread; the
+`Server` keeps only the inbox `Sender`s (one per workspace) under `Arc` — nothing else holds the
+non-`Send` `Engine`.
+
+**Inbox message enum + reply channel** (`crates/razel-daemon/src/rpc.rs`, new, after the `Inner`
+struct ~line 83):
+```rust
+pub enum ActorMessage {
+    Build  { args: Vec<String>, cwd: PathBuf, reply: SyncSender<Result<BuildResult, String>> },
+    SetInput { path: String, digest: Digest },           // a KNOWN leaf changed (one set_input)
+    Rescan { reason: RescanReason },                      // graph-shape / unknown / delete
+    Shutdown,
+}
+pub enum RescanReason { StartUp, WatcherBuildChange, WatcherSourceTreeChange }
+```
+Queue = `std::sync::mpsc` (or `crossbeam::channel`) **unbounded**; `reply` is a one-shot
+`std::sync::mpsc::sync_channel(1)` so the RPC thread blocks on the actual build result, not on the
+connection thread (CA-2). FIFO, **one message in flight at a time** (CA-6, PAR-5).
+
+**WorkspaceActor state** (the owner; subsumes today's `Inner.warm`/`analyses` + the toy `Workspace`):
+```rust
+pub struct WorkspaceActor {
+    inbox: Receiver<ActorMessage>,
+    workspace: PathBuf,
+    engine: Engine,                                   // non-Send; single-writer by construction
+    projection: IncrementalBuilder,                   // migrated (WS-C), workspace-label capable
+    exec_root: PathBuf,                               // persistent .razel-out forest (§3.6a)
+    cached_analysis: Option<(AnalysisDigest, Vec<AnalyzedTarget>, String /*resolved_top*/)>, // §3.6b
+    leaf_inputs: HashSet<String>,                     // authority for SetInput-vs-Rescan (§3.5)
+    old_sources: HashSet<String>,                     // exec-root fixup baseline (§3.6a)
+    old_external: Option<PathBuf>,                    // last .razel-crates path (§3.6a)
+    // counters surfaced on each BuildResult (§7.1):
+    engine_recomputes_seen: usize, actions_executed: usize, action_cache_hits: usize,
+    input_digest_reads: usize, exec_root_rebuilds: usize, analysis_runs: usize,
+    // snapshot publication (mirrors today's Inner.state/bump, rpc.rs:74-75,99-103):
+    state: Arc<Mutex<BuildState>>, bump: Arc<Condvar>,
+}
+```
+
+**The single-writer loop** (the actor's `run`):
+```rust
+while let Ok(msg) = self.inbox.recv() {
+    match msg {
+        ActorMessage::Build { args, cwd, reply } => {
+            let r = self.do_build_impl(args, cwd);   // parse_opts→GlobalFlags+daemon-derived;
+            let _ = reply.send(r);                    //  cached-analysis check (§3.6b); engine.request
+            self.commit_snapshot();                   // revision += 1; bump.notify_all() (CA-3)
+        }
+        ActorMessage::SetInput { path, digest } => {  // guarded: must be in leaf_inputs (§3.5)
+            if !self.leaf_inputs.contains(&path) { /* loud shutdown — lost-Rescan bug (PAR-5) */ }
+            self.engine.set_input(&path, NodeValue::Digest(digest)); // NO snapshot (input-only)
+        }
+        ActorMessage::Rescan { reason } => { self.handle_rescan(reason); } // §3.6a+§3.6b, atomic
+        ActorMessage::Shutdown => break,
+    }
+}
+```
+
+**Startup ordering** (in `Server::serve`, `rpc.rs:134-151`, after `outlock` at :137):
+1. Acquire `outlock` (workspace writer lock).
+2. Spawn the actor thread with its inbox.
+3. Enqueue `Rescan { StartUp }` and **block until it completes** (synchronous startup baseline):
+   `validate_exec_root` (§3.6a) → `analyze_workspace_resolved` (`drive.rs:58`) → establish
+   `leaf_inputs` → re-digest every leaf input → `engine.add_input(path, digest)`. After this,
+   `revision = 1` and **every leaf key exists**, so a later `SetInput` can never hit the
+   `lib.rs:86` unknown-key panic.
+4. `transport::bind(socket)` + accept loop; each connection thread ENQUEUES messages (it no longer
+   calls `do_build` directly — that is the R-9/CA-1 fix).
+5. Spawn the watcher loop (§3.6, CA-7), routing to `SetInput`/`Rescan` per the §3.5 sequence.
+
+**NO-CANCEL queue semantics + staleness window (FROZEN — R-9.5/R-9.6).** A `Build` runs to
+completion; `SetInput`/`Rescan` arriving during it queue **strictly FIFO behind it** and are
+processed after it commits. Max staleness window = build duration; a subscriber that connects
+mid-build reads the previous committed revision until the in-flight build commits (CA-5).
+> **THE ONE FLIP POINT (R-9.5).** Cancel-and-restart changes EXACTLY the `Build` arm of the loop
+> above: before `do_build_impl` returns, the actor would peek the inbox and, if a higher-priority
+> `Rescan`/`SetInput` is queued, abort the in-flight `engine.request` (cooperative cancel point),
+> `reply.send(Err("cancelled"))`, then dequeue the watcher event and restart. The message enum, the
+> reply channel, the snapshot path, and §3.6a/§3.6b are **unchanged** — only this arm gains a
+> peek-and-abort. v1 does NOT do this; the FIFO loop above is the frozen behavior.
+
+**Committed-snapshot emission (CA-3).** `commit_snapshot` clones `BuildState` **inside the same
+`Mutex` critical section** as the `revision += 1`, then `bump.notify_all()` — identical to today's
+`record_state` (`rpc.rs:429-435`). Two subscribers parking on `wait_while(revision == last)`
+(`rpc.rs:301`) at the same revision therefore receive byte-identical clones (G11). `SnapshotId ==
+revision`, epoch-disambiguated (§4.3c).
+
+**Idle-out + panic handling.** Idle-out (§3.7): when a workspace's connection/subscriber refcount
+hits 0 for `--idle-timeout` (default 5 min), the actor drains in-flight work and exits (`Shutdown`);
+the daemon respawns lazily on the next hello. **Actor panic** (e.g. a re-entrancy bug in a
+`ComputeFn`, §4.1b): the actor thread's `catch_unwind` wrapper drops the inbox; every pending
+`Build.reply.recv()` then returns `Err` ("razel internal: actor panic") so RPC threads unblock
+instead of hanging. The actor does **not** auto-restart in v1 — recovery is via daemon restart +
+the startup `Rescan` (G17), which re-baselines from scratch.
+
 - **Watcher not yet wired (CA-7 — rev3).** `watch()` (`lib.rs:92-106`) is defined and unit-tested
   in isolation (`lib.rs:204-219`) but is **never called from `Server::serve`** (`rpc.rs:134-150`).
   Until WS-D wires the watch loop into the actor queue, the daemon is **subscribe-driven** —
@@ -329,44 +435,155 @@ Two counters make this provable on the second no-op (§7): `exec_root_rebuilds =
 > at the call site `drive.rs:69`); WS-D's persistent exec-root sets it to 0 by skipping the rebuild
 > when the forest is persistent and unchanged.
 
-#### 3.6a Persistent exec-root fixup semantics (DESIGN WORK FOR WS-D — PAR-2, SR-EXEC-ROOT-CORRUPTION-1)
+#### 3.6a Persistent exec-root fixup semantics (CONCRETE — rev4; PAR-2, SR-EXEC-ROOT-CORRUPTION-1)
 
-"Fixed up incrementally" is real design work, not a detail. The exec-root forest is a symlink
-snapshot of the workspace + `external/<repo>`. On a build with changed sources / new `.razel-crates`
-entries / deletions, the actor's `Rescan` (§3.5) re-reads the workspace + `.razel-crates`, then calls
-a new **`fix_up_exec_root(old, new)`** (NOT a rebuild) that:
-- symlinks **new** source entries under the exec-root (none exist → no unlink);
-- **unlinks** deleted entries;
-- re-symlinks `external/<repo>` only if `.razel-crates` moved/refreshed.
+The exec-root forest is a symlink snapshot of the workspace SOURCE entries + `external/<repo>`. Today
+`prepare_exec_root` (`exec_root.rs:11-35`) unconditionally `remove_dir_all` + recreates it whenever
+`.razel-crates` exists (`drive.rs:67-69`). rev4 keeps `prepare_exec_root` for the **cold path**
+(non-daemon `build_workspace_with`) and adds two new functions the actor owns; the source-exclusion
+list is the SAME one `prepare_exec_root` uses (`exec_root.rs:19-21`: `.razel-*`, `.git*`, `target`,
+`bazel-out`, `razel-out`, `razel-bin`, `razel-testlogs`).
 
-Left-alone entries keep their symlinks → **zero churn on unchanged sources**, preserving the
+**`fix_up_exec_root` algorithm** (`exec_root.rs`, new ~line 36, called from the actor's `handle_rescan`):
+```rust
+pub(crate) fn fix_up_exec_root(
+    workspace: &Path, exec_root: &Path,
+    old_sources: &HashSet<String>, new_sources: &HashSet<String>,
+    old_external: Option<&Path>,  new_external: Option<&Path>,
+) -> std::io::Result<bool> /* did_change */ {
+    let mut changed = false;
+    // 1. ADDED sources: symlink them. Unlink any stale entry first (broken link / E4 collision).
+    for src in new_sources.difference(old_sources) {
+        let link = exec_root.join(src);
+        if link.symlink_metadata().is_ok() { let _ = std::fs::remove_file(&link); } // E4: real-dir/broken
+        std::os::unix::fs::symlink(workspace.join(src), &link)?; changed = true;
+    }
+    // 2. DELETED sources: unlink (ENOENT is OK — already gone). E2: a sandbox pointing at it now
+    //    sees a broken link → digest_input returns None (exec_root.rs:52) → C2 absent-input, no panic.
+    for src in old_sources.difference(new_sources) {
+        let _ = std::fs::remove_file(exec_root.join(src)); changed = true;
+    }
+    // 3. EXTERNAL (.razel-crates → external/): re-symlink only on appear/disappear/move (E3).
+    let ext = exec_root.join("external");
+    let ext_changed = match (old_external, new_external) {
+        (None, None) => false, (Some(a), Some(b)) => a != b, _ => true,
+    };
+    if ext_changed {
+        let _ = std::fs::remove_file(&ext);
+        if let Some(c) = new_external { std::os::unix::fs::symlink(c, &ext)?; }
+        changed = true;
+    }
+    Ok(changed)
+}
+```
+**Properties.** Unchanged sources are never touched → **zero churn**, preserving the
 `IncrementalBuilder` persistent-sandbox reuse (a sandbox's `sync_inputs` is a no-op delta unless the
-input *set* changes). **Failure mode:** a source deleted while a sandbox points to it leaves a broken
-symlink; the action's `sync_inputs`/`digest_input` returns `None` on `ENOENT` (`exec_root.rs:51-52`),
-same as a missing input — `execute_action` skips it (C2 absent-input semantics), no panic. This is
-parallel to `IncrementalBuilder::sync_file`'s known-key guard (`incremental.rs:177`).
+input *set* changes). The return `did_change` drives the `exec_root_rebuilds` counter (§7.1): the
+actor increments it **once per Rescan iff `did_change == true`** — a no-op Rescan does not increment,
+so G14's `exec_root_rebuilds == 0` holds on the second no-op build.
 
-**Crash/corruption recovery.** On daemon startup (after a crash/SIGKILL) the actor's first `Rescan`
-re-establishes the digest baseline; it does NOT blindly trust the on-disk forest. WS-D **validates**
-the exec-root at startup: all declared source dirs are symlink-reachable, all `external/*` symlinks
-point to live `.razel-crates` entries — if broken, rebuild that subtree (with backoff on symlink-
-create failures). A corrupted `.razel-out` is harmless: a fresh build re-uses the content cache and
-re-populates it. Gated by **G21** (corruption) and **G17** (crash recovery).
+**`validate_exec_root` (startup/crash recovery)** (`exec_root.rs`, new ~line 81; called from the
+`Rescan { StartUp }` handler BEFORE the first fixup): for each expected source dir, assert
+`exec_root.join(src)` is a live symlink whose target exists; for each `external/*`, assert it points
+to a live `.razel-crates` entry. A broken/missing/wrong entry is unlinked + re-symlinked (best-effort,
+with backoff on symlink-create failure); if a critical link is unrepairable it returns `Err` and the
+actor falls back to a full `prepare_exec_root` rebuild (counts as one `exec_root_rebuilds`). A wholly
+corrupted `.razel-out` is harmless — the content cache (`razel-exec`) re-populates outputs. Gated by
+**G21** (manual corruption repaired) and **G17** (crash recovery).
 
-#### 3.6b Cached-analysis key & invalidation (WS-D DESIGN DETAIL — PAR-4, OPER-7)
+**`handle_rescan` (the actor side that drives this — §3.5a):**
+```rust
+fn handle_rescan(&mut self, reason: RescanReason) {
+    if reason == RescanReason::StartUp { let _ = validate_exec_root(&self.workspace, &self.exec_root); }
+    let new_sources  = enumerate_sources(&self.workspace);        // read_dir minus the exclusion list
+    let new_external = self.workspace.join(".razel-crates").is_dir()
+                         .then(|| self.workspace.join(".razel-crates"));
+    let did_change = fix_up_exec_root(&self.workspace, &self.exec_root,
+                        &self.old_sources, &new_sources,
+                        self.old_external.as_deref(), new_external.as_deref()).unwrap_or(true);
+    if did_change { self.exec_root_rebuilds += 1; }
+    self.old_sources = new_sources; self.old_external = new_external;
+    self.cached_analysis = None;        // §3.6b: any Rescan marks analysis dirty (recompute next Build)
+    // (re-)establish the leaf_inputs baseline; on StartUp re-digest every known input.
+    self.rebaseline_leaf_inputs(reason);
+}
+```
+This keeps the exec-root fixup (add/delete/rename → symlink/unlink) **consistent with** the §3.6b
+"graph-shape event → analysis dirty" rule and the §3.5 SetInput-vs-Rescan routing: the SAME `Rescan`
+that re-symlinks the forest also marks analysis dirty and refreshes `leaf_inputs`.
 
-The actor owns a persistent workspace analysis keyed by an **`AnalysisDigest` =
-blake3(sorted(content digests of all BUILD + MODULE + lockfile + `.bazelrc` + `.razelrc`)) +
-the semantic-options digest of the parsed `GlobalFlags`** — content-based, not mtime-based (an
-mtime fingerprint false-skips a same-mtime edit and false-invalidates a copy-with-preserve-mtime).
-The watcher's `Rescan` (BUILD/MODULE/lockfile/rc change) marks the analysis **dirty**; on the next
-build the actor recomputes `AnalysisDigest` and compares: if different, re-run
-`analyze_workspace_resolved` (`drive.rs:58`) and re-cache (`analysis_runs += 1`); if same, reuse
-(`analysis_runs == 0`). This migrates today's `warm_analyze` cache (`Mutex<Option<WarmAnalysis>>`,
-`rpc.rs:157-172`, BUILD-digest-keyed, single-BUILD) into the actor for the `//`-label case.
+**Edge cases (verified against `digest_input`, `exec_root.rs:51-67`):** E1 new top-level source dir →
+symlinked, no churn elsewhere. E2 deleted source with a stale sandbox ref → broken link →
+`digest_input` `None` → C2 absent-input, no panic; the next Rescan invalidates the stale analysis.
+E3 `.razel-crates` materialized on demand → `external/` symlink appears once (None→Some), reused
+thereafter (Some==Some). E4 user creates a real dir where a symlink belongs → unlinked + re-symlinked
+(best-effort; the exec-root is razel-owned). E5 case-insensitive FS → `enumerate_sources` uses the
+canonical entry name so symlink paths match the action's input declarations. E6 watcher event during
+Rescan → FIFO queue serializes it after Rescan completes (single-writer, §3.5).
+
+#### 3.6b Cached-analysis key & invalidation (CONCRETE — rev4; PAR-4, OPER-7)
+
+The actor owns a persistent workspace analysis keyed by an **`AnalysisDigest`** — content-based, not
+mtime-based (an mtime fingerprint false-skips a same-mtime edit and false-invalidates a
+copy-with-preserve-mtime). It migrates today's `warm_analyze` (`Mutex<Option<WarmAnalysis>>`,
+`rpc.rs:157-172`, single-BUILD-digest-keyed) into the actor and generalizes it to the `//`-label
+case via `analyze_workspace_resolved` (`drive.rs:58`).
+
+**The key:**
+```rust
+struct AnalysisDigest { graph_shape_digest: Digest, options_digest: Digest }
+
+fn compute_analysis_digest(root: &Path, flags: &GlobalFlags) -> AnalysisDigest {
+    // graph-shape inputs = every file whose change alters BUILD-graph TOPOLOGY (NOT source files):
+    //   all BUILD/BUILD.bazel (discover_packages walk), MODULE.bazel, MODULE.bazel.lock,
+    //   .bazelrc, .razelrc  — each "if present".
+    let mut entries: Vec<(String, Digest)> = Vec::new();
+    for p in walk_buildfiles(root) { if let Ok(b)=fs::read(&p){ entries.push((rel(&p), Digest::of(&b))); } }
+    for n in ["MODULE.bazel","MODULE.bazel.lock",".bazelrc",".razelrc"] {
+        if let Ok(b)=fs::read(root.join(n)) { entries.push((n.into(), Digest::of(&b))); }
+    }
+    entries.sort_by(|a,b| a.0.cmp(&b.0));           // canonical order (RULE 22)
+    let mut buf = Vec::new();
+    for (p,d) in entries { buf.extend(p.as_bytes()); buf.push(0); buf.extend(d.to_hex().as_bytes()); buf.push(0); }
+    AnalysisDigest { graph_shape_digest: Digest::of(&buf), options_digest: flags.options_digest }
+}
+```
+`options_digest` already lives on `GlobalFlags` (the semantic-flag fingerprint), so a flag change
+(e.g. `--copt`) invalidates analysis too. `crate_lock`/`fetched_external_base` are NOT keyed
+directly — they are DERIVED from `MODULE.bazel(.lock)`, which IS in `graph_shape_digest`, so a
+lockfile change invalidates correctly (closes the GlobalFlags-mutable-field hole).
+
+**The invalidation rule (matches §3.6a's "graph-shape event → Rescan"):**
+- Any `Rescan` sets `cached_analysis = None` (dirty) — §3.6a `handle_rescan` does this in one line.
+- On the next `Build`, `do_build_impl` recomputes `AnalysisDigest` and compares to the cached one:
+  if **different OR dirty** → re-run `analyze_workspace_resolved`, cache `(digest, targets,
+  resolved_top)`, `analysis_runs += 1`; if **same** → reuse the cached projection, `analysis_runs`
+  unchanged. So a no-op second build is `analysis_runs == 0`; a BUILD edit routes to `Rescan`
+  (§3.5/§3.6a) then the next build re-analyzes (`analysis_runs > 0`); a further no-op re-caches
+  (`analysis_runs == 0`).
+
+**`do_build_impl` (the Build-side seam — §3.5a):**
+```rust
+fn do_build_impl(&mut self, args: Vec<String>, cwd: PathBuf) -> Result<BuildResult, String> {
+    let flags = parse_opts(&args).resolve(&cwd).with_daemon_derived(&self.workspace); // §4.3
+    let target = parse_target(&args);
+    let key = compute_analysis_digest(&self.workspace, &flags);
+    let fresh = self.cached_analysis.as_ref().map(|(d,_,_)| d) != Some(&key);
+    if fresh {
+        let (targets, resolved) = analyze_workspace_resolved(&self.workspace, &target, flags.clone())?;
+        self.projection.configure(&targets, &resolved); // (re)wire the engine graph + leaf_inputs (WS-C)
+        self.cached_analysis = Some((key, targets, resolved));
+        self.analysis_runs += 1;
+    }
+    self.engine.reset_recomputes();
+    let value = self.engine.request(&target_key(/*resolved top*/))?;
+    self.engine_recomputes_seen = self.engine.recomputes();      // G4 reads THIS, not report.executed
+    Ok(/* BuildResult from value + self.counters */)
+}
+```
 Partial (per-package) invalidation is a future optimization; full workspace re-analysis on any
-graph-shape change is the conservative, correct v1. Gated by **G14** (extended with an invalidation
-trigger: edit a BUILD → `analysis_runs > 0`).
+graph-shape change is the conservative, correct v1. Gated by **G14** (no-op `analysis_runs == 0` +
+the invalidation trigger: edit a BUILD → `analysis_runs > 0` → re-cache → 0).
 
 ### 3.7 Server lifecycle, sockets, cache, output streaming (rev3 — operational completeness)
 
@@ -887,9 +1104,9 @@ called out explicitly and scheduled (it is NOT a parallel stub-only stream).
 
 ### WS-D — WorkspaceActor: warm-engine ownership + persistent exec-root + watcher + rescan + flags (consumes C1+C3, WS-C)
 
-- **Scope:** the **WorkspaceActor** (§3.5) owns one `Engine` + the migrated `IncrementalBuilder`
-  + persistent-sandbox map + **persistent exec-root** + **cached analysis/projection** (§3.6)
-  + the watcher + the startup rescan. Concretely:
+- **Scope:** the **WorkspaceActor** (§3.5 / concrete in §3.5a) owns one `Engine` + the migrated
+  `IncrementalBuilder` + persistent-sandbox map + **persistent exec-root** (§3.6a) + **cached
+  analysis/projection** (§3.6b) + the watcher + the startup rescan. Concretely:
   - **Actor queue:** RPC threads + watcher ENQUEUE `Build`/`SetInput`/`Rescan`/`Shutdown`; only
     the actor mutates engine state (§3.5). `build.subscribe`/`invocation.events` get committed
     snapshots.
@@ -925,10 +1142,31 @@ called out explicitly and scheduled (it is NOT a parallel stub-only stream).
     (rotate at 100MB; ts/level/invocation_id/key/event); add a `daemon.status` query returning
     (pid, uptime, memory_rss, invocations_active, snapshots_retained); `BuildResult.message` carries
     the action's command + stderr excerpt on failure (daemon-internal errors labeled "razel internal:").
-- **DESIGN-HEAVY STREAM (PAR-7):** beyond implementation, WS-D must finalize the exec-root fixup
-  algorithm (§3.6a) and the analysis-cache invalidation semantics (§3.6b) BEFORE coding. Recommend
-  1–2h design pairing; otherwise the `exec_root_rebuilds == 0` / `analysis_runs == 0` deliverable
-  (G14) is at risk. The "2–3 workers" estimate assumes this design lands first (see R-9).
+- **CODEABLE (PAR-7 — discharged rev4).** The design that was DESIGN-HEAVY is now concrete in
+  §3.5a (actor mechanics), §3.6a (`fix_up_exec_root`/`validate_exec_root`/`handle_rescan`), and
+  §3.6b (`AnalysisDigest`/`do_build_impl`). WS-D is now an **implementation** stream against those
+  algorithms. Concrete sub-tasks, in landing order (each independently testable):
+  1. **D1 — Actor skeleton + reply channel** (§3.5a). Add `ActorMessage`/`RescanReason`/
+     `WorkspaceActor` in `rpc.rs` (after `Inner` ~:83); spawn the thread in `Server::serve` (:134);
+     refactor `do_build` (:336-407) to ENQUEUE `Build { args, cwd, reply }` + block on the one-shot
+     reply (the R-9/CA-1 fix). Move `Inner.warm`/`analyses`/`state`/`bump` ownership into the actor.
+  2. **D2 — `do_build_impl` + cached analysis** (§3.6b). `compute_analysis_digest`; the
+     fresh-vs-cached branch around `analyze_workspace_resolved` (`drive.rs:58`); `projection.configure`
+     (WS-C). Drop `GlobalFlags::default()` (`rpc.rs:358`) — parse the forwarded args (§4.3), so
+     `bin_tree_layout` matches the CLI. Surface `engine_recomputes` from the engine (G4).
+  3. **D3 — Persistent exec-root** (§3.6a). Add `fix_up_exec_root`/`validate_exec_root`/
+     `enumerate_sources` in `exec_root.rs` (~:36/:81); keep `prepare_exec_root` for the cold path;
+     drive `exec_root_rebuilds` off `did_change`.
+  4. **D4 — Watcher wiring + rescan routing** (§3.5/§3.6a `handle_rescan`, CA-7). Wire `watch()`
+     (`lib.rs:92-106`) into the inbox: known leaf → `SetInput`; BUILD/MODULE/lockfile/`.bazelrc`/
+     `.razelrc`/unknown/deletion → `Rescan`. Enqueue `Rescan { StartUp }` synchronously at serve
+     startup (the missed-event baseline + `validate_exec_root`).
+  5. **D5 — Delete the toy `Workspace`** (`lib.rs:44-87`) + its toy tests once D1-D4 own its role
+     (migration checklist §8); the actor is the live owner (RULE 4).
+  6. **D6 — Observability (OPER-6):** `<daemon_dir>/daemon.log` JSON-lines (rotate 100MB);
+     `daemon.status` query (pid, uptime, memory_rss, invocations_active, snapshots_retained);
+     `BuildResult.message` carries the failing action's command + stderr excerpt ("razel internal:"
+     for daemon-internal errors).
 - **Consumes:** C1, C3, WS-C's migrated projection. **Provides:** the warm `do_build` + the
   actor.
 - **Deliverable:** daemon builds `//`-labels through the engine over a persistent exec-root;
@@ -1162,6 +1400,10 @@ actions_executed, action_cache_hits, input_digest_reads, exec_root_rebuilds, ana
 | G21 | `exec_root_rebuild_on_corruption` | manual exec-root corruption is detected + repaired on next build | Delete a symlink / replace it with a file in `.razel-exec`; restart daemon; assert the next build repairs it + completes correctly; assert a warning logged. (SR-EXEC-ROOT-CORRUPTION-1, §3.6a) | `crates/razel-daemon/tests/transcript.rs` | **T2.5** | RED-first |
 | G22 | `manifest_canonical_across_implementations` | a multi-output manifest encodes byte-equal in the Rust and (tautc) TS codecs, sorted-by-path | The §4.4 `c2_manifest_canonical_wire` golden + a cross-language CBOR byte-equality check. (SR-C2-MANIFEST-ENCODING-1, §4.2b) | `crates/razel-wire` (tests) | **T1** | RED-first |
 | G23 | `depvalue_not_leakable` | a `ComputeFn` cannot store a `DepValue` past return or call an `Engine` method | A compile-fail test (`#[compile_fail]`/commented + note): code that would compile only if the borrow/no-engine-access constraint were removed must NOT compile. (SR-C1-DEPVALUE-BORROW-SAFETY-1, §4.1b) | `crates/razel-engine/src/lib.rs` (tests) | **T1** | RED-first |
+| G24 | `exec_root_fixup_zero_churn_and_diff` | `fix_up_exec_root` is a TRUE incremental delta: an unchanged source keeps its exact symlink (same inode); a Rescan with no source-set change returns `did_change == false` (so `exec_root_rebuilds` does NOT increment); an added dir gets a symlink, a deleted dir is unlinked, neither touches siblings | Unit-test `fix_up_exec_root` directly (§3.6a): capture a source symlink's `ino()`; Rescan with identical sources → assert same `ino()` + `did_change == false`; add a dir → assert only its link appears; delete a dir → assert only its link is gone. (PAR-2, §3.6a edge cases E1/E2) | `crates/razel-build/src/exec_root.rs` (tests) | **T1** | RED-first |
+| G25 | `exec_root_external_symlink_on_demand` | `.razel-crates` materialized on a later build → `external/` symlink created exactly once (None→Some); a subsequent same-deps build reuses it (Some==Some, no re-symlink, same inode); removal unlinks it | Workspace with an external dep; first build materializes `.razel-crates` → assert `external/` symlink live; second build (same deps) → assert same `symlink_metadata().ino()`, `did_change == false`. (§3.6a edge case E3) | `crates/razel-daemon/tests/exec_root_fixup.rs` (new) | **T2.5** | RED-first |
+| G26 | `actor_build_reply_backpressure_no_cancel` | the `Build` reply channel delivers the build result to the CALLER (not the connection thread); a `SetInput`/`Rescan` enqueued during an in-flight `Build` is processed strictly AFTER the build replies (NO-CANCEL FIFO), never mid-build; the `Build` reply NEVER returns `Cancelled` in v1 | Drive a slow `Build` (sleep-injected `do_build_impl`); from another thread enqueue `SetInput` before it replies; assert (1) the `Build` reply arrives first with the pre-edit result, (2) the `SetInput` applies only after, (3) no panic. Distinct from G11 (which asserts snapshot byte-identity); this asserts the reply-path + NO-CANCEL ordering (§3.5a, R-9.5/R-9.6, CA-2). | `crates/razel-daemon/tests/transcript.rs` | **T2.5** | RED-first |
+| G27 | `startup_rescan_baselines_before_serving` | the synchronous `Rescan { StartUp }` establishes EVERY leaf-input key + the exec-root forest BEFORE the accept loop binds, so the first `SetInput` after startup cannot hit the `lib.rs:86` unknown-key panic | Start the actor; before any `Build`, drive a `SetInput` for a known source leaf → succeeds (key exists); drive a `SetInput` for an unknown path → panics/loud-shutdown (expected, PAR-5). Assert `analysis_runs == 1` and the exec-root forest exists after startup, with `revision == 1`. (§3.5a startup ordering, CA-6) | `crates/razel-daemon/tests/transcript.rs` | **T2.5** | RED-first |
 
 ### 7.3 How each becomes an ENFORCED gate (red-first/extend → tiered)
 
@@ -1182,12 +1424,12 @@ actions_executed, action_cache_hits, input_digest_reads, exec_root_rebuilds, ana
   > `crates/razel-build/BUILD.bazel` (or promote the existing dogfood target), remove the `#[ignore]`,
   > drop any `["manual"]` tag, and tag `["razel_self_host"]` so CI includes it selectively. Document
   > the prerequisite in a target comment: `# REQUIRES: RAZEL_PROCESS_WRAPPER + razel on PATH (self-host)`.
-- **Tier-1 (G1, G3, G8, G10, G13, G15, G19, G22, G23):** carve-out, mandatory for release, daily
-  against the real target.
+- **Tier-1 (G1, G3, G8, G10, G13, G15, G19, G22, G23, G24):** carve-out, mandatory for release,
+  daily against the real target.
 - **Tier-2 (G2, G5, G7):** `//:test_all`, daily CI — pin the design contracts.
-- **Tier-2.5 (G4, G6, G9, G11, G12, G14, G16, G17, G18, G20, G21):** the warm-daemon deliverable —
-  **mandatory before the daemon becomes the default build path** (before WS-E's flip ships
-  unguarded).
+- **Tier-2.5 (G4, G6, G9, G11, G12, G14, G16, G17, G18, G20, G21, G25, G26, G27):** the warm-daemon
+  deliverable — **mandatory before the daemon becomes the default build path** (before WS-E's flip
+  ships unguarded).
 
 ### 7.4 What is now gated that was silently un-gated before
 
@@ -1267,17 +1509,25 @@ commit only when asked) and "keep the cold path until the warm path is gated gre
 - **R-8 Persistence/restart rescan (NEW).** A file edited while the daemon is down must be
   caught by the startup rescan, not missed. Mitigation: full digest re-baseline at `serve`
   startup. Gated by G9.
-- **R-9 Concurrent `do_build` races on engine mutation (CRITICAL, NEW — rev3, CA-1).** The current
-  code spawns each RPC thread (`rpc.rs:143-148`) and each `do_run` background build (`rpc.rs:247`)
-  on its own thread sharing `Arc<Inner>`, with **no actor queue** — violating the frozen single-writer
-  boundary (§3.5). Risk: a `Cell`/`RefCell` borrow panic, silent corruption of `BuildState.revision`
-  ordering, or a reply arriving mid-mutation. The WorkspaceActor is the FIRST WS-D item; until it
-  lands, an explicit serialization lock (test-only). Gated by G11 (must serialize visibly or panic,
-  not silently corrupt).
-- **R-9.5 Build cancellation on watcher event (NEW — rev3, CA-2).** Whether an in-flight build
-  CANCELs when a watcher `SetInput`/`Rescan` arrives. **Frozen answer: NO CANCEL** — the event queues
-  and the next build sees the updated inputs (simpler; Bazel cancels+restarts as a perf optimization,
-  deferred). The `Build` reply therefore never returns `Cancelled` in v1. G11 specifies this behavior.
+- **R-9 Concurrent `do_build` races on engine mutation (CRITICAL — rev3 CA-1; DESIGN RESOLVED
+  rev4).** The current code spawns each RPC thread (`rpc.rs:143-148`) and each `do_run` background
+  build (`rpc.rs:247`) on its own thread sharing `Arc<Inner>`, with **no actor queue** — violating
+  the frozen single-writer boundary (§3.5). Risk: a `Cell`/`RefCell` borrow panic, silent corruption
+  of `BuildState.revision` ordering, or a reply arriving mid-mutation. **rev4: the actor is now fully
+  specified** (§3.5a: inbox enum, one-shot reply channel, FIFO single-writer loop, startup ordering,
+  panic→reply-Err) — the PAR-7 "design-heavy" caveat is discharged; WS-D sub-task **D1** is the fix
+  and is the FIRST WS-D item. Until D1 lands, an explicit serialization lock (test-only). Gated by
+  G11 (snapshot byte-identity under concurrency) + G26 (reply backpressure + NO-CANCEL ordering)
+  + G27 (startup baseline before serving).
+- **R-9.5 Build cancellation on watcher event (rev3 CA-2; FLIP POINT pinned rev4).** Whether an
+  in-flight build CANCELs when a watcher `SetInput`/`Rescan` arrives. **Frozen answer: NO CANCEL** —
+  the event queues and the next build sees the updated inputs (simpler; Bazel cancels+restarts as a
+  perf optimization, deferred). The `Build` reply therefore never returns `Cancelled` in v1.
+  **rev4: the EXACT actor-loop change to flip this is pinned in §3.5a ("THE ONE FLIP POINT")** — only
+  the `Build` arm gains a peek-and-abort; the message enum, reply channel, snapshot path, and
+  §3.6a/§3.6b are unchanged. **This is the one design decision Gianni should consciously weigh** (v1
+  NO-CANCEL trades a build-duration staleness window for a far simpler, panic-free actor loop). Gated
+  by G26 (asserts NO-CANCEL FIFO) + G11.
 - **R-9.6 Staleness window under a long build (NEW — rev3, CA-5).** With NO CANCEL (R-9.5), a watcher
   change arriving during a long build is not reflected until the build completes (max staleness window
   = build duration). Mitigation: documented behavior; strict-mode CI uses `razel build --batch` to
@@ -1434,3 +1684,45 @@ acting; line numbers cited by the reviewers were trusted-but-checked and correct
 **Deduplication / reconciliation:** OPER-7 (analysis invalidation) and PAR-4 (analysis-cache key) target the same gap — both resolved in a single §3.6b subsection (content-based `AnalysisDigest`, Rescan-dirty), with G14 extended for the trigger and G12 noting BUILD-edit routing. SR-WATCHFS-FALLBACK-1's proposed §3.7b was folded into the §3.7 lifecycle subsection + G16 (one location). The exec-root fixup design appears once in §3.6a, referenced from §5 WS-D (PAR-2 + PAR-7).
 
 **Findings deliberately NOT taken / down-scoped:** none rejected outright. The two **P3** completeness/concurrency items were taken as lightweight gate/spec notes rather than new sections (CA-8 → a scenario inside G11; OPER-8 → a §3.7 bullet + R-6), since spinning up dedicated machinery for them would over-build ahead of need. SR-GATE-3 (P2) was elevated to a §7.1 BLOCKER note because it gates G4's implementability (a P2 finding with P1 blast radius on a gate).
+
+---
+
+## 12.1 WS-D design spike (2026-06-20) — finding → resolution
+
+The spike took WS-D from DESIGN-HEAVY (blocked-before-coding) to CODEABLE. Three coupled
+sub-designs (actor mechanics, exec-root fixup, analysis cache) were integrated into one consistent
+WS-D design: the SAME `Rescan` re-symlinks the forest (§3.6a), marks analysis dirty (§3.6b), and
+refreshes `leaf_inputs` (§3.5) — verified against the tree at every cited line.
+
+| Finding | Sev | Resolution (section) | One-line |
+|---------|-----|----------------------|----------|
+| PAR-7 (design-heavy → codeable) | P2 | §3.5a/§3.6a/§3.6b, §5 WS-D (D1-D6) | The "design before coding" blocker is discharged: concrete algorithms + seams + the D1-D6 sub-tasks replace it. |
+| R-9 (actor loop unspecified) | P1 | §3.5a, §9 R-9 | Inbox enum, one-shot reply channel, FIFO single-writer loop, startup ordering, panic→reply-Err — fully specified; D1 is the fix. |
+| CA-2 (reply channel) | P1 | §3.5a, §7.2 G26 | `Build` carries a `sync_channel(1)` reply so the CALLER blocks on the result (backpressure); G26 proves it. |
+| CA-5 (staleness window) | P2 | §3.5a NO-CANCEL, R-9.6 | Max staleness = build duration; documented; `--batch` escape; the flip to cancel-restart is pinned to one loop arm. |
+| CA-6 (FIFO + SetInput-after-Rescan) | P2 | §3.5a loop + startup, §7.2 G27 | One message in flight; startup `Rescan` baselines every leaf key BEFORE serving so SetInput can't hit the `lib.rs:86` panic; G27. |
+| R-9.5 (NO-CANCEL flip point) | P1 | §3.5a "THE ONE FLIP POINT", R-9.5 | NO-CANCEL stays FROZEN; the exact `Build`-arm change to flip it is marked — the one decision for Gianni. |
+| PAR-2 (exec-root fixup) | P2 | §3.6a `fix_up_exec_root`, §7.2 G24/G25 | True incremental delta (add→symlink, delete→unlink, external on appear/move); `did_change` drives the `exec_root_rebuilds` counter; zero churn on unchanged sources. |
+| SR-EXEC-ROOT-CORRUPTION-1 | P2 | §3.6a `validate_exec_root`, §7.2 G21/G17 | Startup validation/repair of broken/missing/wrong links; unrepairable → full `prepare_exec_root` fallback; crash recovery via the startup Rescan. |
+| PAR-4 / OPER-7 (analysis key + invalidation) | P2 | §3.6b `AnalysisDigest`/`do_build_impl`, §7.2 G14 | Content-based key (sorted BUILD/MODULE/lockfile/rc digests + `options_digest`); any Rescan → dirty; recompute-on-change only; lockfile change keyed via `graph_shape_digest` (closes the GlobalFlags-mutable-field hole). |
+| EXEC-ROOT-REBUILD-COUNTER-001 | P1 | §3.6a, §7.1 | The persistent fixup returns `did_change`; the actor increments `exec_root_rebuilds` once per Rescan iff `did_change` — drives G14's `== 0` on the no-op. |
+| ANALYSIS-RUNS-COUNTER-001 | P1 | §3.6b, §7.1 | `analysis_runs` increments only in the fresh-vs-cached branch of `do_build_impl`; cached reuse → 0. |
+
+**Consistency check (the three sub-designs are coupled — reconciled):** (1) §3.6b's "graph-shape
+event → Rescan → analysis dirty" == §3.6a's `handle_rescan` setting `cached_analysis = None` in the
+same handler that calls `fix_up_exec_root`. (2) §3.6a's add/delete/rename handling (symlink/unlink)
+== the source-set diff `enumerate_sources` feeds, which is the SAME source-universe whose change
+routes to `Rescan` in §3.5. (3) The actor (§3.5a) OWNS the exec-root + analysis cache; no other
+thread mutates them — so the fixup, the analysis recompute, and the engine update are one atomic,
+FIFO-ordered message. No contradiction across the three.
+
+**Line-number corrections (rev4, trusted-but-checked against the tree):** the workspace analyze
+entry point is **`analyze_workspace_resolved`** (`drive.rs:58`), not `analyze_workspace_with` (the
+sub-design drafts used the latter in two spots — corrected here). The `prepare_exec_root` source
+exclusion list is **`exec_root.rs:19-21`** (one draft said 19-22). `record_state`'s retain/push/sort
+is `rpc.rs:430-432` (within the cited 410-436 block). All other cited lines (ComputeFn `lib.rs:17`,
+set_input panic `lib.rs:86`, `prepare_exec_root` 11-35, `digest_input` 51-67, `run_one_target`
+87-124, `Inner` 65-83, `serve` 134-150, `warm_analyze` 153-172, `do_run` 247-289,
+`stream_build_state` 293-307, `do_build` 336-407, toy `Workspace` `lib.rs:44-87`, `watch`
+`lib.rs:92-106`, `run_action` `incremental.rs:201-245`, `sync_file` guard `incremental.rs:177`)
+verified correct.
