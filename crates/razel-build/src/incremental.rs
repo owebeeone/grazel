@@ -3,35 +3,36 @@
 //! whole target.
 //!
 //! The build graph maps onto the engine directly:
-//!   - each source file        → an **input** node (value = its content digest);
-//!   - each action             → a **derived** node whose deps are its inputs
-//!     (a generated input depends on the *producing action's* node), and whose
-//!     compute runs the action (cache restore-or-run) and returns the digest of
-//!     its outputs;
-//!   - each target             → a **derived** node over its action nodes.
+//!   - each source file → an **input** node (value = `NodeValue::Digest`, its content digest);
+//!   - each action → an **action** node (`add_action`, C1) whose deps are its inputs (a
+//!     generated input depends on the *producing action's* node), whose compute runs the
+//!     action via [`execute_action`] (C2) and returns its output `NodeValue::Manifest`;
+//!   - each target → a **derived** node over its action nodes.
 //!
-//! On a file edit, [`IncrementalBuilder::sync_file`] re-digests it and feeds the
-//! engine; the next [`build`](IncrementalBuilder::build) re-runs only the actions
-//! whose transitive inputs changed (early-cutoff stops propagation when an
-//! action's outputs come out identical). The action node's value being its
-//! *output* digest is what makes that firewall work.
+//! On a file edit, [`IncrementalBuilder::sync_file`] re-digests it and feeds the engine; the
+//! next [`build`](IncrementalBuilder::build) re-runs only the actions whose transitive inputs
+//! changed (output-level early-cutoff stops propagation when an action's manifest comes out
+//! identical). The action node's value being its *output manifest* is what makes that firewall
+//! work.
 //!
-//! The engine memoizes the digest; the **output files** are produced as a side
-//! effect of `compute`. When the engine skips an action (inputs unchanged) the
-//! outputs are assumed already present in the (warm) exec root — exactly the
-//! daemon's persistent-workspace model.
+//! The engine memoizes the value; the **output files** are produced as a side effect of
+//! `execute_action`. When the engine skips an action (inputs unchanged) the outputs are
+//! assumed already present in the (warm) exec root — exactly the daemon's persistent-workspace
+//! model.
 //!
-//! `compute` is infallible (`Fn(&[Digest]) -> Digest`), so action failures are
-//! captured in a shared error sink and surfaced by `build` after the request.
+//! C1/C2 migration (WS-C): action input digests come from the **named, owned** [`DepValue`]s
+//! (a leaf is a `Digest`; a generated input is selected BY PATH out of the producing action's
+//! `Manifest`) — no filesystem re-read. An action's failure propagates as the engine's
+//! `Err(ComputeError)`; no separate error sink.
 
 use crate::analyze_build;
 use razel_actions::Action;
 use razel_core::Digest;
-use razel_engine::Engine;
-use razel_exec::{Cache, Isolation, Materialize, Sandbox, build_action_in};
+use razel_engine::{DepValue, Engine, NodeValue};
+use razel_exec::{Cache, Isolation, Materialize, Sandbox, digest_path, execute_action};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// One incremental build session over a fixed exec root + cache. Holds the warm
@@ -41,7 +42,6 @@ pub struct IncrementalBuilder {
     engine: Engine,
     exec_root: PathBuf,
     cache: Rc<Cache>,
-    errors: Rc<RefCell<Vec<String>>>,
     /// Leaf (source) input node keys that exist on disk and can be `sync_file`d.
     leaf_inputs: HashSet<String>,
     /// How each action's sandbox materializes its inputs (symlink vs hardlink).
@@ -60,21 +60,18 @@ fn action_key(target: &str, i: usize) -> String {
     format!("act:{target}#{i}")
 }
 
-fn digest_of(path: &std::path::Path) -> Digest {
-    std::fs::read(path)
-        .map(|b| Digest::of(&b))
-        .unwrap_or_else(|_| Digest::of(b""))
+/// A leaf source file's node value: its canonical content digest (C2 `digest_path`); a missing
+/// file digests as empty (symmetric with the executor skipping absent inputs).
+fn leaf_value(path: &Path) -> NodeValue {
+    NodeValue::Digest(digest_path(path).unwrap_or_else(|| Digest::of(b"")))
 }
 
-/// Combine dependency digests into a node value (order-sensitive).
-fn combine(parts: &[Digest]) -> Digest {
-    Digest::of(
-        parts
-            .iter()
-            .map(|p| p.to_hex())
-            .collect::<String>()
-            .as_bytes(),
-    )
+/// Flatten a dep value to a stable byte string for the target-aggregation node.
+fn dep_bytes(v: &NodeValue) -> String {
+    match v {
+        NodeValue::Digest(g) => g.to_hex(),
+        NodeValue::Manifest(m) => m.iter().map(|(p, g)| format!("{p}={}", g.to_hex())).collect(),
+    }
 }
 
 impl IncrementalBuilder {
@@ -83,7 +80,6 @@ impl IncrementalBuilder {
             engine: Engine::new(),
             exec_root: exec_root.into(),
             cache: Rc::new(cache),
-            errors: Rc::new(RefCell::new(Vec::new())),
             leaf_inputs: HashSet::new(),
             materialize: Materialize::default(),
             isolation: Isolation::default(),
@@ -120,7 +116,8 @@ impl IncrementalBuilder {
             let mut act_keys = Vec::new();
             for (i, act) in t.actions.iter().enumerate() {
                 let akey = action_key(&t.name, i);
-                // Deps: a generated input → its producing action; else a leaf file input.
+                // Deps (in act.inputs order, one per input): a generated input → its producing
+                // action node; else a leaf file input node.
                 let mut deps = Vec::new();
                 for inp in &act.inputs {
                     if let Some(prod) = producer.get(inp) {
@@ -129,15 +126,14 @@ impl IncrementalBuilder {
                         let fk = file_key(inp);
                         if self.leaf_inputs.insert(fk.clone()) {
                             self.engine
-                                .add_input(&fk, digest_of(&self.exec_root.join(inp)));
+                                .add_input(&fk, leaf_value(&self.exec_root.join(inp)));
                         }
                         deps.push(fk);
                     }
                 }
 
-                // Each action gets a PERSISTENT sandbox, reused across rebuilds —
-                // only the changed input links are fixed up (Bazel's stash trick),
-                // and a content-only change is zero link churn.
+                // Each action gets a PERSISTENT sandbox, reused across rebuilds — only the
+                // changed input links are fixed up, and a content-only change is zero churn.
                 let sb_dir = self
                     .exec_root
                     .join(".razel-sandbox")
@@ -148,70 +144,85 @@ impl IncrementalBuilder {
                         .with_isolation(self.isolation),
                 ));
 
-                // The action's compute: restore-or-run, value = digest of its outputs.
+                // The action node: restore-or-run via execute_action (C2); value = its output
+                // Manifest (so output-level early cutoff tracks the produced bytes). Input
+                // digests come from the dep VALUES (named, C1) — never a filesystem re-read.
                 let argv = act.argv.clone();
-                let inputs = act.inputs.clone();
+                let input_paths = act.inputs.clone();
                 let outputs = act.outputs.clone();
                 let cache = self.cache.clone();
                 let exec_root = self.exec_root.clone();
-                let errors = self.errors.clone();
                 let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
-                self.engine.add_derived(&akey, &dep_refs, move |_| {
+                self.engine.add_action(&akey, &dep_refs, move |dep_values| {
                     run_action(
-                        &argv, &inputs, &outputs, &cache, &exec_root, &errors, &sandbox,
+                        &argv,
+                        &input_paths,
+                        &outputs,
+                        dep_values,
+                        &cache,
+                        &exec_root,
+                        &sandbox,
                     )
                 });
                 act_keys.push(akey);
             }
+            // Target node: a pure aggregation over its action manifests.
             let tkey = target_key(&t.name);
             let act_refs: Vec<&str> = act_keys.iter().map(String::as_str).collect();
-            self.engine.add_derived(&tkey, &act_refs, combine);
+            self.engine.add_derived(&tkey, &act_refs, |deps| {
+                let s: String = deps.iter().map(|dv| dep_bytes(&dv.value)).collect();
+                NodeValue::Digest(Digest::of(s.as_bytes()))
+            });
         }
         Ok(())
     }
 
-    /// An edited file changed on disk: re-digest it and feed the engine. The next
-    /// `build` recomputes only what transitively depends on it.
+    /// An edited file changed on disk: re-digest it and feed the engine. The next `build`
+    /// recomputes only what transitively depends on it. Guarded by `leaf_inputs` — a `set_input`
+    /// on an unknown key panics (engine), so an edit to a non-leaf / new path is a no-op here
+    /// (the daemon actor routes those through a Rescan instead, §3.5).
     pub fn sync_file(&self, path: &str) {
         let key = file_key(path);
         if self.leaf_inputs.contains(&key) {
             self.engine
-                .set_input(&key, digest_of(&self.exec_root.join(path)));
+                .set_input(&key, leaf_value(&self.exec_root.join(path)));
         }
     }
 
-    /// Build `target`; returns how many engine nodes recomputed (the O(affected)
-    /// metric). Errors from any action surface here.
+    /// Build `target`; returns how many engine nodes recomputed (the O(affected) metric). An
+    /// action failure surfaces as the engine request's `Err`.
     pub fn build(&self, target: &str) -> Result<usize, String> {
-        self.errors.borrow_mut().clear();
         self.engine.reset_recomputes();
         self.engine.request(&target_key(target))?;
-        let errs = self.errors.borrow();
-        if !errs.is_empty() {
-            return Err(errs.join("; "));
-        }
         Ok(self.engine.recomputes())
     }
 }
 
-/// Run one action (cache restore-or-run) in its persistent `sandbox` and return
-/// the digest of its outputs. Side-effecting; failures are pushed to `errors`
-/// and a sentinel digest returned.
+/// Run one action (cache restore-or-run via [`execute_action`], C2) in its persistent
+/// `sandbox`; the value is its output [`Manifest`]. Input digests come from the named dep
+/// values (`dep_values` is in `input_paths` order): a leaf dep is a `Digest`; a generated input
+/// is selected BY PATH from the producing action's `Manifest`. No filesystem re-read.
 #[allow(clippy::too_many_arguments)]
 fn run_action(
     argv: &[String],
-    inputs: &[String],
+    input_paths: &[String],
     outputs: &[String],
+    dep_values: &[DepValue],
     cache: &Cache,
-    exec_root: &std::path::Path,
-    errors: &RefCell<Vec<String>>,
+    exec_root: &Path,
     sandbox: &Rc<RefCell<Sandbox>>,
-) -> Digest {
+) -> Result<NodeValue, String> {
     let mut input_digests = BTreeMap::new();
-    for inp in inputs {
-        if let Ok(bytes) = std::fs::read(exec_root.join(inp)) {
-            input_digests.insert(inp.clone(), Digest::of(&bytes));
-        }
+    for (inp, dv) in input_paths.iter().zip(dep_values.iter()) {
+        let dg = match &dv.value {
+            NodeValue::Digest(g) => *g,
+            NodeValue::Manifest(m) => m
+                .iter()
+                .find(|(p, _)| p == inp)
+                .map(|(_, g)| *g)
+                .ok_or_else(|| format!("input `{inp}` not produced by `{}`", dv.key))?,
+        };
+        input_digests.insert(inp.clone(), dg);
     }
     let action = Action {
         argv: argv.to_vec(),
@@ -222,27 +233,14 @@ fn run_action(
         outputs: outputs.to_vec(),
     };
     let mut sb = sandbox.borrow_mut();
-    match build_action_in(&action, cache, exec_root, &mut sb) {
-        Ok(r) if r.exit_code == 0 => {
-            // Value = digest over the produced outputs, so early-cutoff tracks them.
-            let parts: Vec<Digest> = outputs
-                .iter()
-                .map(|o| digest_of(&exec_root.join(o)))
-                .collect();
-            combine(&parts)
-        }
-        Ok(r) => {
-            errors
-                .borrow_mut()
-                .push(format!("action failed ({}): {argv:?}", r.exit_code));
-            Digest::of(b"<error>")
-        }
-        Err(e) => {
-            errors.borrow_mut().push(e.to_string());
-            Digest::of(b"<error>")
-        }
+    match execute_action(&action, cache, exec_root, &mut sb) {
+        ExecOutcome::Cached(m) | ExecOutcome::Executed(m) => Ok(NodeValue::Manifest(m)),
+        ExecOutcome::Failed(msg) => Err(msg),
     }
 }
+
+// Bring the C2 outcome enum into scope for `run_action`'s match.
+use razel_exec::ExecOutcome;
 
 #[cfg(test)]
 mod tests {
