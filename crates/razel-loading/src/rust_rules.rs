@@ -242,30 +242,117 @@ fn rust_rules(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    /// `rust_test(name, srcs|crate, deps=[], edition=…)` — DECLARES + captures (rule_class
-    /// `rust_test`) so the 21 workspace BUILDs + razel-cli that `load()` and call it LOAD and QUERY
-    /// correctly. Its ANALYSIS — the `rustc --test` harness binary (plus the `crate=` lib-under-test
-    /// form) — is the test-verb rung, NOT the self-host build: no `rust_test` is in the `razel`
-    /// binary's dep closure (P5.4 dogfood), so this records a deferred-analysis native that is a
-    /// loud, named error only if a build actually demands a rust_test target.
+    /// `rust_test(name, srcs|crate, deps=[], edition=…)` — DECLARES + captures, then ANALYZES to a
+    /// `rustc --test` action producing a runnable test binary (in `default_info`, so `razel test`
+    /// executes it). Two forms: `srcs=` is a standalone test crate; `crate=:lib` recompiles the
+    /// lib-under-test's OWN sources WITH `--test` (Bazel's unit-test form). Lean argv (mirrors
+    /// `rust_shared_library`); the faithful rules_rust argv, the bazel test ENV
+    /// (`TEST_TMPDIR`/`CARGO_MANIFEST_DIR`/runfiles), `--test_arg`/filter passthrough, build-script
+    /// `OUT_DIR`, and `test_suite` expansion are the named follow-ons.
     fn native_rust_test<'v>(
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] srcs: Option<Value<'v>>,
         #[starlark(require = named)] deps: Option<Value<'v>>,
-        #[starlark(require = named)] _edition: Option<String>,
+        #[starlark(require = named)] edition: Option<String>,
         #[starlark(kwargs)] _kw: SmallMap<String, Value<'v>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let label = canon_label(session(eval), &name);
         crate::loaded::capture_rule(eval, &label, "rust_test", &[("srcs", srcs), ("deps", deps)], &_kw);
+        // `crate=:lib` (the lib-under-test) + `crate_name`/`crate_root` arrive via kwargs (`crate` is
+        // a Rust keyword, never bound as a param). Read at LOAD; the lib's sources resolve at analysis.
+        let crate_under_test = _kw.get("crate").and_then(|v| v.unpack_str()).map(str::to_owned);
+        let crate_name_attr = _kw.get("crate_name").and_then(|v| v.unpack_str()).map(str::to_owned);
+        let crate_root_attr = _kw.get("crate_root").and_then(|v| v.unpack_str()).map(str::to_owned);
+        let srcs = crate::values::str_attr_parts(eval, srcs)?;
+        let deps = crate::values::str_attr_parts(eval, deps)?;
         crate::dialect::record_native(eval, label, native_decl(move |eval| {
-            // rust_test ANALYZES to an EMPTY target (no actions). `drive_all` analyzes every target
-            // in a loaded package — so this must not error — but the `rustc --test` harness (and the
-            // `crate=` lib-under-test form) is the test-verb rung, NOT the self-host build (no
-            // rust_test is in the `razel` binary's closure). A `build` of a rust_test produces nothing.
+            // The string leaves of a captured attr (source paths / dep labels) — for reading the
+            // `crate=:lib` lib-under-test's `srcs`/`deps`/… at analysis (loading twin of `attr_labels`).
+            fn raw_strings(raw: &crate::loaded::RawAttr) -> Vec<String> {
+                use crate::loaded::RawAttr::*;
+                match raw {
+                    Str(s) | Label(s) => vec![s.clone()],
+                    List(xs) | Tuple(xs) | Concat(xs) => xs.iter().flat_map(raw_strings).collect(),
+                    _ => vec![],
+                }
+            }
+            let mut srcs = crate::values::resolve_str_parts(eval, &srcs)?;
+            let mut deps = crate::values::resolve_str_parts(eval, &deps)?;
+            let mut edition = edition.clone().unwrap_or_else(|| "2021".into());
+            let mut crate_name = crate_name_attr.clone().unwrap_or_else(|| name.clone());
+            let mut crate_root_raw = crate_root_attr.clone();
+            // `crate=:lib` — recompile the lib-under-test's OWN sources WITH `--test` (Bazel's
+            // unit-test form): pull its srcs/deps/edition/crate_root/crate_name from the loaded graph.
+            if let Some(ref cut) = crate_under_test {
+                let sess = session(eval);
+                let cut_label = canon_label(sess, cut);
+                let lib = sess.loaded_targets.borrow().get(&cut_label).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("rust_test `{name}`: crate `{cut}` not found in the loaded graph")
+                })?;
+                if let Some(a) = lib.attrs.get("srcs") {
+                    srcs = raw_strings(a);
+                }
+                if let Some(a) = lib.attrs.get("deps") {
+                    deps.extend(raw_strings(a));
+                }
+                if let Some(e) =
+                    lib.attrs.get("edition").map(raw_strings).and_then(|v| v.into_iter().next())
+                {
+                    edition = e;
+                }
+                if let Some(n) =
+                    lib.attrs.get("crate_name").map(raw_strings).and_then(|v| v.into_iter().next())
+                {
+                    crate_name = n;
+                }
+                if crate_root_raw.is_none() {
+                    crate_root_raw =
+                        lib.attrs.get("crate_root").map(raw_strings).and_then(|v| v.into_iter().next());
+                }
+            }
             let sess = session(eval);
-            let nm = canon_label(sess, &name);
-            record_target(sess, AnalyzedTarget { name: nm, ..Default::default() });
+            let srcs: Vec<String> = srcs.iter().map(|s| qualify(sess, s)).collect();
+            let crate_root = match crate_root_raw {
+                Some(cr) => qualify(sess, &cr),
+                None => srcs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("rust_test `{name}` needs `srcs` or `crate`"))?,
+            };
+            let (extern_flags, dep_rlibs, dep_names, _bs) = extern_args(eval, deps.clone(), &[])?;
+            let sess = session(eval);
+            // The `--test` harness: rustc compiles a runnable test-runner binary (the built-in
+            // libtest `main`). Lean argv (like rust_shared_library); faithful rules_rust argv + the
+            // bazel test ENV + `test_suite` expansion are the follow-ons. The bin lands in
+            // `default_info`, so `razel test` (run_one_test) executes it.
+            let testbin = out_path(sess, &name);
+            let mut argv = vec![
+                rustc(),
+                "--edition".into(),
+                edition,
+                "--test".into(),
+                "--crate-name".into(),
+                crate_name,
+                crate_root,
+                "-o".into(),
+                testbin.clone(),
+            ];
+            argv.extend(extern_flags);
+            let mut inputs = srcs;
+            inputs.extend(dep_rlibs);
+            record_target(sess, AnalyzedTarget {
+                name: canon_label(sess, &name),
+                deps: dep_names,
+                actions: vec![AnalyzedAction {
+                    mnemonic: "Rustc".into(),
+                    argv,
+                    inputs,
+                    outputs: vec![testbin.clone()],
+                }],
+                default_info: vec![testbin],
+                providers: Default::default(),
+            });
             Ok(())
         }))?;
         Ok(NoneType)
