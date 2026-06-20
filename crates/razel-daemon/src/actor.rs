@@ -282,13 +282,10 @@ impl WorkspaceActor {
         let flags = opts.global_flags();
         // Resolve + record this request's executor concurrency: machine cores by default (bazel
         // `auto`), or the request's `-j N`. Re-resolved every build from THIS request's args, so an
-        // override applies only to its own build — never sticky on the warm daemon. (The warm engine
-        // path is serial today; this drives the cold/`--batch` executor and is the per-request
-        // contract for when warm-parallel execution lands.)
-        self.jobs.store(
-            razel_build::effective_jobs(flags.jobs),
-            Ordering::SeqCst,
-        );
+        // override applies only to its own build — never sticky on the warm daemon. Drives the warm
+        // engine's PARALLEL evaluator (request_parallel) for this build.
+        let jobs = razel_build::effective_jobs(flags.jobs);
+        self.jobs.store(jobs, Ordering::SeqCst);
         let token = opts
             .positionals
             .last()
@@ -311,7 +308,7 @@ impl WorkspaceActor {
                         let _ = tx.send(line.to_string());
                     })));
                 }
-                let build_res = builder.build(&build_name); // may Err("cancelled")
+                let build_res = builder.build(&build_name, jobs); // parallel; may Err("cancelled")
                 builder.set_progress(None);
                 build_res?;
                 // Built-vs-Cached uses ACTIONS EXECUTED (cache misses) — the cold path's

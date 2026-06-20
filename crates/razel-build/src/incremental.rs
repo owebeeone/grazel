@@ -230,12 +230,14 @@ impl IncrementalBuilder {
         }
     }
 
-    /// Build `target`; returns how many engine nodes recomputed (the O(affected) metric). An
-    /// action failure surfaces as the engine request's `Err`.
-    pub fn build(&self, target: &str) -> Result<usize, String> {
+    /// Build `target` with up to `jobs` actions running concurrently (`jobs <= 1` ⇒ serial); returns
+    /// how many engine nodes recomputed (the O(affected) metric). Independent actions run in
+    /// parallel on the engine's evaluator — same result + same recompute set as serial. An action
+    /// failure surfaces as the engine request's `Err`.
+    pub fn build(&self, target: &str, jobs: usize) -> Result<usize, String> {
         self.engine.reset_recomputes();
         self.executed.store(0, Ordering::Relaxed);
-        self.engine.request(&target_key(target))?;
+        self.engine.request_parallel(&target_key(target), jobs)?;
         Ok(self.engine.recomputes())
     }
 
@@ -380,7 +382,7 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
         b.configure(BUILD).unwrap();
 
         // First build: both actions + the target node compute.
-        let first = b.build("lib").unwrap();
+        let first = b.build("lib", 4).unwrap();
         assert_eq!(first, 3, "cold build: act(x) + act(y) + tgt");
         assert_eq!(
             std::fs::read_to_string(exec.path().join("x.txt.out")).unwrap(),
@@ -394,7 +396,7 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
         // Edit only x.txt → rebuild recomputes act(x) + tgt; act(y) is firewalled.
         std::fs::write(exec.path().join("x.txt"), "HELLO").unwrap();
         b.sync_file("x.txt");
-        let second = b.build("lib").unwrap();
+        let second = b.build("lib", 4).unwrap();
         assert_eq!(second, 2, "only act(x) + tgt recompute — act(y) skipped");
         assert_eq!(
             std::fs::read_to_string(exec.path().join("x.txt.out")).unwrap(),
@@ -402,7 +404,7 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
         );
 
         // No change → a third build recomputes nothing.
-        let third = b.build("lib").unwrap();
+        let third = b.build("lib", 4).unwrap();
         assert_eq!(third, 0, "no input changed → zero recompute");
     }
 
@@ -418,7 +420,7 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
             IncrementalBuilder::new(exec.path(), cache).with_materialize(Materialize::Hardlink);
         b.configure(BUILD).unwrap();
 
-        assert_eq!(b.build("lib").unwrap(), 3);
+        assert_eq!(b.build("lib", 4).unwrap(), 3);
         assert_eq!(
             std::fs::read_to_string(exec.path().join("x.txt.out")).unwrap(),
             "hello"
@@ -428,7 +430,7 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
         // and the hardlink reflects the new content.
         std::fs::write(exec.path().join("x.txt"), "HELLO").unwrap();
         b.sync_file("x.txt");
-        assert_eq!(b.build("lib").unwrap(), 2, "only act(x) + tgt recompute");
+        assert_eq!(b.build("lib", 4).unwrap(), 2, "only act(x) + tgt recompute");
         assert_eq!(
             std::fs::read_to_string(exec.path().join("x.txt.out")).unwrap(),
             "HELLO"
@@ -447,12 +449,12 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
             let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
             let mut b = IncrementalBuilder::new(exec.path(), cache);
             b.configure(BUILD).unwrap();
-            b.build("lib").unwrap();
+            b.build("lib", 4).unwrap();
             for (f, v) in edits {
                 std::fs::write(exec.path().join(f), v).unwrap();
                 b.sync_file(f);
             }
-            b.build("lib").unwrap();
+            b.build("lib", 4).unwrap();
             // The observable result: the produced output contents.
             format!(
                 "{}|{}",
@@ -481,7 +483,7 @@ multi(name = "lib", srcs = ["x.txt", "y.txt"])
         let mut b = IncrementalBuilder::new(exec.path(), cache)
             .with_isolation(Isolation::Seatbelt { network: false });
         b.configure(BUILD).unwrap();
-        assert_eq!(b.build("lib").unwrap(), 3);
+        assert_eq!(b.build("lib", 4).unwrap(), 3);
         assert_eq!(
             std::fs::read_to_string(exec.path().join("x.txt.out")).unwrap(),
             "hello"
@@ -502,7 +504,7 @@ boom(name = "boom")
 "#;
         let mut b = IncrementalBuilder::new(exec.path(), cache);
         b.configure(bad).unwrap();
-        let err = b.build("boom").unwrap_err();
+        let err = b.build("boom", 4).unwrap_err();
         assert!(err.contains("action failed"), "got: {err}");
     }
 
@@ -519,17 +521,17 @@ boom(name = "boom")
         b.configure(BUILD).unwrap();
 
         // Fresh cache: both actions execute (cache misses) — recomputes also counts the tgt node.
-        b.build("lib").unwrap();
+        b.build("lib", 4).unwrap();
         assert_eq!(b.executed_actions(), 2, "cold build: act(x) + act(y) executed");
 
         // No change → nothing recomputes → nothing executes (Cached, the no-op signal).
-        b.build("lib").unwrap();
+        b.build("lib", 4).unwrap();
         assert_eq!(b.executed_actions(), 0, "warm no-op: zero executed");
 
         // Edit x → only act(x) re-executes (cache miss); act(y) is firewalled.
         std::fs::write(exec.path().join("x.txt"), "HELLO").unwrap();
         b.sync_file("x.txt");
-        b.build("lib").unwrap();
+        b.build("lib", 4).unwrap();
         assert_eq!(b.executed_actions(), 1, "only act(x) executed");
     }
 
@@ -552,12 +554,12 @@ boom(name = "boom")
         })));
 
         // Cold build: both actions execute → two progress lines.
-        b.build("lib").unwrap();
+        b.build("lib", 4).unwrap();
         assert_eq!(lines.lock().unwrap().len(), 2, "one progress line per executed action");
 
         // No-op rebuild: cache hits → no executions → no progress.
         lines.lock().unwrap().clear();
-        b.build("lib").unwrap();
+        b.build("lib", 4).unwrap();
         assert_eq!(lines.lock().unwrap().len(), 0, "a cache hit emits no progress");
     }
 
@@ -569,7 +571,7 @@ boom(name = "boom")
         let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
         let mut b = IncrementalBuilder::new(exec.path(), cache);
         b.configure(BUILD).unwrap();
-        b.build("lib").unwrap();
+        b.build("lib", 4).unwrap();
 
         // Leaf classification (the actor's sync-vs-rescan authority).
         assert!(b.knows_leaf("x.txt"), "x.txt is a wired source leaf");
@@ -603,7 +605,7 @@ boom(name = "boom")
         let targets = crate::analyze_build(BUILD).unwrap();
         let mut b = IncrementalBuilder::new(exec.path(), cache);
         b.configure_targets(targets).unwrap();
-        assert_eq!(b.build("lib").unwrap(), 3, "cold build via pre-analyzed targets");
-        assert_eq!(b.build("lib").unwrap(), 0, "warm no-op = zero recompute");
+        assert_eq!(b.build("lib", 4).unwrap(), 3, "cold build via pre-analyzed targets");
+        assert_eq!(b.build("lib", 4).unwrap(), 0, "warm no-op = zero recompute");
     }
 }
