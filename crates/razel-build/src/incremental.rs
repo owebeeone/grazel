@@ -30,20 +30,18 @@ use razel_actions::Action;
 use razel_core::Digest;
 use razel_engine::{DepValue, Engine, NodeValue};
 use razel_exec::{Cache, Isolation, Materialize, Sandbox, digest_path, execute_action};
-use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-/// One incremental build session over a fixed exec root + cache. Holds the warm
-/// engine graph; not `Send` (the engine is single-threaded — serialize builds
-/// behind a lock if shared).
+/// One incremental build session over a fixed exec root + cache. Holds the warm engine graph (the
+/// graph itself is single-threaded — owned by one thread); the per-action execution state is `Send`
+/// (`Arc`/atomic/`Mutex`) so the engine's parallel evaluator can run independent actions on a pool.
 pub struct IncrementalBuilder {
     engine: Engine,
     exec_root: PathBuf,
-    cache: Rc<Cache>,
+    cache: Arc<Cache>,
     /// Leaf (source) input node keys that exist on disk and can be `sync_file`d.
     leaf_inputs: HashSet<String>,
     /// How each action's sandbox materializes its inputs (symlink vs hardlink).
@@ -56,13 +54,14 @@ pub struct IncrementalBuilder {
     /// [`configure_targets`].
     producer: HashMap<String, String>,
     /// Actions that actually EXECUTED (cache misses) in the last [`build`](Self::build) — the cold
-    /// path's `report.executed`. Shared (`Rc<Cell>`) into each action closure; reset per build.
+    /// path's `report.executed`. Shared (`Arc<Atomic>`) into each action closure; reset per build.
     /// Distinct from the engine recompute count (which also counts aggregation nodes + cache HITs).
-    executed: Rc<Cell<usize>>,
+    executed: Arc<AtomicUsize>,
     /// Optional per-action progress sink, called with a `"<mnemonic> <output>"` line each time an
     /// action actually EXECUTES (not on a cache hit) — so a daemon build can stream progress to the
-    /// client (WS-E.2), matching the cold path's per-action stderr lines. Set per build by the actor.
-    progress: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
+    /// client (WS-E.2), matching the cold path's per-action stderr lines. `Send` so it can fire from
+    /// a worker thread under the parallel evaluator. Set per build by the actor.
+    progress: Arc<Mutex<Option<Box<dyn Fn(&str) + Send>>>>,
 }
 
 fn file_key(path: &str) -> String {
@@ -94,21 +93,21 @@ impl IncrementalBuilder {
         Self {
             engine: Engine::new(),
             exec_root: exec_root.into(),
-            cache: Rc::new(cache),
+            cache: Arc::new(cache),
             leaf_inputs: HashSet::new(),
             materialize: Materialize::default(),
             isolation: Isolation::default(),
             producer: HashMap::new(),
-            executed: Rc::new(Cell::new(0)),
-            progress: Rc::new(RefCell::new(None)),
+            executed: Arc::new(AtomicUsize::new(0)),
+            progress: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Install (or clear) the per-action progress sink — called with a `"<mnemonic> <output>"` line
     /// for each action that EXECUTES (cache miss) during a [`build`](Self::build). The daemon actor
     /// sets this per build to forward lines to the streaming client (WS-E.2).
-    pub fn set_progress(&self, sink: Option<Box<dyn Fn(&str)>>) {
-        *self.progress.borrow_mut() = sink;
+    pub fn set_progress(&self, sink: Option<Box<dyn Fn(&str) + Send>>) {
+        *self.progress.lock().unwrap() = sink;
     }
 
     /// Choose how sandboxes materialize inputs (symlink, the default, or hardlink).
@@ -169,7 +168,10 @@ impl IncrementalBuilder {
                     .exec_root
                     .join(".razel-sandbox")
                     .join(akey.replace([':', '#'], "_"));
-                let sandbox = Rc::new(RefCell::new(
+                // `Arc<Mutex>` (not `Rc<RefCell>`): each action has its OWN sandbox, so the mutex is
+                // uncontended (the engine never runs one node concurrently with itself) — it just
+                // makes the closure `Send` for the parallel evaluator.
+                let sandbox = Arc::new(Mutex::new(
                     Sandbox::persistent(sb_dir, self.materialize)
                         .map_err(|e| e.to_string())?
                         .with_isolation(self.isolation),
@@ -232,7 +234,7 @@ impl IncrementalBuilder {
     /// action failure surfaces as the engine request's `Err`.
     pub fn build(&self, target: &str) -> Result<usize, String> {
         self.engine.reset_recomputes();
-        self.executed.set(0);
+        self.executed.store(0, Ordering::Relaxed);
         self.engine.request(&target_key(target))?;
         Ok(self.engine.recomputes())
     }
@@ -242,7 +244,7 @@ impl IncrementalBuilder {
     /// recompute count (which also counts the per-target aggregation nodes and cache-HIT re-runs,
     /// so it over-reports work — that mismatch was the daemon's Built-vs-Cached regression).
     pub fn executed_actions(&self) -> usize {
-        self.executed.get()
+        self.executed.load(Ordering::Relaxed)
     }
 
     /// Install (or clear) the engine's cooperative cancel flag — the daemon actor sets this so a
@@ -305,10 +307,10 @@ fn run_action(
     dep_values: &[DepValue],
     cache: &Cache,
     exec_root: &Path,
-    sandbox: &Rc<RefCell<Sandbox>>,
-    executed: &Cell<usize>,
+    sandbox: &Arc<Mutex<Sandbox>>,
+    executed: &AtomicUsize,
     mnemonic: &str,
-    progress: &Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
+    progress: &Arc<Mutex<Option<Box<dyn Fn(&str) + Send>>>>,
 ) -> Result<NodeValue, String> {
     let mut input_digests = BTreeMap::new();
     for (inp, dv) in input_paths.iter().zip(dep_values.iter()) {
@@ -330,12 +332,12 @@ fn run_action(
         platform: "host".into(),
         outputs: outputs.to_vec(),
     };
-    let mut sb = sandbox.borrow_mut();
+    let mut sb = sandbox.lock().unwrap();
     match execute_action(&action, cache, exec_root, &mut sb) {
         ExecOutcome::Cached(m) => Ok(NodeValue::Manifest(m)),
         ExecOutcome::Executed(m) => {
-            executed.set(executed.get() + 1); // a real cache miss (cold path's `executed`)
-            if let Some(sink) = progress.borrow().as_ref() {
+            executed.fetch_add(1, Ordering::Relaxed); // a real cache miss (cold path's `executed`)
+            if let Some(sink) = progress.lock().unwrap().as_ref() {
                 let out = outputs.first().map(String::as_str).unwrap_or("");
                 sink(&format!("{mnemonic} {out}"));
             }
@@ -543,18 +545,20 @@ boom(name = "boom")
         let mut b = IncrementalBuilder::new(exec.path(), cache);
         b.configure(BUILD).unwrap();
 
-        let lines = Rc::new(RefCell::new(Vec::<String>::new()));
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let sink = lines.clone();
-        b.set_progress(Some(Box::new(move |s: &str| sink.borrow_mut().push(s.to_string()))));
+        b.set_progress(Some(Box::new(move |s: &str| {
+            sink.lock().unwrap().push(s.to_string())
+        })));
 
         // Cold build: both actions execute → two progress lines.
         b.build("lib").unwrap();
-        assert_eq!(lines.borrow().len(), 2, "one progress line per executed action");
+        assert_eq!(lines.lock().unwrap().len(), 2, "one progress line per executed action");
 
         // No-op rebuild: cache hits → no executions → no progress.
-        lines.borrow_mut().clear();
+        lines.lock().unwrap().clear();
         b.build("lib").unwrap();
-        assert_eq!(lines.borrow().len(), 0, "a cache hit emits no progress");
+        assert_eq!(lines.lock().unwrap().len(), 0, "a cache hit emits no progress");
     }
 
     #[test]

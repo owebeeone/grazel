@@ -19,7 +19,6 @@
 use razel_core::Digest;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -64,9 +63,11 @@ pub struct DepValue {
     pub value: NodeValue,
 }
 
-/// Effectful + fallible compute over named dep values. `Rc` so a recompute can clone it and
-/// drop the engine borrow before invoking (re-entrancy / long-action safety).
-type ComputeFn = Rc<dyn Fn(&[DepValue]) -> Result<NodeValue, ComputeError>>;
+/// Effectful + fallible compute over named dep values. `Arc` (not `Rc`) + `Send + Sync` so a
+/// recompute can clone it and drop the engine borrow before invoking (re-entrancy / long-action
+/// safety) AND so the parallel evaluator can move it to a worker thread (the graph stays
+/// single-threaded on the coordinator; only the compute runs on the pool).
+type ComputeFn = Arc<dyn Fn(&[DepValue]) -> Result<NodeValue, ComputeError> + Send + Sync>;
 
 enum Kind {
     Input,
@@ -118,9 +119,9 @@ impl Engine {
         &self,
         key: &str,
         deps: &[&str],
-        compute: impl Fn(&[DepValue]) -> NodeValue + 'static,
+        compute: impl Fn(&[DepValue]) -> NodeValue + Send + Sync + 'static,
     ) {
-        self.insert_derived(key, deps, Rc::new(move |d| Ok(compute(d))));
+        self.insert_derived(key, deps, Arc::new(move |d| Ok(compute(d))));
     }
 
     /// Define an EFFECTFUL action node: runs the action (spawn + capture + store) inside
@@ -130,9 +131,9 @@ impl Engine {
         &self,
         key: &str,
         deps: &[&str],
-        execute: impl Fn(&[DepValue]) -> Result<NodeValue, ComputeError> + 'static,
+        execute: impl Fn(&[DepValue]) -> Result<NodeValue, ComputeError> + Send + Sync + 'static,
     ) {
-        self.insert_derived(key, deps, Rc::new(execute));
+        self.insert_derived(key, deps, Arc::new(execute));
     }
 
     fn insert_derived(&self, key: &str, deps: &[&str], compute: ComputeFn) {
