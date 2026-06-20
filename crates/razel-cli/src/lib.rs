@@ -33,8 +33,10 @@ use razel_wire::{
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-mod bazel_flags;
-use bazel_flags::{BAZEL_FLAGS, FlagSpec};
+// C3: the Bazel flag table moved to razel-loading (shared by the daemon); re-exported via razel-build.
+// NOTE: razel-cli still has its own parse_opts below (transient duplicate of razel_loading::args) —
+// WS-E switches razel-cli onto razel_loading::args and deletes this local parser.
+use razel_build::bazel_flags::{BAZEL_FLAGS, FlagSpec};
 
 /// Wire protocol revision reported by `version` (bumped on breaking IR changes).
 const PROTOCOL: i64 = 1;

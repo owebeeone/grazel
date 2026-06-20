@@ -8,6 +8,8 @@
 //! `query_targets` + the `CTX` thread-local — which had no live callers (the live path never
 //! used it). V2 rebuilds loading as a graph effect over the DDS (RazelV2Contracts §6).
 
+pub mod args; // C3: the shared CLI arg parser — CLI `--batch` AND the daemon parse via this
+pub mod bazel_flags; // C3: Bazel's flag inventory (the FlagSpec table), moved from razel-cli
 mod ctxv;
 pub mod dds; // C2: loader -> DDS provider bridge
 mod decls;

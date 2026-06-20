@@ -25,7 +25,8 @@ use std::path::Path;
 use std::sync::{Condvar, Mutex};
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
 pub use razel_loading::{
-    AnalyzedTarget, GlobalFlags, config_segment, convenience_symlinks, resolve_build_file,
+    AnalyzedTarget, GlobalFlags, args, bazel_flags, config_segment, convenience_symlinks,
+    resolve_build_file,
 };
 
 
