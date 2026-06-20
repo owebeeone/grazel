@@ -129,9 +129,11 @@ SCHEMA = schema(
 
     # --- service: the razel daemon surface -----------------------------------
     service("Razel",
-        # core request/response plane
+        # core request/response plane. build/run forward the RAW razel arg tokens + the client
+        # cwd (the bazel RunRequest.arg model); the daemon parses them server-side into GlobalFlags
+        # (C3 — no per-flag wire DTO, so a new flag never touches this schema).
         method("build", role="in",
-               params=[("target", STR)], out=Ref("BuildResult")),
+               params=[("args", List(STR)), ("cwd", STR)], out=Ref("BuildResult")),
         method("sync_file", role="ctl",
                params=[("path", STR), ("digest", BYTES)], out=Ref("SyncAck")),
         method("version", role="dx",
@@ -141,7 +143,7 @@ SCHEMA = schema(
                params=[("hello", Ref("Hello"))], out=Ref("VersionInfo")),
         # stream-first command plane (S3c): id now, events on the log (§4b)
         method("run", role="in",
-               params=[("target", STR), ("args", List(STR))],
+               params=[("args", List(STR)), ("cwd", STR), ("run_args", List(STR))],
                out=Ref("InvocationStarted")),
         method("invocation.events", role="out", shape="log",
                out=Ref("InvocationEvent")),
