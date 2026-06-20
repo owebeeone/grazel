@@ -28,8 +28,8 @@ use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
 use razel_wire::{
-    BuildResult, BuildState, BuildStatus, ImpactSet, InvocationEvent, OutputArtifact, VersionInfo,
-    encode,
+    BuildResult, BuildState, BuildStatus, Hello, ImpactSet, InvocationEvent, OutputArtifact,
+    VersionInfo, encode,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -623,9 +623,21 @@ fn cmd_build(args: &[String]) -> ExitCode {
         // C3: forward the raw build args + cwd; the daemon parses them server-side. Stream per-action
         // progress back so a daemon build isn't silent (WS-E.2).
         let cwd = std::env::current_dir().unwrap_or_else(|_| o.workspace.clone());
-        match daemon_build_streamed(&socket, args, &cwd.to_string_lossy(), o.cbor) {
+        match daemon_build_streamed(&socket, args, &cwd.to_string_lossy(), &target_arg, o.cbor) {
             Ok(r) => r,
-            Err(c) => return c,
+            // The daemon died mid-stream. "Builds never break": fall back to in-process unless the
+            // user explicitly required the daemon with --daemon.
+            Err(()) if o.daemon => {
+                eprintln!("razel: daemon became unreachable mid-build ({})", socket.display());
+                return ExitCode::FAILURE;
+            }
+            Err(()) => {
+                eprintln!("razel: daemon unavailable, building in-process");
+                match local_build(&o, &target_arg) {
+                    Ok(r) => r,
+                    Err(c) => return c,
+                }
+            }
         }
     } else if o.daemon {
         // Explicit --daemon: don't silently fall back to a cold in-process build.
@@ -1349,9 +1361,32 @@ fn build_one(
 fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
     use std::process::{Command, Stdio};
     use std::time::Duration;
-    // Already serving? (version answers as soon as the socket is bound).
-    if rpc::call(socket, &rpc::req_version()).is_ok() {
-        return true;
+    // Probe with `hello`, NOT bare `version`: it validates that the daemon at this socket serves
+    // THIS workspace + a matching protocol (do_hello), so a shared `--socket` pointing at a daemon
+    // for a different tree never silently routes our build to the wrong workspace.
+    let hello = Hello {
+        protocol: PROTOCOL,
+        build_version: env!("CARGO_PKG_VERSION").to_string(),
+        workspace_root: o.workspace.to_string_lossy().to_string(),
+    };
+    let reachable = |sock: &Path| -> Option<bool> {
+        match rpc::call(sock, &rpc::req_hello(&hello)) {
+            Ok(resp) => Some(rpc::payload(&resp).is_ok()), // Some(true)=ours, Some(false)=mismatch
+            Err(_) => None,                                // no daemon bound
+        }
+    };
+    match reachable(socket) {
+        Some(true) => return true,
+        Some(false) => {
+            // A daemon is bound here but rejected us (different workspace, or protocol skew). Don't
+            // route the build to it; we can't bind over its socket → the caller builds in-process.
+            eprintln!(
+                "razel: existing daemon at {} rejected this workspace/protocol; building in-process",
+                socket.display()
+            );
+            return false;
+        }
+        None => {} // nothing bound → spawn one
     }
     let Ok(exe) = std::env::current_exe() else {
         return false;
@@ -1386,10 +1421,10 @@ fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
     if spawned.is_err() {
         return false;
     }
-    // Poll for the socket to come up (~5s budget); the first build's analysis happens later.
+    // Poll for OUR daemon to come up + accept this workspace (~5s budget).
     for _ in 0..200 {
         std::thread::sleep(Duration::from_millis(25));
-        if rpc::call(socket, &rpc::req_version()).is_ok() {
+        if reachable(socket) == Some(true) {
             return true;
         }
     }
@@ -1398,27 +1433,27 @@ fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
 
 /// Run a build through the daemon's `build.stream`, printing each per-action progress line as it
 /// arrives (WS-E.2 — so a daemon build isn't silent), and returning the terminal `BuildResult`.
+/// `Err(())` means the daemon was UNREACHABLE or died mid-stream (connection/abnormal close) — the
+/// caller falls back to an in-process build ("builds never break"). A real *build* failure is a
+/// normal `Ok(BuildResult{Failed})`, not `Err`.
 fn daemon_build_streamed(
     socket: &Path,
     args: &[String],
     cwd: &str,
+    target: &str,
     cbor: bool,
-) -> Result<BuildResult, ExitCode> {
-    let mut stream = rpc::build_stream(socket, args, cwd).map_err(|e| {
-        eprintln!("razel: cannot reach daemon at {} ({e})", socket.display());
-        ExitCode::FAILURE
-    })?;
+) -> Result<BuildResult, ()> {
+    let mut stream = rpc::build_stream(socket, args, cwd).map_err(|_| ())?;
     loop {
-        let frame = rpc::next_frame(&mut stream).map_err(|e| {
-            eprintln!("razel: daemon build stream closed early ({e})");
-            ExitCode::FAILURE
-        })?;
-        let payload = rpc::payload(&frame).map_err(|e| {
-            eprintln!("razel: daemon error: {e}");
-            ExitCode::FAILURE
-        })?;
+        // An early/abnormal close (daemon crashed, actor died) or a protocol error → unreachable.
+        let frame = rpc::next_frame(&mut stream).map_err(|_| ())?;
+        let payload = rpc::payload(&frame).map_err(|_| ())?;
         let ev = InvocationEvent::from_cbor(&payload);
-        if let Some(r) = ev.result {
+        if let Some(mut r) = ev.result {
+            // A streamed Failed result carries no target; fill it so the message isn't "ERROR: :".
+            if r.target.is_empty() {
+                r.target = target.to_string();
+            }
             return Ok(r); // terminal frame
         }
         // Progress frame: stream the per-action line (mnemonic + output), like a local build.

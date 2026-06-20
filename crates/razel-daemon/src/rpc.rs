@@ -279,7 +279,10 @@ impl Inner {
             };
             write_frame(conn, &encode(&ok(&ev.to_cbor())))?; // Err == client gone → stop
         }
-        // Build finished → the terminal result frame (a failed build is a Failed BuildResult).
+        // Build finished → the terminal result frame. A real build FAILURE is an honest terminal
+        // Failed frame; but if the actor DIED (channel closed, no result), close the stream WITHOUT
+        // a terminal frame — the client sees the abnormal close and falls back to an in-process
+        // build (the "builds never break" invariant; daemon-death ≠ build-failure).
         let br = match result.recv() {
             Ok(Ok(br)) => br,
             Ok(Err(e)) => BuildResult {
@@ -289,13 +292,7 @@ impl Inner {
                 outputs: vec![],
                 message: Some(e),
             },
-            Err(_) => BuildResult {
-                target: String::new(),
-                status: BuildStatus::Failed,
-                recomputes: 0,
-                outputs: vec![],
-                message: Some("razel daemon: build actor died".into()),
-            },
+            Err(_) => return Ok(()), // actor gone → abnormal close → client falls back
         };
         seq += 1;
         let ev = InvocationEvent {
