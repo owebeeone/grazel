@@ -285,7 +285,14 @@ impl Engine {
     /// DYNAMICALLY: a node recomputes only once all its deps are validated this revision AND one
     /// actually changed since the node was last verified. `jobs <= 1` ⇒ the serial [`request`].
     /// Cancellation (set via [`set_cancel`](Self::set_cancel)) stops dispatch at an action boundary,
-    /// clears the queue, and returns `Err("cancelled")` — in-flight actions finish (atomic).
+    /// clears the queue, and returns `Err("cancelled")` — in-flight actions finish (atomic). A
+    /// panicking action is caught and surfaced as an `Err` (never a hang).
+    ///
+    /// Recompute-COUNT equivalence with serial holds for SUCCESSFUL (and cancelled/incremental)
+    /// builds. On a FAILING build it may exceed serial's: serial stops at the first erroring dep,
+    /// while the parallel evaluator can dispatch a sibling before observing that error. The final
+    /// graph state and the returned `Err` are identical either way (a restart re-validates from the
+    /// current revision), so warm == cold is preserved; only the (observability) count can differ.
     pub fn request_parallel(&self, key: &str, jobs: usize) -> Result<NodeValue, ComputeError> {
         let jobs = jobs.max(1);
         if jobs == 1 {
@@ -370,7 +377,22 @@ impl Engine {
                         };
                         match task {
                             Some((k, f, dvs)) => {
-                                if res_tx.send((k, f(&dvs))).is_err() {
+                                // Catch a panicking action: convert it to an Err result instead of
+                                // letting the worker die — otherwise the coordinator would block on
+                                // recv() forever with in_flight > 0 (a hung build). The build then
+                                // fails cleanly with the panic message.
+                                let outcome = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| f(&dvs)),
+                                )
+                                .unwrap_or_else(|p| {
+                                    let msg = p
+                                        .downcast_ref::<&str>()
+                                        .map(|s| s.to_string())
+                                        .or_else(|| p.downcast_ref::<String>().cloned())
+                                        .unwrap_or_else(|| "panicked".into());
+                                    Err(format!("action `{k}` panicked: {msg}"))
+                                });
+                                if res_tx.send((k, outcome)).is_err() {
                                     break;
                                 }
                             }
@@ -379,6 +401,9 @@ impl Engine {
                     }
                 });
             }
+            // Drop the coordinator's own sender clone: now the only live senders are the workers',
+            // so a `recv()` returning Err means every worker has exited (a real failure), not a hang.
+            drop(res_tx);
 
             loop {
                 if done.contains(key) || err.is_some() {
@@ -458,7 +483,12 @@ impl Engine {
                         err = Some(e);
                         break;
                     }
-                    Err(_) => break,
+                    // All workers gone with work still in flight — fail loud (never return a
+                    // stale/unvalidated target value).
+                    Err(_) => {
+                        err = Some("razel engine: parallel workers exited unexpectedly".into());
+                        break;
+                    }
                 }
             }
 
@@ -766,6 +796,18 @@ mod tests {
         e.add_action("boom", &["src"], |_| Err("action failed: rc=1".into()));
         let r = e.request_parallel("boom", 4);
         assert!(r.is_err() && r.unwrap_err().contains("rc=1"));
+    }
+
+    #[test]
+    fn parallel_action_panic_becomes_error_not_hang() {
+        // A panicking action MUST fail the build cleanly — without catch_unwind in the worker the
+        // coordinator would block on recv() forever (the critical hang the review caught).
+        let e = Engine::new();
+        e.add_input("src", nv("s0"));
+        e.add_action("boom", &["src"], |_| panic!("kaboom"));
+        let r = e.request_parallel("boom", 4);
+        assert!(r.is_err(), "a panicking action fails the build, never hangs");
+        assert!(r.unwrap_err().contains("panicked"), "the panic surfaces as the error");
     }
 
     #[test]
