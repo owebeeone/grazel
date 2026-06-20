@@ -1,16 +1,25 @@
 # FixMissingServerImplementationPlan — wire the warm server that was built but never connected
 
-**Status:** DRAFT rev4 — WS-D design spike (2026-06-20). Owner: RR.
+**Status:** DRAFT rev5 — cancel-and-restart (bazel parity, R-9.5 flipped) (2026-06-20). Owner: RR.
 Scope: design + parallelized execution plan + the regression-prevention gate suite.
+
+**rev5 note.** R-9.5 is **flipped**: the daemon actor does **cancel-and-restart** (bazel
+parity), not the previously-frozen NO-CANCEL. The engine already supports cooperative
+cancellation (committed `4ea0c60`, razel-engine 12/0): `Engine::set_cancel` installs a shared
+`Arc<AtomicBool>` flag and `request` aborts with `Err("cancelled")` at the next action
+boundary (in-flight actions stay atomic). §3.5a/§3.5/G26/R-9.5/R-9.6/§12 are updated to the
+cancel-and-restart actor loop; `--batch` remains the no-daemon escape but is no longer the
+staleness mitigation (cancel-restart is).
 
 **rev4 note.** The PAR-7/R-9/§5-WS-D "design-before-coding" blocker is **discharged**: the
 three coupled WS-D sub-designs — the single-writer actor mechanics (§3.5), the persistent
 exec-root incremental fixup (§3.6a), and the cached-analysis key + invalidation rule (§3.6b)
 — are now concrete and codeable (algorithms + data structures + exact file:line seams + edge
 cases + gates). §5 WS-D drops the DESIGN-HEAVY blocker and lists implementable sub-tasks.
-New gates **G24–G27** (§7.2). NO-CANCEL stays **FROZEN** (R-9.5); the one actor-loop line
-that changes if Gianni flips to cancel-and-restart is marked in §3.5. Resolutions logged in
-§12.1.
+New gates **G24–G27** (§7.2). The actor does **cancel-and-restart** (R-9.5 flipped, bazel
+parity, rev5): a watcher event during an in-flight `Build` flips the shared cancel flag, the
+engine aborts at the next action boundary, and the actor re-runs on the now-current inputs
+(§3.5a). Resolutions logged in §12.1.
 Subordinate to `RazelDepsEngineV2.md` (the message-driven engine seam),
 `RazelPublicSurfaces.md` (§1 "the CLI is a CLIENT, with no privileged in-process path";
 §1c actor + single-writer queue; §4b the streaming/invalidation loop), `RazelDevStatus.md`
@@ -259,8 +268,9 @@ a **frozen Wave-0 deliverable**, not an aspiration:
   The current `do_run` (`rpc.rs:247-289`) is fire-and-forget: it spawns a thread that appends the
   result to the invocation log via `emit` (`rpc.rs:211`) and returns `InvocationStarted`
   immediately — there is no reply path and no backpressure. The reply channel is necessary for
-  (1) **backpressure** (a `SetInput` arriving mid-build queues, never corrupts); (2) **sequencing**
-  (the actor can decide to cancel/queue on a watcher event — R-9.5); (3) **snapshot consistency**
+  (1) **backpressure** (a `SetInput` arriving mid-build is applied to the engine, never corrupts);
+  (2) **sequencing** (a watcher event mid-build cancels + restarts the in-flight build — R-9.5,
+  cancel-and-restart); (3) **snapshot consistency**
   (subscribers see monotonically advancing committed revisions, not interleaved half-builds).
   Mechanism: a sync `crossbeam::channel` or a `Condvar` like `stream_build_state` (`rpc.rs:293-307`)
   already uses.
@@ -286,13 +296,15 @@ a **frozen Wave-0 deliverable**, not an aspiration:
   > (`rpc.rs:297-304`) — correct — but G11 must *assert* it (two subscribers on the same revision
   > see byte-identical `BuildState`, not merely the same revision number).
 
-  > **Staleness window (CA-5 — rev3).** A subscriber that connects *during* a long `do_build`
-  > (10–30s) reads the *previous* build's state until the in-flight build commits. With no queue,
-  > a watcher event arriving during a build cannot be processed (it would risk a concurrent
-  > `do_build` panic), so a long build locks out the watcher for its duration. The frozen policy is
-  > **NO CANCEL** (see R-9.6): watcher events queue and are processed after the in-flight build
-  > completes (max staleness window = build duration). Strict-mode CI uses `razel build --batch`
-  > to avoid the daemon's staleness window entirely.
+  > **Staleness window (CA-5 — rev5, cancel-and-restart).** A subscriber that connects *during* a
+  > long build reads the *previous* committed snapshot until a build commits. A watcher event
+  > arriving mid-build flips the shared cancel flag; the engine aborts the in-flight `request` at
+  > the next action boundary (`Err("cancelled")`), the actor drains the queued `SetInput`/`Rescan`,
+  > clears the flag, and **re-runs the build on the now-current inputs** (see R-9.6). The subscriber
+  > sees the committed snapshot of the build that actually completes — never a stale-input commit.
+  > The residual staleness is just the current atomic action's remaining runtime (in-flight actions
+  > are never interrupted mid-spawn), not the full build duration. `razel build --batch` remains the
+  > no-daemon escape (it bypasses the daemon entirely), but it is no longer the staleness mitigation.
 - **Migration checklist item:** the toy `razel_daemon::Workspace` (`lib.rs:44-87`) is the
   shape the actor adopts, but the **standalone toy type is deleted/repurposed** so warm
   infra is not stranded a second time (see §5 WS-D, §8).
@@ -327,6 +339,7 @@ pub struct WorkspaceActor {
     projection: IncrementalBuilder,                   // migrated (WS-C), workspace-label capable
     exec_root: PathBuf,                               // persistent .razel-out forest (§3.6a)
     cached_analysis: Option<(AnalysisDigest, Vec<AnalyzedTarget>, String /*resolved_top*/)>, // §3.6b
+    cancel: Arc<AtomicBool>,                          // shared cancel flag; engine.set_cancel (R-9.5)
     leaf_inputs: HashSet<String>,                     // authority for SetInput-vs-Rescan (§3.5)
     old_sources: HashSet<String>,                     // exec-root fixup baseline (§3.6a)
     old_external: Option<PathBuf>,                    // last .razel-crates path (§3.6a)
@@ -343,8 +356,15 @@ pub struct WorkspaceActor {
 while let Ok(msg) = self.inbox.recv() {
     match msg {
         ActorMessage::Build { args, cwd, reply } => {
-            let r = self.do_build_impl(args, cwd);   // parse_opts→GlobalFlags+daemon-derived;
-            let _ = reply.send(r);                    //  cached-analysis check (§3.6b); engine.request
+            // cancel-and-restart (R-9.5): loop until a build completes uncancelled.
+            let r = loop {
+                let r = self.do_build_impl(&args, &cwd);  // parse_opts→GlobalFlags+daemon-derived;
+                                                          //  cached-analysis (§3.6b); engine.request
+                if !matches!(&r, Err(e) if e == "cancelled") { break r; }
+                self.drain_invalidations();   // apply queued SetInput/Rescan from the inbox
+                self.cancel.store(false, Ordering::SeqCst); // clear flag, re-run on current inputs
+            };
+            let _ = reply.send(r);                    // caller blocks on the FINAL (uncancelled) result
             self.commit_snapshot();                   // revision += 1; bump.notify_all() (CA-3)
         }
         ActorMessage::SetInput { path, digest } => {  // guarded: must be in leaf_inputs (§3.5)
@@ -367,18 +387,32 @@ while let Ok(msg) = self.inbox.recv() {
    `lib.rs:86` unknown-key panic.
 4. `transport::bind(socket)` + accept loop; each connection thread ENQUEUES messages (it no longer
    calls `do_build` directly — that is the R-9/CA-1 fix).
-5. Spawn the watcher loop (§3.6, CA-7), routing to `SetInput`/`Rescan` per the §3.5 sequence.
+5. Spawn the watcher loop (§3.6, CA-7), routing to `SetInput`/`Rescan` per the §3.5 sequence. On a
+   filesystem change the watcher **both** flips the shared `cancel` flag (`cancel.store(true)`) AND
+   enqueues the `SetInput`/`Rescan` message(s) — so an in-flight `Build` aborts at the next action
+   boundary and the actor re-runs on the invalidated inputs (R-9.5, cancel-and-restart).
 
-**NO-CANCEL queue semantics + staleness window (FROZEN — R-9.5/R-9.6).** A `Build` runs to
-completion; `SetInput`/`Rescan` arriving during it queue **strictly FIFO behind it** and are
-processed after it commits. Max staleness window = build duration; a subscriber that connects
-mid-build reads the previous committed revision until the in-flight build commits (CA-5).
-> **THE ONE FLIP POINT (R-9.5).** Cancel-and-restart changes EXACTLY the `Build` arm of the loop
-> above: before `do_build_impl` returns, the actor would peek the inbox and, if a higher-priority
-> `Rescan`/`SetInput` is queued, abort the in-flight `engine.request` (cooperative cancel point),
-> `reply.send(Err("cancelled"))`, then dequeue the watcher event and restart. The message enum, the
-> reply channel, the snapshot path, and §3.6a/§3.6b are **unchanged** — only this arm gains a
-> peek-and-abort. v1 does NOT do this; the FIFO loop above is the frozen behavior.
+**Cancel-and-restart semantics (R-9.5 flipped — bazel parity, rev5).** Single-writer is preserved:
+the `Build` still runs on the actor thread via `engine.request`. The **watcher** thread (separate)
+flips the shared `Arc<AtomicBool>` cancel flag on a filesystem change AND enqueues the
+`SetInput`/`Rescan` message(s). When a watcher event arrives DURING an in-flight `Build`:
+1. The engine's next **action-boundary** check sees the flag (helper `cancelled()`), so
+   `engine.request` returns `Err("cancelled")` — an in-flight action stays atomic (never interrupted
+   mid-spawn). This is the engine support committed in `4ea0c60` (`Engine::set_cancel`).
+2. The actor **drains** the queued `SetInput`/`Rescan` from its inbox (applies the invalidations to
+   the engine), **clears** the cancel flag, and **re-runs** `do_build_impl` (`engine.request`) on the
+   now-current inputs.
+3. It loops (the `Build` arm above) until a build completes uncancelled, then sends that result on
+   the reply channel (CA-2 unchanged — the caller blocks on the final, uncancelled result).
+
+A **committed snapshot is emitted only for the build that actually completes** — cancelled attempts
+commit nothing, so subscribers never see a stale-input revision. A cancelled-then-restarted build
+re-validates from the current revision, so **warm == cold still holds**. The message enum, the reply
+channel, the snapshot path, and §3.6a/§3.6b are unchanged from the FIFO baseline; the `Build` arm
+gains the cancel/drain/re-request cycle. **Residual risk (minor):** a long build can be restarted
+repeatedly if edits keep arriving (bounded-livelock) — bounded in practice by edit frequency, and
+mitigated because each restart reuses the action cache + warm digests, so only the changed subgraph
+re-runs.
 
 **Committed-snapshot emission (CA-3).** `commit_snapshot` clones `BuildState` **inside the same
 `Mutex` critical section** as the `revision += 1`, then `bump.notify_all()` — identical to today's
@@ -1402,7 +1436,7 @@ actions_executed, action_cache_hits, input_digest_reads, exec_root_rebuilds, ana
 | G23 | `depvalue_not_leakable` | a `ComputeFn` cannot store a `DepValue` past return or call an `Engine` method | A compile-fail test (`#[compile_fail]`/commented + note): code that would compile only if the borrow/no-engine-access constraint were removed must NOT compile. (SR-C1-DEPVALUE-BORROW-SAFETY-1, §4.1b) | `crates/razel-engine/src/lib.rs` (tests) | **T1** | RED-first |
 | G24 | `exec_root_fixup_zero_churn_and_diff` | `fix_up_exec_root` is a TRUE incremental delta: an unchanged source keeps its exact symlink (same inode); a Rescan with no source-set change returns `did_change == false` (so `exec_root_rebuilds` does NOT increment); an added dir gets a symlink, a deleted dir is unlinked, neither touches siblings | Unit-test `fix_up_exec_root` directly (§3.6a): capture a source symlink's `ino()`; Rescan with identical sources → assert same `ino()` + `did_change == false`; add a dir → assert only its link appears; delete a dir → assert only its link is gone. (PAR-2, §3.6a edge cases E1/E2) | `crates/razel-build/src/exec_root.rs` (tests) | **T1** | RED-first |
 | G25 | `exec_root_external_symlink_on_demand` | `.razel-crates` materialized on a later build → `external/` symlink created exactly once (None→Some); a subsequent same-deps build reuses it (Some==Some, no re-symlink, same inode); removal unlinks it | Workspace with an external dep; first build materializes `.razel-crates` → assert `external/` symlink live; second build (same deps) → assert same `symlink_metadata().ino()`, `did_change == false`. (§3.6a edge case E3) | `crates/razel-daemon/tests/exec_root_fixup.rs` (new) | **T2.5** | RED-first |
-| G26 | `actor_build_reply_backpressure_no_cancel` | the `Build` reply channel delivers the build result to the CALLER (not the connection thread); a `SetInput`/`Rescan` enqueued during an in-flight `Build` is processed strictly AFTER the build replies (NO-CANCEL FIFO), never mid-build; the `Build` reply NEVER returns `Cancelled` in v1 | Drive a slow `Build` (sleep-injected `do_build_impl`); from another thread enqueue `SetInput` before it replies; assert (1) the `Build` reply arrives first with the pre-edit result, (2) the `SetInput` applies only after, (3) no panic. Distinct from G11 (which asserts snapshot byte-identity); this asserts the reply-path + NO-CANCEL ordering (§3.5a, R-9.5/R-9.6, CA-2). | `crates/razel-daemon/tests/transcript.rs` | **T2.5** | RED-first |
+| G26 | `actor_cancel_and_restart_on_watcher_event` | the `Build` reply channel delivers the build result to the CALLER (not the connection thread); a `SetInput`/`Rescan` enqueued (+ the cancel flag set) during a slow in-flight `Build` CANCELS it (the first `engine.request` returns/aborts `Err("cancelled")`) and the actor RE-RUNS so the final reply reflects the POST-edit inputs (cancel-and-restart, bazel parity) | Drive a slow `Build` (sleep-injected `do_build_impl`); from another thread set the cancel flag + enqueue `SetInput` before it replies; assert (1) the engine saw a `Cancelled` then a successful request, (2) the single `Build` reply is the restarted (fresh) result reflecting the post-edit inputs, (3) no panic. Distinct from G11 (which asserts snapshot byte-identity); this asserts the reply-path + cancel-and-restart loop (§3.5a, R-9.5/R-9.6, CA-2). | `crates/razel-daemon/tests/transcript.rs` | **T2.5** | RED-first |
 | G27 | `startup_rescan_baselines_before_serving` | the synchronous `Rescan { StartUp }` establishes EVERY leaf-input key + the exec-root forest BEFORE the accept loop binds, so the first `SetInput` after startup cannot hit the `lib.rs:86` unknown-key panic | Start the actor; before any `Build`, drive a `SetInput` for a known source leaf → succeeds (key exists); drive a `SetInput` for an unknown path → panics/loud-shutdown (expected, PAR-5). Assert `analysis_runs == 1` and the exec-root forest exists after startup, with `revision == 1`. (§3.5a startup ordering, CA-6) | `crates/razel-daemon/tests/transcript.rs` | **T2.5** | RED-first |
 
 ### 7.3 How each becomes an ENFORCED gate (red-first/extend → tiered)
@@ -1517,21 +1551,26 @@ commit only when asked) and "keep the cold path until the warm path is gated gre
   specified** (§3.5a: inbox enum, one-shot reply channel, FIFO single-writer loop, startup ordering,
   panic→reply-Err) — the PAR-7 "design-heavy" caveat is discharged; WS-D sub-task **D1** is the fix
   and is the FIRST WS-D item. Until D1 lands, an explicit serialization lock (test-only). Gated by
-  G11 (snapshot byte-identity under concurrency) + G26 (reply backpressure + NO-CANCEL ordering)
+  G11 (snapshot byte-identity under concurrency) + G26 (cancel-and-restart on watcher event)
   + G27 (startup baseline before serving).
-- **R-9.5 Build cancellation on watcher event (rev3 CA-2; FLIP POINT pinned rev4).** Whether an
-  in-flight build CANCELs when a watcher `SetInput`/`Rescan` arrives. **Frozen answer: NO CANCEL** —
-  the event queues and the next build sees the updated inputs (simpler; Bazel cancels+restarts as a
-  perf optimization, deferred). The `Build` reply therefore never returns `Cancelled` in v1.
-  **rev4: the EXACT actor-loop change to flip this is pinned in §3.5a ("THE ONE FLIP POINT")** — only
-  the `Build` arm gains a peek-and-abort; the message enum, reply channel, snapshot path, and
-  §3.6a/§3.6b are unchanged. **This is the one design decision Gianni should consciously weigh** (v1
-  NO-CANCEL trades a build-duration staleness window for a far simpler, panic-free actor loop). Gated
-  by G26 (asserts NO-CANCEL FIFO) + G11.
-- **R-9.6 Staleness window under a long build (NEW — rev3, CA-5).** With NO CANCEL (R-9.5), a watcher
-  change arriving during a long build is not reflected until the build completes (max staleness window
-  = build duration). Mitigation: documented behavior; strict-mode CI uses `razel build --batch` to
-  avoid the daemon staleness window.
+- **R-9.5 Build cancellation on watcher event (DECIDED rev5 — cancel-and-restart, bazel parity).**
+  When a watcher `SetInput`/`Rescan` arrives during an in-flight build, the build **cancels and
+  restarts** on the updated inputs (Gianni's decision; matches Bazel semantics). The engine support
+  is **implemented** (committed `4ea0c60`, razel-engine 12/0): `Engine::set_cancel(Option<Arc<
+  AtomicBool>>)` installs/clears a shared cancel flag (None default); `request` checks it between
+  node validations (helper `cancelled()`) and aborts with `Err("cancelled")` at the next **action
+  boundary** — an in-flight action stays atomic. The actor side (§3.5a) drains the queued
+  invalidations, clears the flag, and re-runs `engine.request`; the reply carries the final
+  uncancelled result. A cancelled-then-restarted build re-validates from the current revision, so
+  warm == cold still holds. Gated by G26 (cancel-and-restart on watcher event) + G11.
+- **R-9.6 Staleness window under a long build (largely CLOSED — rev5, CA-5).** Cancel-and-restart
+  (R-9.5) closes the build-duration staleness window: a watcher event no longer waits a full build
+  duration — it cancels the in-flight build at the next action boundary and restarts on fresh inputs
+  (bazel semantics). The **residual** window is just the current atomic action's remaining runtime
+  (in-flight actions are never interrupted mid-spawn). **Bounded-livelock note:** a long build can be
+  restarted repeatedly if edits keep arriving; bounded in practice by edit frequency and mitigated
+  because each restart reuses the action cache + warm digests, so only the changed subgraph re-runs.
+  `razel build --batch` remains the no-daemon escape but is no longer the staleness mitigation.
 - **R-9.7 Output-name collision in multi-output deps (NEW — rev3, SR-GATE-15).** If two upstream
   actions emit the same output path, a downstream consumer cannot disambiguate by path alone — it must
   declare both as separate deps. The engine does NOT validate uniqueness; rule-author hygiene is
@@ -1629,9 +1668,9 @@ acting; line numbers cited by the reviewers were trusted-but-checked and correct
 | PARSE-OPTS-DEPS-001 | contracts | P2 | §5 WS-E audit | Move `parse_opts`+`parse_opts_with_rc`+`global_flags`+`resolve_long`+`dispatch`+flag tables+`Opts` to razel-loading; no wire/daemon dep. |
 | INPUT-DIGEST-READS-SCOPE-001 | contracts | P2 | §7.1 counter | Pin scope to `digest_input` in `run_one_target`; exclude startup rescan; fixed `digest_of` cite to `rpc.rs:509`. |
 | CA-1 | concurrency | P1 | §3.5 WARNING, R-9 | No actor boundary today (`rpc.rs:143-148`); promote actor to FIRST WS-D item; G11 gates. |
-| CA-2 | concurrency | P1 | §3.5 reply-channel, R-9.5 | `Build` needs a reply channel for backpressure/sequencing; froze NO-CANCEL policy. |
+| CA-2 | concurrency | P1 | §3.5 reply-channel, R-9.5 | `Build` needs a reply channel for backpressure/sequencing; carries the final uncancelled result under cancel-and-restart (R-9.5). |
 | CA-3 | concurrency | P1 | §3.5 snapshots-out, G11 | Snapshot clone must be inside the lock; G11 asserts two subscribers see byte-identical state per revision. |
-| CA-5 | concurrency | P2 | §3.5 staleness, R-9.6 | Long build locks out the watcher (NO-CANCEL); max staleness = build duration; --batch escape. |
+| CA-5 | concurrency | P2 | §3.5 staleness, R-9.6 | Cancel-and-restart bounds staleness to the current action's remaining runtime (not build duration); `--batch` = no-daemon escape. |
 | CA-6 | concurrency | P2 | §3.5 queue-order | FIFO one-at-a-time; SetInput valid only after Rescan; unknown-key panics loudly. |
 | CA-7 | concurrency | P2 | §3.5 watcher note, §5 WS-D, G12 | `watch()` defined (`lib.rs:92-106`) but never called by `serve`; WS-D wires it. |
 | CA-4 | concurrency | P2 | G11 | invocation.events log order under concurrent do_run — clarified (code correct); G11 asserts per-invocation seq. |
@@ -1698,10 +1737,10 @@ refreshes `leaf_inputs` (§3.5) — verified against the tree at every cited lin
 |---------|-----|----------------------|----------|
 | PAR-7 (design-heavy → codeable) | P2 | §3.5a/§3.6a/§3.6b, §5 WS-D (D1-D6) | The "design before coding" blocker is discharged: concrete algorithms + seams + the D1-D6 sub-tasks replace it. |
 | R-9 (actor loop unspecified) | P1 | §3.5a, §9 R-9 | Inbox enum, one-shot reply channel, FIFO single-writer loop, startup ordering, panic→reply-Err — fully specified; D1 is the fix. |
-| CA-2 (reply channel) | P1 | §3.5a, §7.2 G26 | `Build` carries a `sync_channel(1)` reply so the CALLER blocks on the result (backpressure); G26 proves it. |
-| CA-5 (staleness window) | P2 | §3.5a NO-CANCEL, R-9.6 | Max staleness = build duration; documented; `--batch` escape; the flip to cancel-restart is pinned to one loop arm. |
+| CA-2 (reply channel) | P1 | §3.5a, §7.2 G26 | `Build` carries a `sync_channel(1)` reply so the CALLER blocks on the FINAL (uncancelled) result; G26 proves cancel-and-restart. |
+| CA-5 (staleness window) | P2 | §3.5a cancel-and-restart, R-9.6 | Cancel-and-restart (R-9.5 flipped) bounds staleness to the current action's remaining runtime; `--batch` = no-daemon escape, not the mitigation. |
 | CA-6 (FIFO + SetInput-after-Rescan) | P2 | §3.5a loop + startup, §7.2 G27 | One message in flight; startup `Rescan` baselines every leaf key BEFORE serving so SetInput can't hit the `lib.rs:86` panic; G27. |
-| R-9.5 (NO-CANCEL flip point) | P1 | §3.5a "THE ONE FLIP POINT", R-9.5 | NO-CANCEL stays FROZEN; the exact `Build`-arm change to flip it is marked — the one decision for Gianni. |
+| R-9.5 (cancel-and-restart) | P1 | §3.5a cancel-and-restart loop, R-9.5 | DECIDED (Gianni): cancel-and-restart for bazel parity; engine `set_cancel` implemented (`4ea0c60`), actor drains+re-runs; was frozen NO-CANCEL, now flipped. |
 | PAR-2 (exec-root fixup) | P2 | §3.6a `fix_up_exec_root`, §7.2 G24/G25 | True incremental delta (add→symlink, delete→unlink, external on appear/move); `did_change` drives the `exec_root_rebuilds` counter; zero churn on unchanged sources. |
 | SR-EXEC-ROOT-CORRUPTION-1 | P2 | §3.6a `validate_exec_root`, §7.2 G21/G17 | Startup validation/repair of broken/missing/wrong links; unrepairable → full `prepare_exec_root` fallback; crash recovery via the startup Rescan. |
 | PAR-4 / OPER-7 (analysis key + invalidation) | P2 | §3.6b `AnalysisDigest`/`do_build_impl`, §7.2 G14 | Content-based key (sorted BUILD/MODULE/lockfile/rc digests + `options_digest`); any Rescan → dirty; recompute-on-change only; lockfile change keyed via `graph_shape_digest` (closes the GlobalFlags-mutable-field hole). |
