@@ -219,11 +219,23 @@ impl Inner {
             "build.subscribe" => self.stream_build_state(conn),
             "invocation.events" => self.stream_invocation_events(conn),
             "build.stream" => self.stream_build(conn, &req),
+            "shutdown" => self.do_shutdown(conn),
             _ => {
                 let resp = self.dispatch(&req);
                 write_frame(conn, &encode(&resp))
             }
         }
+    }
+
+    /// `shutdown` (bazel `shutdown`): acknowledge, then terminate the daemon process. The reply is
+    /// flushed first so `razel shutdown` gets confirmation; process exit releases the workspace
+    /// writer lock and the socket fd (a stale lock file is reaped on the next acquire). A blocking
+    /// `accept()` loop can't be unwound from a worker thread, so exit is the stop — matching bazel's
+    /// server shutdown. (Targets the per-workspace razeld via its own socket; the grazel host has a
+    /// separate lifecycle.)
+    fn do_shutdown<C: Write>(&self, conn: &mut C) -> io::Result<()> {
+        let _ = write_frame(conn, &encode(&ok(&Cbor::Bool(true))));
+        std::process::exit(0);
     }
 
     /// `build.stream` (WS-E.2): run a build through the warm actor, writing one `InvocationEvent`
@@ -603,6 +615,11 @@ pub fn build_stream(
     let mut conn = transport::connect(socket)?;
     write_frame(&mut conn, &encode(&req_build_stream(args, cwd)))?;
     Ok(conn)
+}
+
+/// `shutdown` request envelope: ask the daemon to terminate.
+pub fn req_shutdown() -> Cbor {
+    Cbor::Map(vec![(1, Cbor::Text("shutdown".into())), (2, Cbor::Null)])
 }
 
 /// `affected <files...>` request envelope.

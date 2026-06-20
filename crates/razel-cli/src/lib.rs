@@ -58,6 +58,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("subscribe") => cmd_subscribe(&args[1..]),
         Some("version") | Some("-V") | Some("--version") => cmd_version(&args[1..]),
         Some("daemon") => cmd_daemon(&args[1..]),
+        Some("shutdown") => cmd_shutdown(&args[1..]),
         // The exec-time build-script / rustc wrapper, folded into the razel binary so razel
         // self-invokes it (`razel process-wrapper rustc …`) via `current_exe()` — no separate
         // co-located tool. Internal: not user-facing, not in `cmd_help`.
@@ -117,7 +118,8 @@ static FLAG_HELP: &[FlagHelp] = &[
     FlagHelp { name: "jobs", abbrev: Some('j'), arg: Some("<n>"), desc: "Run up to <n> targets/tests concurrently (default: serial)." },
     FlagHelp { name: "bazel_build_compat", abbrev: None, arg: None, desc: "Write outputs to Bazel's bazel-out/ tree (also env RAZEL_BAZEL_BUILD_COMPAT=1)." },
     FlagHelp { name: "expunge", abbrev: None, arg: None, desc: "Remove more thorough state (with clean)." },
-    FlagHelp { name: "daemon", abbrev: None, arg: None, desc: "Route the request to a running `razel daemon` over a socket." },
+    FlagHelp { name: "daemon", abbrev: None, arg: None, desc: "Require the warm daemon (error if none); default auto-spawns one with in-process fallback." },
+    FlagHelp { name: "batch", abbrev: None, arg: None, desc: "Build in-process, never the daemon (also env RAZEL_BATCH=1)." },
     FlagHelp { name: "socket", abbrev: None, arg: Some("<path>"), desc: "Daemon socket path (default: <ws>/.razel-daemon.sock)." },
     FlagHelp { name: "cbor", abbrev: None, arg: None, desc: "Print the result as taut-wire CBOR (hex) instead of text." },
 ];
@@ -132,7 +134,7 @@ struct CmdHelp {
 
 static COMMANDS: &[CmdHelp] = &[
     CmdHelp { name: "build", args: "<target>...", summary: "Build the specified targets.",
-        flags: &["compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "jobs", "bazel_build_compat", "daemon", "socket", "cbor"] },
+        flags: &["compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "jobs", "bazel_build_compat", "daemon", "batch", "socket", "cbor"] },
     CmdHelp { name: "run", args: "<target> [-- args…]", summary: "Build, then run a target's output.",
         flags: &["compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "bazel_build_compat"] },
     CmdHelp { name: "test", args: "<target>...", summary: "Build and run the specified test targets.",
@@ -147,6 +149,8 @@ static COMMANDS: &[CmdHelp] = &[
         flags: &["daemon", "socket", "cbor"] },
     CmdHelp { name: "daemon", args: "", summary: "Run the razel build daemon.",
         flags: &["socket", "disk_cache"] },
+    CmdHelp { name: "shutdown", args: "", summary: "Shut down the running build daemon for this workspace.",
+        flags: &["socket"] },
     CmdHelp { name: "help", args: "[<command>]", summary: "Print help for a command, or this index.",
         flags: &[] },
 ];
@@ -1179,6 +1183,33 @@ fn cmd_daemon(args: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("razel daemon: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// `razel shutdown` (bazel `shutdown`): tell the workspace's daemon to terminate. Never auto-spawns
+/// (that would be absurd); a missing daemon is a no-op success.
+fn cmd_shutdown(args: &[String]) -> ExitCode {
+    let o = match parse_opts(args) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    let socket = o.socket.unwrap_or_else(|| default_socket(&o.workspace));
+    match rpc::call(&socket, &rpc::req_shutdown()) {
+        // The daemon acks, then exits; we may get the ack or a clean disconnect — both mean "down".
+        Ok(resp) => match rpc::payload(&resp) {
+            Ok(_) => {
+                eprintln!("razel: daemon shut down ({})", socket.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("razel: daemon error: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(_) => {
+            eprintln!("razel: no daemon running at {}", socket.display());
+            ExitCode::SUCCESS
         }
     }
 }
