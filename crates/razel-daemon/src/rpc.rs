@@ -819,6 +819,62 @@ noop(name = "widget")
     }
 
     #[test]
+    fn warm_daemon_rematerializes_outputs_removed_beneath_it() {
+        // `razel clean` (or any external rm) can remove the output tree while the warm daemon still
+        // believes it built — a naive warm graph would then report "up-to-date" pointing at a file
+        // that no longer exists (a phantom success). The daemon must VERIFY outputs at build time
+        // and re-materialize from cache — no restart. cc-independent (/bin/sh copy rule).
+        if !std::path::Path::new("/bin/sh").exists() {
+            return;
+        }
+        let ws = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("x.txt"), "hello").unwrap();
+        std::fs::write(
+            ws.path().join("BUILD"),
+            r#"
+def _impl(ctx):
+    o = "x.txt.out"
+    ctx.actions.run(executable = "/bin/sh", outputs = [o], inputs = ["x.txt"],
+                    arguments = ["-c", "cat x.txt > x.txt.out"])
+    return [DefaultInfo(files = [o])]
+copy = rule(implementation = _impl, attrs = {})
+copy(name = "lib")
+"#,
+        )
+        .unwrap();
+        let srv = Server::new(ws.path().to_path_buf(), cache.path().to_path_buf());
+        let build = || {
+            BuildResult::from_cbor(
+                &payload(&srv.dispatch(&req_build(&["lib".into()], "."))).expect("build ok"),
+            )
+        };
+        let out = ws.path().join("x.txt.out");
+
+        // Cold → warm: produces x.txt.out.
+        build();
+        assert!(out.exists(), "first build produced the output");
+
+        // Simulate `razel clean` removing the output beneath the warm daemon.
+        std::fs::remove_file(&out).unwrap();
+        assert!(!out.exists());
+
+        // Next build: a naive warm daemon reports Cached pointing at the missing file. With
+        // build-time output verification it re-materializes from cache instead — no restart.
+        let r = build();
+        assert!(
+            out.exists(),
+            "daemon re-materialized the removed output (no phantom up-to-date)"
+        );
+        assert_eq!(r.outputs.first().map(|o| o.path.as_str()), Some("x.txt.out"));
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "hello",
+            "re-materialized content matches"
+        );
+    }
+
+    #[test]
     fn warm_actor_folds_a_source_edit_and_no_ops_are_free() {
         // The WS-D payoff, end to end through the actor: a source edit is folded warmly
         // (warm == cold), and a no-op rebuild does zero work (the ~34s no-op fix). The watcher

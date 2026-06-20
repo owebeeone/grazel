@@ -295,43 +295,72 @@ impl WorkspaceActor {
             .cloned()
             .ok_or_else(|| "build: no target specified".to_string())?;
 
-        let build_name = self.ensure_analysis(&token, &flags)?;
-        let builder = self.builder.as_ref().expect("analysis populated the builder");
-        // Forward per-action progress to the streaming client (if any) for THIS build. Set after
-        // ensure_analysis (which may have built a fresh builder); always cleared before returning.
-        if let Some(tx) = progress {
-            let tx = tx.clone();
-            builder.set_progress(Some(Box::new(move |line: &str| {
-                let _ = tx.send(line.to_string());
-            })));
-        }
-        let build_res = builder.build(&build_name); // drives the warm engine; may Err("cancelled")
-        builder.set_progress(None);
-        build_res?;
-        // Built-vs-Cached uses ACTIONS EXECUTED (cache misses) — the cold path's `report.executed`
-        // — NOT the engine recompute count (which also counts aggregation nodes + cache HITs).
-        let executed = builder.executed_actions();
-        let default_info = self.default_info_for(&build_name);
-        let outputs = builder
-            .produced_outputs(&default_info)?
-            .into_iter()
-            .map(|(path, d)| OutputArtifact {
-                path,
-                digest: d.as_bytes().to_vec(),
-            })
-            .collect();
+        // Build, then verify the outputs are actually on disk before reporting "up-to-date". The
+        // loop allows ONE re-materialization pass if the warm graph's outputs were removed beneath
+        // it; `remateralized` bounds it.
+        let mut remateralized = false;
+        loop {
+            let build_name = self.ensure_analysis(&token, &flags)?;
+            let (executed, produced, default_info) = {
+                let builder = self.builder.as_ref().expect("analysis populated the builder");
+                // Forward per-action progress to the streaming client (if any). Set after
+                // ensure_analysis (which may have built a fresh builder); always cleared.
+                if let Some(tx) = progress {
+                    let tx = tx.clone();
+                    builder.set_progress(Some(Box::new(move |line: &str| {
+                        let _ = tx.send(line.to_string());
+                    })));
+                }
+                let build_res = builder.build(&build_name); // may Err("cancelled")
+                builder.set_progress(None);
+                build_res?;
+                // Built-vs-Cached uses ACTIONS EXECUTED (cache misses) — the cold path's
+                // `report.executed` — NOT the engine recompute count.
+                let executed = builder.executed_actions();
+                let default_info = self.default_info_for(&build_name);
+                let produced = builder.produced_outputs(&default_info)?;
+                (executed, produced, default_info)
+            };
 
-        Ok(BuildResult {
-            target: token,
-            status: if executed == 0 {
-                BuildStatus::Cached
-            } else {
-                BuildStatus::Built
-            },
-            recomputes: executed as i64,
-            outputs,
-            message: None,
-        })
+            // Output verification — this is where the daemon "monitors" outputs: at build time, not
+            // via a continuous output-watcher (which would fight the self-cancellation guard that
+            // excludes the output tree, and can't reliably tell our own write from an external
+            // delete). If we're about to report "up-to-date" (nothing executed) but a declared
+            // output is MISSING on disk — e.g. `razel clean` removed the output tree while the warm
+            // graph still believed it built — the warm state is stale. Reset and re-materialize
+            // ONCE: the actions re-run, hit the cache, and `restore_or_run` writes the outputs back.
+            // No daemon restart.
+            if executed == 0
+                && !remateralized
+                && default_info
+                    .iter()
+                    .any(|p| !self.exec_root.join(p).exists())
+            {
+                self.builder = None;
+                self.analysis = None;
+                remateralized = true;
+                continue;
+            }
+
+            let outputs = produced
+                .into_iter()
+                .map(|(path, d)| OutputArtifact {
+                    path,
+                    digest: d.as_bytes().to_vec(),
+                })
+                .collect();
+            return Ok(BuildResult {
+                target: token,
+                status: if executed == 0 {
+                    BuildStatus::Cached
+                } else {
+                    BuildStatus::Built
+                },
+                recomputes: executed as i64,
+                outputs,
+                message: None,
+            });
+        }
     }
 
     /// Reuse the warm builder when the graph-shape digest AND the requested token are unchanged;
