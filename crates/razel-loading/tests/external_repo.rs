@@ -2,8 +2,10 @@
 //! to a real file (with the `_`/`-` repo-dir convention) and evaluates it, so a BUILD can `load()`
 //! upstream Starlark — the foundation for running real rules_rust. Test-first (AGENTS.md).
 
-use razel_loading::{GlobalFlags, analyze_workspace_with};
+use razel_loading::{CrateLock, GlobalFlags, analyze_workspace_with};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 fn third_party() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../third-party")
@@ -80,6 +82,55 @@ fn external_repo_internal_loads_are_repo_relative() {
         "word assembled from repo-relative + package-relative loads: {:?}",
         targets.iter().map(|t| &t.name).collect::<Vec<_>>()
     );
+}
+
+/// Regression gate for the `@crates` clean-checkout bug (fix `e4d87c2`): on a FRESH checkout the
+/// workspace BUILD's very first `load("@crates//:defs.bzl", …)` must MATERIALIZE the root `@crates`
+/// repo on demand, not die with "unsupported load path". The root repo is INLINE (`root_contents`),
+/// so this is network-free. The bug hid because the only catching test (`dogfood_selfhost.rs`) is
+/// `#[ignore]` — this is the committed gate so it can't silently regress.
+#[test]
+fn clean_checkout_first_crates_load_materializes_the_root() {
+    let base = std::env::temp_dir().join(format!("razel-crates-seed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    // The workspace's first load is the @crates root defs.bzl (the crate_universe macro layer).
+    std::fs::write(
+        root.join("BUILD"),
+        "load(\"@crates//:defs.bzl\", \"GROUP\")\nfilegroup(name = GROUP, srcs = [])\n",
+    )
+    .unwrap();
+    // A synthetic lock whose ROOT @crates repo provides defs.bzl inline (no fetch, no network).
+    let lock = CrateLock {
+        version: 1,
+        root_contents: BTreeMap::from([
+            ("BUILD.bazel".to_string(), "exports_files([])\n".to_string()),
+            ("defs.bzl".to_string(), "GROUP = \"crates_ok\"\n".to_string()),
+        ]),
+        crates: BTreeMap::new(),
+        recorded_inputs: vec![],
+        canonical_prefix: "rules_rust++crate+".to_string(),
+    };
+    // CLEAN checkout: nothing materialized yet — the loader must self-seed the root from the lock.
+    let fetched = root.join(".razel-crates");
+    assert!(!fetched.exists(), "precondition: nothing materialized");
+    let flags = GlobalFlags {
+        crate_lock: Some(Arc::new(lock)),
+        fetched_external_base: Some(fetched.clone()),
+        ..Default::default()
+    };
+    let res = analyze_workspace_with(&root, "//:crates_ok", flags);
+    let materialized = fetched.join("rules_rust++crate+crates/defs.bzl").exists();
+    let _ = std::fs::remove_dir_all(&base);
+    let targets =
+        res.expect("first @crates//:defs.bzl load self-materializes the root (no 'unsupported load path')");
+    assert!(
+        targets.iter().any(|t| t.name.ends_with("crates_ok")),
+        "the root defs.bzl's GROUP drove the target name: {:?}",
+        targets.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
+    assert!(materialized, "the root @crates repo was materialized on demand");
 }
 
 /// D4.1 (real): the same, against real vendored bazel_skylib `paths.bzl` (`third-party/bazel-skylib`).
