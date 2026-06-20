@@ -47,6 +47,9 @@ pub enum ExecOutcome {
 }
 
 /// A content-addressed output cache: `<root>/<action-key-hex>/<output-paths>`.
+/// `Clone` is cheap (just the root path) — lets the build driver hand a fresh `IncrementalBuilder`
+/// the same cache for a one-shot cold build.
+#[derive(Clone)]
 pub struct Cache {
     root: PathBuf,
 }

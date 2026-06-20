@@ -12,15 +12,13 @@
 pub mod incremental;
 pub use incremental::IncrementalBuilder;
 
-use razel_actions::Action;
 use razel_analysis::wire_to_ir;
-use razel_core::{Digest, FileId, TargetId};
-use razel_exec::{Cache, build_action};
+use razel_core::{FileId, TargetId};
+use razel_exec::Cache;
 use razel_ir::TargetKind;
 use razel_loading::{analyze_bazel_with, analyze_starlark, load_tree_report_with_targets};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
 // Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split) and the
 // daemon actor can drive the workspace-label path itself (WS-D).
 pub use razel_loading::{

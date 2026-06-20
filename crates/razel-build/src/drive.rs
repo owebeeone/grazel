@@ -176,13 +176,14 @@ pub fn effective_jobs(requested: usize) -> usize {
 }
 
 
-/// [`execute`] with up to `jobs` targets running CONCURRENTLY (S5x). A Kahn ready-queue over
-/// the dep DAG: a target runs only once all its deps complete, so the shared `exec_root` sees
-/// the same writes-before-reads a serial build would; independent targets (same topo layer)
-/// run in parallel WITHOUT a barrier (a finished target unblocks its dependents immediately —
-/// no waiting on a slow sibling). `jobs<=1` is the plain serial walk. The report is
-/// canonicalised to the topo order, so `-j1` and `-jN` are byte-identical (the determinism
-/// bar); the per-action outputs are content-addressed, hence identical regardless of order.
+/// Execute a pre-analyzed target graph through the **one** engine executor, with up to `jobs`
+/// actions running CONCURRENTLY (`jobs<=1` ⇒ serial). The cold/`--batch`/local build and the warm
+/// daemon now share this single path: a fresh [`IncrementalBuilder`] per call is the cold build; the
+/// daemon keeps the same builder warm. Same shared `restore_or_run` execution core as before — so
+/// outputs are byte-identical — but driven by the engine's parallel evaluator (named-`DepValue`
+/// input digests, NO per-input re-hash) instead of the old per-target Kahn walk + `run_one_target`.
+/// `produced`/`default_outputs` are pure functions of the analysis (unchanged); `executed` is the
+/// engine's cache-miss count. The result is order-independent (content-addressed outputs).
 pub fn execute_jobs(
     targets: &[AnalyzedTarget],
     target: &str,
@@ -197,124 +198,28 @@ pub fn execute_jobs(
         .map(|t| (t.name.clone(), t.clone()))
         .collect();
 
+    // The demanded closure, deps-first (post-order ⇒ the requested target is last).
     let mut order = Vec::new();
     collect_order(target, &by_name, &mut order, &mut HashSet::new())?;
-    let n = order.len();
     // Bazel semantics: a build's OUTPUTS are the requested target's DefaultInfo, not every
-    // intermediate (post-order ⇒ the requested target is last in `order`).
+    // intermediate; `produced` keeps every intermediate output of the closure (topo order).
     let default_outputs = order
         .last()
         .and_then(|t| by_name.get(t))
         .map(|t| t.default_info.clone())
         .unwrap_or_default();
+    let produced: Vec<String> = order
+        .iter()
+        .flat_map(|t| by_name[t].actions.iter().flat_map(|a| a.outputs.clone()))
+        .collect();
 
-    if jobs <= 1 {
-        let mut produced = Vec::new();
-        let mut executed = 0;
-        for tname in &order {
-            let (e, p) = run_one_target(&by_name[tname], exec_root, cache)?;
-            executed += e;
-            produced.extend(p);
-        }
-        return Ok(BuildReport { produced, executed, default_outputs });
-    }
+    // Run through the engine. A fresh builder = the cold build; `request_parallel` runs only the
+    // demanded closure's actions (reachable from `target`), exactly the set `order` covers.
+    let mut builder = IncrementalBuilder::new(exec_root, cache.clone());
+    builder.configure_targets(targets.to_vec())?;
+    builder.build(target, jobs)?;
+    let executed = builder.executed_actions();
 
-    // Parallel. indegree[i] = unfinished in-graph deps of `order[i]`; rdeps[j] = the targets
-    // that depend on j (the edges we relax when j completes).
-    let pos: HashMap<&str, usize> =
-        order.iter().enumerate().map(|(i, t)| (t.as_str(), i)).collect();
-    let mut indeg = vec![0usize; n];
-    let mut rdeps: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, tname) in order.iter().enumerate() {
-        for d in &by_name[tname].deps {
-            if let Some(&j) = pos.get(d.as_str()) {
-                indeg[i] += 1;
-                rdeps[j].push(i);
-            }
-        }
-    }
-    // Per-target result slots (each written by exactly one worker → no contention).
-    let slots: Vec<Mutex<Option<(usize, Vec<String>)>>> =
-        (0..n).map(|_| Mutex::new(None)).collect();
-
-    // All scheduling state under ONE lock so readiness/active/completed stay consistent
-    // (no cross-atomic races); `active` = targets currently running, used to detect a stall
-    // (ready-empty + active==0 + work-remaining ⇒ a dependency cycle).
-    struct Sched {
-        ready: VecDeque<usize>,
-        indeg: Vec<usize>,
-        active: usize,
-        completed: usize,
-        err: Option<String>,
-    }
-    let sched = Mutex::new(Sched {
-        ready: (0..n).filter(|&i| indeg[i] == 0).collect(),
-        indeg,
-        active: 0,
-        completed: 0,
-        err: None,
-    });
-    let cv = Condvar::new();
-
-    std::thread::scope(|scope| {
-        for _ in 0..jobs {
-            scope.spawn(|| {
-                loop {
-                    let i = {
-                        let mut s = sched.lock().expect("sched");
-                        loop {
-                            if s.err.is_some() || s.completed == n {
-                                return;
-                            }
-                            if let Some(i) = s.ready.pop_front() {
-                                s.active += 1;
-                                break i;
-                            }
-                            if s.active == 0 {
-                                // Nothing ready, nothing running, work remains → cycle.
-                                s.err = Some("dependency cycle in parallel execute".into());
-                                cv.notify_all();
-                                return;
-                            }
-                            s = cv.wait(s).expect("sched wait");
-                        }
-                    };
-                    let res = run_one_target(&by_name[&order[i]], exec_root, cache);
-                    let mut s = sched.lock().expect("sched");
-                    match res {
-                        Ok(r) => *slots[i].lock().expect("slot") = Some(r),
-                        Err(e) => {
-                            s.err = Some(e);
-                            cv.notify_all();
-                            return;
-                        }
-                    }
-                    for &j in &rdeps[i] {
-                        s.indeg[j] -= 1;
-                        if s.indeg[j] == 0 {
-                            s.ready.push_back(j);
-                        }
-                    }
-                    s.active -= 1;
-                    s.completed += 1;
-                    cv.notify_all();
-                }
-            });
-        }
-    });
-
-    let sched = sched.into_inner().expect("sched");
-    if let Some(e) = sched.err {
-        return Err(e);
-    }
-    // Flatten results in topo order → produced/executed independent of completion order.
-    let mut produced = Vec::new();
-    let mut executed = 0;
-    for slot in &slots {
-        let (e, p) = slot.lock().expect("slot").take().expect("every target ran");
-        executed += e;
-        produced.extend(p);
-    }
     Ok(BuildReport { produced, executed, default_outputs })
 }
 
