@@ -948,9 +948,23 @@ fn cmd_clean(args: &[String]) -> ExitCode {
         Err(c) => return c,
     };
     let compat = o.bazel_build_compat || bazel_build_compat_env();
-    let mut names: Vec<&str> = vec![".razel-cache", "razel-out", "razel-bin", "razel-testlogs"];
+    // The REAL output storage is the exec-root forest `.razel-exec` (external-crate builds);
+    // `razel-out`/`razel-bin`/`razel-testlogs` are convenience SYMLINKS into it, so removing only
+    // those leaves the actual outputs behind (and the warm daemon keeps serving them). Remove
+    // `.razel-exec` too so a clean is a REAL clean. `.razel-crates` (the expensive fetched external
+    // deps) survives a plain clean and is dropped only by `--expunge` (bazel parity).
+    let mut names: Vec<&str> = vec![
+        ".razel-cache",
+        ".razel-exec",
+        "razel-out",
+        "razel-bin",
+        "razel-testlogs",
+    ];
     if compat {
         names.extend(["bazel-out", "bazel-bin", "bazel-testlogs"]);
+    }
+    if o.expunge {
+        names.push(".razel-crates");
     }
     let how = if o.expunge { "expunged" } else { "cleaned" };
     let (mut removed, mut errs) = (Vec::new(), 0u32);
@@ -1564,6 +1578,35 @@ mod tests {
             std::fs::write(ws.join(".razelrc"), razelrc).unwrap();
         }
         ws
+    }
+
+    #[test]
+    fn clean_removes_real_exec_root_outputs_keeps_crates_until_expunge() {
+        let ws = std::env::temp_dir().join(format!("razel-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        // The real outputs live in the exec-root forest; razel-out is a convenience symlink into it.
+        std::fs::create_dir_all(ws.join(".razel-exec/razel-out")).unwrap();
+        std::fs::write(ws.join(".razel-exec/razel-out/bin"), "x").unwrap();
+        std::fs::create_dir_all(ws.join(".razel-crates/somecrate")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".razel-exec/razel-out", ws.join("razel-out")).unwrap();
+        let arg = ws.to_string_lossy().to_string();
+
+        // Plain clean: removes the REAL exec-root outputs + the convenience symlink; KEEPS the
+        // expensive fetched external deps.
+        cmd_clean(&["-C".into(), arg.clone()]);
+        assert!(!ws.join(".razel-exec").exists(), "clean removed the real exec-root storage");
+        assert!(
+            std::fs::symlink_metadata(ws.join("razel-out")).is_err(),
+            "clean removed the convenience symlink"
+        );
+        assert!(ws.join(".razel-crates").exists(), "a plain clean keeps fetched external deps");
+
+        // --expunge additionally drops the fetched external deps (bazel parity).
+        cmd_clean(&["--expunge".into(), "-C".into(), arg]);
+        assert!(!ws.join(".razel-crates").exists(), "--expunge removes the external deps");
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
