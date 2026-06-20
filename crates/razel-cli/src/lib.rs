@@ -590,11 +590,16 @@ fn cmd_build(args: &[String]) -> ExitCode {
         eprintln!("Building {target_arg} …");
     }
     let t0 = std::time::Instant::now();
-    let result = if o.daemon {
-        let socket = o
-            .socket
-            .clone()
-            .unwrap_or_else(|| default_socket(&o.workspace));
+    // WS-E (bazel model): default to the WARM per-workspace daemon — auto-spawn one if needed —
+    // so a no-op rebuild is ~instant instead of re-hashing every input (~34s). `RAZEL_BATCH=1`
+    // forces in-process; if no daemon can be reached we fall back to in-process so builds never
+    // break. (`--daemon`/`--batch` flag plumbing + the parse_opts de-dup land with the rest of WS-E.)
+    let socket = o
+        .socket
+        .clone()
+        .unwrap_or_else(|| default_socket(&o.workspace));
+    let force_batch = std::env::var_os("RAZEL_BATCH").is_some();
+    let result = if !force_batch && ensure_daemon(&o, &socket) {
         // C3: forward the raw build args + cwd; the daemon parses them server-side.
         let cwd = std::env::current_dir().unwrap_or_else(|_| o.workspace.clone());
         match daemon_call(&socket, &rpc::req_build(args, &cwd.to_string_lossy())) {
@@ -1285,6 +1290,60 @@ fn build_one(
 }
 
 /// One request/response to the daemon; unwraps the payload or prints the error.
+/// Ensure a warm daemon is reachable at `socket`: reuse a running one, else AUTO-SPAWN a detached
+/// `razel daemon` for this workspace and wait briefly for it to bind. Returns false if none could
+/// be reached — the caller then falls back to an in-process build, so builds never break (WS-E,
+/// bazel model: a per-workspace server is the default, with `RAZEL_BATCH=1` to force in-process).
+fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    // Already serving? (version answers as soon as the socket is bound).
+    if rpc::call(socket, &rpc::req_version()).is_ok() {
+        return true;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let cache = o
+        .cache
+        .clone()
+        .unwrap_or_else(|| o.workspace.join(".razel-cache"));
+    // Daemon stdout/stderr → a workspace log file (never the client's tty); the daemon outlives
+    // this client process. Two append handles to the same file (try_clone-free).
+    let logpath = o.workspace.join(".razel-daemon.log");
+    let open_log = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&logpath)
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null())
+    };
+    let spawned = Command::new(exe)
+        .arg("daemon")
+        .arg("-C")
+        .arg(&o.workspace)
+        .arg("--socket")
+        .arg(socket)
+        .arg("--disk_cache")
+        .arg(&cache)
+        .stdin(Stdio::null())
+        .stdout(open_log())
+        .stderr(open_log())
+        .spawn();
+    if spawned.is_err() {
+        return false;
+    }
+    // Poll for the socket to come up (~5s budget); the first build's analysis happens later.
+    for _ in 0..200 {
+        std::thread::sleep(Duration::from_millis(25));
+        if rpc::call(socket, &rpc::req_version()).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 fn daemon_call(socket: &Path, req: &razel_wire::Cbor) -> Result<razel_wire::Cbor, ExitCode> {
     let resp = rpc::call(socket, req).map_err(|e| {
         eprintln!("razel: cannot reach daemon at {} ({e})", socket.display());
