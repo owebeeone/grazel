@@ -25,7 +25,7 @@
 //! `Manifest`) — no filesystem re-read. An action's failure propagates as the engine's
 //! `Err(ComputeError)`; no separate error sink.
 
-use crate::analyze_build;
+use crate::{AnalyzedTarget, analyze_build};
 use razel_actions::Action;
 use razel_core::Digest;
 use razel_engine::{DepValue, Engine, NodeValue};
@@ -98,10 +98,16 @@ impl IncrementalBuilder {
         self
     }
 
-    /// Wire a BUILD's analyzed targets into the engine graph (once per BUILD).
+    /// Wire a single BUILD's analyzed targets into the engine graph (once per BUILD).
     pub fn configure(&mut self, build_src: &str) -> Result<(), String> {
-        let targets = analyze_build(build_src)?;
+        self.configure_targets(analyze_build(build_src)?)
+    }
 
+    /// Wire PRE-ANALYZED targets into the engine graph — the WORKSPACE-LABEL path (WS-C item 3):
+    /// the daemon's actor passes `analyze_workspace_resolved(...)`'s targets (`//:razel` plus its
+    /// transitive deps) here, not a single BUILD. Each leaf input node is inserted once
+    /// (`leaf_inputs` guard), so this is safe to call once per warm graph.
+    pub fn configure_targets(&mut self, targets: Vec<AnalyzedTarget>) -> Result<(), String> {
         // Which action produces each generated file → that file depends on it.
         let mut producer: HashMap<String, String> = HashMap::new();
         for t in &targets {
@@ -396,5 +402,20 @@ boom(name = "boom")
         b.configure(bad).unwrap();
         let err = b.build("boom").unwrap_err();
         assert!(err.contains("action failed"), "got: {err}");
+    }
+
+    #[test]
+    fn configure_targets_accepts_pre_analyzed_workspace_targets() {
+        // WS-C item 3: the actor passes analyze_workspace_resolved's targets directly (here we
+        // simulate with analyze_build's output). The warm graph builds + firewalls a no-op.
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("x.txt"), "hello").unwrap();
+        std::fs::write(exec.path().join("y.txt"), "world").unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let targets = crate::analyze_build(BUILD).unwrap();
+        let mut b = IncrementalBuilder::new(exec.path(), cache);
+        b.configure_targets(targets).unwrap();
+        assert_eq!(b.build("lib").unwrap(), 3, "cold build via pre-analyzed targets");
+        assert_eq!(b.build("lib").unwrap(), 0, "warm no-op = zero recompute");
     }
 }
