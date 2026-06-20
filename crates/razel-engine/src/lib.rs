@@ -831,6 +831,25 @@ mod tests {
     }
 
     #[test]
+    fn parallel_aborts_when_cancelled_then_restarts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let e = graph();
+        let cancel = Arc::new(AtomicBool::new(false));
+        e.set_cancel(Some(cancel.clone()));
+        cancel.store(true, Ordering::Relaxed);
+        let r = e.request_parallel("D", 4);
+        assert!(
+            r.is_err() && r.unwrap_err().contains("cancelled"),
+            "a set cancel flag aborts the parallel build"
+        );
+        // Clear + restart → completes, equal to a fresh serial build (warm == cold).
+        cancel.store(false, Ordering::Relaxed);
+        let restarted = e.request_parallel("D", 4).expect("restart succeeds");
+        assert_eq!(restarted, graph().request("D").unwrap());
+    }
+
+    #[test]
     fn parallel_runs_a_wide_independent_fan() {
         // 32 independent action nodes under one root → all run (concurrently), count == serial.
         let e = Engine::new();
