@@ -26,7 +26,7 @@ use razel_wire::{BuildResult, BuildState, BuildStatus, OutputArtifact, TargetKin
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// A request to the actor. `build` carries the raw client arg tokens + cwd (C3 — parsed
@@ -35,7 +35,10 @@ pub enum ActorMessage {
     Build {
         args: Vec<String>,
         cwd: PathBuf,
-        reply: SyncSender<Result<BuildResult, String>>,
+        reply: Sender<Result<BuildResult, String>>,
+        /// When set, per-action progress lines (`"<mnemonic> <output>"`) are forwarded here as the
+        /// build executes — the streaming build path (WS-E.2). `None` for a unary build.
+        progress: Option<Sender<String>>,
     },
     Shutdown,
 }
@@ -57,14 +60,41 @@ pub struct ActorHandle {
 }
 
 impl ActorHandle {
-    /// Enqueue a build and block on its result (the RPC connection thread waits here).
+    /// Enqueue a build and block on its result (the RPC connection thread waits here). Unary — no
+    /// progress stream (used by `do_build`/`do_run` + grazel).
     pub fn build(&self, args: Vec<String>, cwd: PathBuf) -> Result<BuildResult, String> {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (tx, rx) = std::sync::mpsc::channel();
         self.inbox
-            .send(ActorMessage::Build { args, cwd, reply: tx })
+            .send(ActorMessage::Build {
+                args,
+                cwd,
+                reply: tx,
+                progress: None,
+            })
             .map_err(|_| "razel daemon: build actor stopped".to_string())?;
         rx.recv()
             .map_err(|_| "razel daemon: build actor died mid-build".to_string())?
+    }
+
+    /// Enqueue a STREAMING build: returns a progress receiver (one `"<mnemonic> <output>"` line per
+    /// executed action, closes when the build finishes) and a one-shot result receiver. Non-blocking
+    /// — the caller drains progress, then reads the result (WS-E.2). If the actor is gone, both
+    /// receivers close, so the caller never hangs.
+    #[allow(clippy::type_complexity)]
+    pub fn build_streaming(
+        &self,
+        args: Vec<String>,
+        cwd: PathBuf,
+    ) -> (Receiver<String>, Receiver<Result<BuildResult, String>>) {
+        let (ptx, prx) = std::sync::mpsc::channel::<String>();
+        let (rtx, rrx) = std::sync::mpsc::channel::<Result<BuildResult, String>>();
+        let _ = self.inbox.send(ActorMessage::Build {
+            args,
+            cwd,
+            reply: rtx,
+            progress: Some(ptx),
+        });
+        (prx, rrx)
     }
 
     /// Times analysis ran. Stays flat across rebuilds of an unchanged BUILD (warm-reuse).
@@ -169,8 +199,17 @@ impl WorkspaceActor {
     fn run(&mut self) {
         while let Ok(msg) = self.inbox.recv() {
             match msg {
-                ActorMessage::Build { args, cwd, reply } => {
-                    let r = self.handle_build(&args, &cwd);
+                ActorMessage::Build {
+                    args,
+                    cwd,
+                    reply,
+                    progress,
+                } => {
+                    let r = self.handle_build(&args, &cwd, progress.as_ref());
+                    // Close the progress stream BEFORE replying, so a streaming client drains every
+                    // progress frame ahead of the terminal result (the connection thread reads
+                    // progress until close, then the result).
+                    drop(progress);
                     let _ = reply.send(r); // a gone client just drops the reply
                 }
                 ActorMessage::Shutdown => break,
@@ -188,10 +227,15 @@ impl WorkspaceActor {
     /// stale commit (the exact R-9.5 failure). Checking `pending` under its lock closes the window:
     /// any edit that became knowable (pushed) before we finalize forces a restart; an edit pushed
     /// strictly after this check is genuinely post-build and folds on the next request.
-    fn handle_build(&mut self, args: &[String], cwd: &Path) -> Result<BuildResult, String> {
+    fn handle_build(
+        &mut self,
+        args: &[String],
+        cwd: &Path,
+        progress: Option<&Sender<String>>,
+    ) -> Result<BuildResult, String> {
         let result = loop {
             self.cancel.store(false, Ordering::SeqCst);
-            let r = self.build_once(args, cwd);
+            let r = self.build_once(args, cwd, progress);
             let raced = matches!(&r, Err(e) if e == "cancelled")
                 || self.cancel.load(Ordering::SeqCst)
                 || !self.pending.lock().unwrap().is_empty();
@@ -208,7 +252,12 @@ impl WorkspaceActor {
 
     /// A single warm build attempt. Folds pending edits, (re)analyzes only on a graph-shape/target
     /// change, then drives the warm engine.
-    fn build_once(&mut self, args: &[String], cwd: &Path) -> Result<BuildResult, String> {
+    fn build_once(
+        &mut self,
+        args: &[String],
+        cwd: &Path,
+        progress: Option<&Sender<String>>,
+    ) -> Result<BuildResult, String> {
         // cwd rides the wire (C3) for future per-package target resolution; the root-workspace
         // daemon resolves against `self.workspace`.
         let _ = cwd;
@@ -226,7 +275,17 @@ impl WorkspaceActor {
 
         let build_name = self.ensure_analysis(&token, &flags)?;
         let builder = self.builder.as_ref().expect("analysis populated the builder");
-        builder.build(&build_name)?; // drives the warm engine; may Err("cancelled")
+        // Forward per-action progress to the streaming client (if any) for THIS build. Set after
+        // ensure_analysis (which may have built a fresh builder); always cleared before returning.
+        if let Some(tx) = progress {
+            let tx = tx.clone();
+            builder.set_progress(Some(Box::new(move |line: &str| {
+                let _ = tx.send(line.to_string());
+            })));
+        }
+        let build_res = builder.build(&build_name); // drives the warm engine; may Err("cancelled")
+        builder.set_progress(None);
+        build_res?;
         // Built-vs-Cached uses ACTIONS EXECUTED (cache misses) — the cold path's `report.executed`
         // — NOT the engine recompute count (which also counts aggregation nodes + cache HITs).
         let executed = builder.executed_actions();

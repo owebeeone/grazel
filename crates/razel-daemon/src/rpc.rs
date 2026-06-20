@@ -218,11 +218,81 @@ impl Inner {
         match method.as_str() {
             "build.subscribe" => self.stream_build_state(conn),
             "invocation.events" => self.stream_invocation_events(conn),
+            "build.stream" => self.stream_build(conn, &req),
             _ => {
                 let resp = self.dispatch(&req);
                 write_frame(conn, &encode(&resp))
             }
         }
+    }
+
+    /// `build.stream` (WS-E.2): run a build through the warm actor, writing one `InvocationEvent`
+    /// frame per EXECUTED action (`progress` set), then a terminal frame carrying the `BuildResult`
+    /// (`result` set). The connection stays open for the build's duration. Same result as the unary
+    /// `build`, plus live per-action progress — the CLI's default interactive path.
+    fn stream_build<C: Read + Write>(&self, conn: &mut C, req: &Cbor) -> io::Result<()> {
+        // C3 envelope: tag 2 = {1: args:[text], 2: cwd:text}.
+        let cargs = req.get(2);
+        let arg_tokens: Vec<String> = match cargs.get(1) {
+            Cbor::Array(items) => items
+                .iter()
+                .filter_map(|c| match c {
+                    Cbor::Text(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let cwd = match cargs.get(2) {
+            Cbor::Text(s) => PathBuf::from(s),
+            _ => self.workspace.clone(),
+        };
+
+        let (progress, result) = self.actor.build_streaming(arg_tokens, cwd);
+        let mut seq = 0i64;
+        // Progress frames stream as actions execute (the channel closes when the build finishes).
+        while let Ok(line) = progress.recv() {
+            seq += 1;
+            let ev = InvocationEvent {
+                invocation_id: "build".into(),
+                seq,
+                progress: Some(Progress {
+                    invocation_id: "build".into(),
+                    phase: "execute".into(),
+                    done: 0,
+                    total: 0,
+                    detail: Some(line),
+                }),
+                result: None,
+            };
+            write_frame(conn, &encode(&ok(&ev.to_cbor())))?; // Err == client gone → stop
+        }
+        // Build finished → the terminal result frame (a failed build is a Failed BuildResult).
+        let br = match result.recv() {
+            Ok(Ok(br)) => br,
+            Ok(Err(e)) => BuildResult {
+                target: String::new(),
+                status: BuildStatus::Failed,
+                recomputes: 0,
+                outputs: vec![],
+                message: Some(e),
+            },
+            Err(_) => BuildResult {
+                target: String::new(),
+                status: BuildStatus::Failed,
+                recomputes: 0,
+                outputs: vec![],
+                message: Some("razel daemon: build actor died".into()),
+            },
+        };
+        seq += 1;
+        let ev = InvocationEvent {
+            invocation_id: "build".into(),
+            seq,
+            progress: None,
+            result: Some(br),
+        };
+        write_frame(conn, &encode(&ok(&ev.to_cbor())))
     }
 
     /// `invocation.events` (log): replay the log from 0, then follow appends until
@@ -504,6 +574,35 @@ pub fn req_build(args: &[String], cwd: &str) -> Cbor {
             ]),
         ),
     ])
+}
+
+/// `build.stream` request envelope (C3 shape, streaming): same args as `build`, streamed result.
+pub fn req_build_stream(args: &[String], cwd: &str) -> Cbor {
+    Cbor::Map(vec![
+        (1, Cbor::Text("build.stream".into())),
+        (
+            2,
+            Cbor::Map(vec![
+                (
+                    1,
+                    Cbor::Array(args.iter().map(|a| Cbor::Text(a.clone())).collect()),
+                ),
+                (2, Cbor::Text(cwd.to_string())),
+            ]),
+        ),
+    ])
+}
+
+/// Open a `build.stream`: write the request, return the connection to read `InvocationEvent`
+/// frames from (progress frames, then a terminal frame whose `result` is the `BuildResult`).
+pub fn build_stream(
+    socket: &Path,
+    args: &[String],
+    cwd: &str,
+) -> io::Result<Box<dyn transport::Conn>> {
+    let mut conn = transport::connect(socket)?;
+    write_frame(&mut conn, &encode(&req_build_stream(args, cwd)))?;
+    Ok(conn)
 }
 
 /// `affected <files...>` request envelope.

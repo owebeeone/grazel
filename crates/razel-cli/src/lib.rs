@@ -28,7 +28,8 @@ use razel_core::Digest;
 use razel_daemon::rpc::{self, Server};
 use razel_exec::Cache;
 use razel_wire::{
-    BuildResult, BuildState, BuildStatus, ImpactSet, OutputArtifact, VersionInfo, encode,
+    BuildResult, BuildState, BuildStatus, ImpactSet, InvocationEvent, OutputArtifact, VersionInfo,
+    encode,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -615,10 +616,11 @@ fn cmd_build(args: &[String]) -> ExitCode {
             Err(c) => return c,
         }
     } else if ensure_daemon(&o, &socket) {
-        // C3: forward the raw build args + cwd; the daemon parses them server-side.
+        // C3: forward the raw build args + cwd; the daemon parses them server-side. Stream per-action
+        // progress back so a daemon build isn't silent (WS-E.2).
         let cwd = std::env::current_dir().unwrap_or_else(|_| o.workspace.clone());
-        match daemon_call(&socket, &rpc::req_build(args, &cwd.to_string_lossy())) {
-            Ok(p) => BuildResult::from_cbor(&p),
+        match daemon_build_streamed(&socket, args, &cwd.to_string_lossy(), o.cbor) {
+            Ok(r) => r,
             Err(c) => return c,
         }
     } else if o.daemon {
@@ -1361,6 +1363,41 @@ fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
         }
     }
     false
+}
+
+/// Run a build through the daemon's `build.stream`, printing each per-action progress line as it
+/// arrives (WS-E.2 — so a daemon build isn't silent), and returning the terminal `BuildResult`.
+fn daemon_build_streamed(
+    socket: &Path,
+    args: &[String],
+    cwd: &str,
+    cbor: bool,
+) -> Result<BuildResult, ExitCode> {
+    let mut stream = rpc::build_stream(socket, args, cwd).map_err(|e| {
+        eprintln!("razel: cannot reach daemon at {} ({e})", socket.display());
+        ExitCode::FAILURE
+    })?;
+    loop {
+        let frame = rpc::next_frame(&mut stream).map_err(|e| {
+            eprintln!("razel: daemon build stream closed early ({e})");
+            ExitCode::FAILURE
+        })?;
+        let payload = rpc::payload(&frame).map_err(|e| {
+            eprintln!("razel: daemon error: {e}");
+            ExitCode::FAILURE
+        })?;
+        let ev = InvocationEvent::from_cbor(&payload);
+        if let Some(r) = ev.result {
+            return Ok(r); // terminal frame
+        }
+        // Progress frame: stream the per-action line (mnemonic + output), like a local build.
+        if !cbor
+            && let Some(p) = ev.progress
+            && let Some(detail) = p.detail
+        {
+            eprintln!("  {detail}");
+        }
+    }
 }
 
 fn daemon_call(socket: &Path, req: &razel_wire::Cbor) -> Result<razel_wire::Cbor, ExitCode> {
