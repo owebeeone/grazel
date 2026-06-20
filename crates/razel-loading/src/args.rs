@@ -19,6 +19,10 @@ pub struct Opts {
     pub cache: Option<PathBuf>,
     pub socket: Option<PathBuf>,
     pub daemon: bool,
+    /// `--batch` (Bazel): force an in-process build, never the daemon (the WS-E opt-out). A
+    /// client-side routing flag; the daemon parser recognizes it (raw args are forwarded, C3) but
+    /// ignores it for the build itself.
+    pub batch: bool,
     pub cbor: bool,
     /// `-c` / `--compilation_mode` (fastbuild|dbg|opt).
     pub compilation_mode: Option<String>,
@@ -88,6 +92,7 @@ static RAZEL_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "workspace", abbrev: Some('C'), takes_value: true, allow_multiple: false, silent: false },
     FlagSpec { name: "socket", abbrev: None, takes_value: true, allow_multiple: false, silent: false },
     FlagSpec { name: "daemon", abbrev: None, takes_value: false, allow_multiple: false, silent: false },
+    FlagSpec { name: "batch", abbrev: None, takes_value: false, allow_multiple: false, silent: false },
     FlagSpec { name: "cbor", abbrev: None, takes_value: false, allow_multiple: false, silent: false },
     FlagSpec { name: "bazel_build_compat", abbrev: None, takes_value: false, allow_multiple: false, silent: false },
     FlagSpec { name: "cache", abbrev: None, takes_value: true, allow_multiple: false, silent: false },
@@ -109,6 +114,7 @@ static HANDLERS: &[(&str, Handler)] = &[
     }),
     ("socket", |o, v| o.socket = v.map(PathBuf::from)),
     ("daemon", |o, v| o.daemon = v.as_deref() != Some("false")),
+    ("batch", |o, v| o.batch = v.as_deref() != Some("false")),
     ("cbor", |o, v| o.cbor = v.as_deref() != Some("false")),
     ("compilation_mode", |o, v| o.compilation_mode = v),
     ("copt", |o, v| o.copts.extend(v)),

@@ -212,6 +212,8 @@ struct Opts {
     cache: Option<PathBuf>,
     socket: Option<PathBuf>,
     daemon: bool,
+    /// `--batch` (Bazel): force an in-process build, never the daemon (the WS-E opt-out).
+    batch: bool,
     cbor: bool,
     /// `-c` / `--compilation_mode` (fastbuild|dbg|opt).
     compilation_mode: Option<String>,
@@ -304,6 +306,13 @@ static RAZEL_FLAGS: &[FlagSpec] = &[
         silent: false,
     },
     FlagSpec {
+        name: "batch",
+        abbrev: None,
+        takes_value: false,
+        allow_multiple: false,
+        silent: false,
+    },
+    FlagSpec {
         name: "cbor",
         abbrev: None,
         takes_value: false,
@@ -344,6 +353,7 @@ static HANDLERS: &[(&str, Handler)] = &[
     }),
     ("socket", |o, v| o.socket = v.map(PathBuf::from)),
     ("daemon", |o, v| o.daemon = v.as_deref() != Some("false")),
+    ("batch", |o, v| o.batch = v.as_deref() != Some("false")),
     ("cbor", |o, v| o.cbor = v.as_deref() != Some("false")),
     // Bazel cc build flags → razel's existing cc engine (global, every action).
     ("compilation_mode", |o, v| o.compilation_mode = v),
@@ -591,21 +601,30 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
     let t0 = std::time::Instant::now();
     // WS-E (bazel model): default to the WARM per-workspace daemon — auto-spawn one if needed —
-    // so a no-op rebuild is ~instant instead of re-hashing every input (~34s). `RAZEL_BATCH=1`
-    // forces in-process; if no daemon can be reached we fall back to in-process so builds never
-    // break. (`--daemon`/`--batch` flag plumbing + the parse_opts de-dup land with the rest of WS-E.)
+    // so a no-op rebuild is ~instant instead of re-hashing every input (~34s). `--batch` (or
+    // `RAZEL_BATCH=1`) forces in-process; `--daemon` REQUIRES the daemon (no fallback); the default
+    // tries the daemon and falls back to in-process if none can be reached, so builds never break.
     let socket = o
         .socket
         .clone()
         .unwrap_or_else(|| default_socket(&o.workspace));
-    let force_batch = std::env::var_os("RAZEL_BATCH").is_some();
-    let result = if !force_batch && ensure_daemon(&o, &socket) {
+    let force_batch = o.batch || std::env::var_os("RAZEL_BATCH").is_some();
+    let result = if force_batch {
+        match local_build(&o, &target_arg) {
+            Ok(r) => r,
+            Err(c) => return c,
+        }
+    } else if ensure_daemon(&o, &socket) {
         // C3: forward the raw build args + cwd; the daemon parses them server-side.
         let cwd = std::env::current_dir().unwrap_or_else(|_| o.workspace.clone());
         match daemon_call(&socket, &rpc::req_build(args, &cwd.to_string_lossy())) {
             Ok(p) => BuildResult::from_cbor(&p),
             Err(c) => return c,
         }
+    } else if o.daemon {
+        // Explicit --daemon: don't silently fall back to a cold in-process build.
+        eprintln!("razel: --daemon set but no daemon could be reached at {}", socket.display());
+        return ExitCode::FAILURE;
     } else {
         match local_build(&o, &target_arg) {
             Ok(r) => r,
