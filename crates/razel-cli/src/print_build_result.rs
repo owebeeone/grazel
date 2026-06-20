@@ -21,6 +21,9 @@
 //! workspace's own `BUILD` single-package. exec_root = the workspace dir. The daemon
 //! does **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
+use razel_wire::{
+    BuildResult, BuildStatus,
+};
 
 // C3: ONE command-line parser, shared by the CLI + daemon (razel_loading::args, re-exported via
 // razel-build). The CLI only wraps it to map the library's String parse error onto an ExitCode
@@ -28,24 +31,21 @@
 // all come from the shared module, so the CLI and the daemon parse identically.
 
 
-mod tests;
-mod cmd_test;
-mod flag_mapping_tests;
-mod build_one;
-mod cmd_clean;
-mod cmd_subscribe;
-mod cmd_shutdown;
-mod open_cache;
-mod daemon_build_streamed;
-mod print_build_result;
 
-pub(crate) use tests::*;
-pub use cmd_test::*; // re-export the crate's public API (`run`) at the root for the bin
-pub(crate) use flag_mapping_tests::*;
-pub(crate) use build_one::*;
-pub(crate) use cmd_clean::*;
-pub(crate) use cmd_subscribe::*;
-pub(crate) use cmd_shutdown::*;
-pub(crate) use open_cache::*;
-pub(crate) use daemon_build_streamed::*;
-pub(crate) use print_build_result::*;
+/// Bazel's build-result format (all on STDERR — stdout is for data): `Target <label>
+/// up-to-date:` + each DefaultInfo output, or `ERROR: …` on failure. The completion/elapsed
+/// `INFO:` lines are emitted by the caller (which has the timing).
+pub(crate) fn print_build_result(r: &BuildResult) {
+    if let BuildStatus::Failed = r.status {
+        eprintln!("ERROR: {}: build failed.", r.target);
+        if let Some(m) = &r.message {
+            eprintln!("  {m}");
+        }
+        return;
+    }
+    eprintln!("Target {} up-to-date:", r.target);
+    for o in &r.outputs {
+        eprintln!("  {}", o.path);
+    }
+}
+

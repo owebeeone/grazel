@@ -21,6 +21,11 @@
 //! workspace's own `BUILD` single-package. exec_root = the workspace dir. The daemon
 //! does **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
+use razel_daemon::rpc::{self};
+use razel_wire::{
+    BuildResult, InvocationEvent,
+};
+use std::path::Path;
 
 // C3: ONE command-line parser, shared by the CLI + daemon (razel_loading::args, re-exported via
 // razel-build). The CLI only wraps it to map the library's String parse error onto an ExitCode
@@ -28,24 +33,39 @@
 // all come from the shared module, so the CLI and the daemon parse identically.
 
 
-mod tests;
-mod cmd_test;
-mod flag_mapping_tests;
-mod build_one;
-mod cmd_clean;
-mod cmd_subscribe;
-mod cmd_shutdown;
-mod open_cache;
-mod daemon_build_streamed;
-mod print_build_result;
 
-pub(crate) use tests::*;
-pub use cmd_test::*; // re-export the crate's public API (`run`) at the root for the bin
-pub(crate) use flag_mapping_tests::*;
-pub(crate) use build_one::*;
-pub(crate) use cmd_clean::*;
-pub(crate) use cmd_subscribe::*;
-pub(crate) use cmd_shutdown::*;
-pub(crate) use open_cache::*;
-pub(crate) use daemon_build_streamed::*;
-pub(crate) use print_build_result::*;
+/// Run a build through the daemon's `build.stream`, printing each per-action progress line as it
+/// arrives (WS-E.2 — so a daemon build isn't silent), and returning the terminal `BuildResult`.
+/// `Err(())` means the daemon was UNREACHABLE or died mid-stream (connection/abnormal close) — the
+/// caller falls back to an in-process build ("builds never break"). A real *build* failure is a
+/// normal `Ok(BuildResult{Failed})`, not `Err`.
+pub(crate) fn daemon_build_streamed(
+    socket: &Path,
+    args: &[String],
+    cwd: &str,
+    target: &str,
+    cbor: bool,
+) -> Result<BuildResult, ()> {
+    let mut stream = rpc::build_stream(socket, args, cwd).map_err(|_| ())?;
+    loop {
+        // An early/abnormal close (daemon crashed, actor died) or a protocol error → unreachable.
+        let frame = rpc::next_frame(&mut stream).map_err(|_| ())?;
+        let payload = rpc::payload(&frame).map_err(|_| ())?;
+        let ev = InvocationEvent::from_cbor(&payload);
+        if let Some(mut r) = ev.result {
+            // A streamed Failed result carries no target; fill it so the message isn't "ERROR: :".
+            if r.target.is_empty() {
+                r.target = target.to_string();
+            }
+            return Ok(r); // terminal frame
+        }
+        // Progress frame: stream the per-action line (mnemonic + output), like a local build.
+        if !cbor
+            && let Some(p) = ev.progress
+            && let Some(detail) = p.detail
+        {
+            eprintln!("  {detail}");
+        }
+    }
+}
+
