@@ -18,9 +18,9 @@
 
 use razel_core::Digest;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 type Key = String;
 type Rev = u64;
@@ -276,6 +276,230 @@ impl Engine {
         }
         Ok(new)
     }
+
+    /// Parallel demand evaluation — the SAME validated values + the SAME recompute set as
+    /// [`request`](Self::request), but independent action recomputes run concurrently on a pool of
+    /// `jobs` workers. The GRAPH stays single-threaded: this coordinator thread owns it (the
+    /// `RefCell`); only the compute closures move to workers — they run with no engine borrow held
+    /// (§4.1b) and MUST NOT re-enter the engine (razel's actions don't). Early cutoff is preserved
+    /// DYNAMICALLY: a node recomputes only once all its deps are validated this revision AND one
+    /// actually changed since the node was last verified. `jobs <= 1` ⇒ the serial [`request`].
+    /// Cancellation (set via [`set_cancel`](Self::set_cancel)) stops dispatch at an action boundary,
+    /// clears the queue, and returns `Err("cancelled")` — in-flight actions finish (atomic).
+    pub fn request_parallel(&self, key: &str, jobs: usize) -> Result<NodeValue, ComputeError> {
+        let jobs = jobs.max(1);
+        if jobs == 1 {
+            return self.request(key);
+        }
+        let cur = self.revision.get();
+
+        // 1. Collect the reachable sub-DAG (deps/rdeps/pending) + detect cycles + unknown nodes.
+        let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+        let mut rdeps: HashMap<String, Vec<String>> = HashMap::new();
+        let mut pending: HashMap<String, usize> = HashMap::new();
+        {
+            let nodes = self.nodes.borrow();
+            #[derive(Clone, Copy)]
+            enum Mark {
+                Doing,
+                Done,
+            }
+            let mut mark: HashMap<String, Mark> = HashMap::new();
+            // iterative DFS, idx = next dep to descend; on-stack node = `Doing` ⇒ cycle.
+            let mut stack: Vec<(String, usize)> = vec![(key.to_string(), 0)];
+            while let Some((k, idx)) = stack.last().cloned() {
+                let kdeps = match nodes.get(&k) {
+                    Some(n) => match &n.kind {
+                        Kind::Input => Vec::new(),
+                        Kind::Derived { deps, .. } => deps.clone(),
+                    },
+                    None => return Err(format!("unknown node `{k}`")),
+                };
+                if idx == 0 {
+                    mark.insert(k.clone(), Mark::Doing);
+                    deps.entry(k.clone()).or_insert_with(|| kdeps.clone());
+                    pending.entry(k.clone()).or_insert(kdeps.len());
+                    rdeps.entry(k.clone()).or_default();
+                }
+                if idx < kdeps.len() {
+                    stack.last_mut().unwrap().1 += 1;
+                    let d = kdeps[idx].clone();
+                    rdeps.entry(d.clone()).or_default().push(k.clone());
+                    match mark.get(&d) {
+                        Some(Mark::Doing) => return Err(format!("dependency cycle at `{d}`")),
+                        Some(Mark::Done) => {}
+                        None => stack.push((d, 0)),
+                    }
+                } else {
+                    mark.insert(k.clone(), Mark::Done);
+                    stack.pop();
+                }
+            }
+        }
+
+        // 2. Coordinator loop + worker pool. Ready = deps all validated this run.
+        let mut ready: VecDeque<String> =
+            pending.iter().filter(|(_, p)| **p == 0).map(|(k, _)| k.clone()).collect();
+        let mut done: HashSet<String> = HashSet::new();
+        let mut in_flight = 0usize;
+        let mut err: Option<ComputeError> = None;
+
+        type Task = (String, ComputeFn, Vec<DepValue>);
+        let shared: Arc<(Mutex<(VecDeque<Task>, bool)>, Condvar)> =
+            Arc::new((Mutex::new((VecDeque::new(), false)), Condvar::new()));
+        let (res_tx, res_rx) = mpsc::channel::<(String, Result<NodeValue, ComputeError>)>();
+
+        std::thread::scope(|scope| {
+            for _ in 0..jobs {
+                let shared = shared.clone();
+                let res_tx = res_tx.clone();
+                scope.spawn(move || {
+                    loop {
+                        let task = {
+                            let (lock, cv) = &*shared;
+                            let mut g = lock.lock().unwrap();
+                            loop {
+                                if let Some(t) = g.0.pop_front() {
+                                    break Some(t);
+                                }
+                                if g.1 {
+                                    break None;
+                                }
+                                g = cv.wait(g).unwrap();
+                            }
+                        };
+                        match task {
+                            Some((k, f, dvs)) => {
+                                if res_tx.send((k, f(&dvs))).is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                });
+            }
+
+            loop {
+                if done.contains(key) || err.is_some() {
+                    break;
+                }
+                if self.cancelled() {
+                    err = Some("cancelled".into());
+                    break;
+                }
+                // Dispatch ready nodes; cutoffs/inputs resolve inline (cascading) without a worker.
+                while in_flight < jobs {
+                    let Some(k) = ready.pop_front() else { break };
+                    if done.contains(&k) {
+                        continue;
+                    }
+                    let kdeps = deps[&k].clone();
+                    let (is_input, has_value, verified_at, max_dep_changed, compute, dep_values) = {
+                        let nodes = self.nodes.borrow();
+                        let n = &nodes[&k];
+                        let max_dep_changed =
+                            kdeps.iter().map(|d| nodes[d].changed_at).max().unwrap_or(0);
+                        let compute = match &n.kind {
+                            Kind::Derived { compute, .. } => Some(compute.clone()),
+                            Kind::Input => None,
+                        };
+                        let dep_values: Vec<DepValue> = kdeps
+                            .iter()
+                            .map(|d| DepValue {
+                                key: d.clone(),
+                                value: nodes[d].value.clone().expect("validated dep has a value"),
+                            })
+                            .collect();
+                        (
+                            matches!(n.kind, Kind::Input),
+                            n.value.is_some(),
+                            n.verified_at,
+                            max_dep_changed,
+                            compute,
+                            dep_values,
+                        )
+                    };
+                    if is_input || (has_value && (verified_at == cur || max_dep_changed <= verified_at))
+                    {
+                        // Input (authoritative), already-validated, or early cutoff: backdate, no run.
+                        self.nodes.borrow_mut().get_mut(&k).unwrap().verified_at = cur;
+                        relax_dependents(&k, &rdeps, &mut pending, &mut ready, &mut done);
+                    } else {
+                        self.recomputes.set(self.recomputes.get() + 1);
+                        let (lock, cv) = &*shared;
+                        lock.lock().unwrap().0.push_back((k, compute.unwrap(), dep_values));
+                        cv.notify_one();
+                        in_flight += 1;
+                    }
+                }
+                if in_flight == 0 {
+                    if !done.contains(key) {
+                        err = Some(format!("dependency cycle at `{key}`"));
+                    }
+                    break;
+                }
+                match res_rx.recv() {
+                    Ok((k, Ok(v))) => {
+                        in_flight -= 1;
+                        {
+                            let mut nodes = self.nodes.borrow_mut();
+                            let n = nodes.get_mut(&k).unwrap();
+                            if n.value.as_ref() != Some(&v) {
+                                n.changed_at = cur; // value changed → propagate to dependents
+                            }
+                            n.value = Some(v);
+                            n.verified_at = cur;
+                        }
+                        relax_dependents(&k, &rdeps, &mut pending, &mut ready, &mut done);
+                    }
+                    Ok((_, Err(e))) => {
+                        in_flight -= 1;
+                        err = Some(e);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // Stop the pool: clear queued work + signal; in-flight actions finish (atomic), scope joins.
+            {
+                let (lock, cv) = &*shared;
+                let mut g = lock.lock().unwrap();
+                g.0.clear();
+                g.1 = true;
+                cv.notify_all();
+            }
+
+            if let Some(e) = err {
+                return Err(e);
+            }
+            Ok(self.nodes.borrow()[key].value.clone().expect("target validated"))
+        })
+    }
+}
+
+/// Mark `k` validated and relax its dependents: each dependent's unvalidated-dep count drops by one,
+/// and a dependent that hits zero becomes ready. (Parallel-evaluator bookkeeping for
+/// [`Engine::request_parallel`].)
+fn relax_dependents(
+    k: &str,
+    rdeps: &HashMap<String, Vec<String>>,
+    pending: &mut HashMap<String, usize>,
+    ready: &mut VecDeque<String>,
+    done: &mut HashSet<String>,
+) {
+    done.insert(k.to_string());
+    if let Some(rs) = rdeps.get(k) {
+        for r in rs {
+            if let Some(p) = pending.get_mut(r) {
+                *p -= 1;
+                if *p == 0 {
+                    ready.push_back(r.clone());
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -488,6 +712,99 @@ mod tests {
         let cold = mk("v9");
         let from_scratch = cold.request("top").unwrap();
         assert_eq!(incremental, from_scratch);
+    }
+
+    // ---- parallel evaluator (request_parallel) — must match serial exactly ----
+
+    #[test]
+    fn parallel_matches_serial_value_and_recompute_count() {
+        // Same validated value AND same recompute set as serial, on a full build + an incremental edit.
+        let par = graph();
+        let v_par = par.request_parallel("D", 4).unwrap();
+        let par_full = par.recomputes();
+        let ser = graph();
+        let v_ser = ser.request("D").unwrap();
+        assert_eq!(v_par, v_ser, "parallel full-build value == serial");
+        assert_eq!(par_full, ser.recomputes(), "full-build recompute count == serial (C + D)");
+
+        par.reset_recomputes();
+        par.set_input("A", nv("a1"));
+        let v_par2 = par.request_parallel("D", 4).unwrap();
+        let par_inc = par.recomputes();
+        ser.reset_recomputes();
+        ser.set_input("A", nv("a1"));
+        let v_ser2 = ser.request("D").unwrap();
+        assert_eq!(v_par2, v_ser2, "parallel incremental value == serial");
+        assert_eq!(par_inc, ser.recomputes(), "incremental recompute count == serial");
+    }
+
+    #[test]
+    fn parallel_preserves_early_cutoff_firewall() {
+        let e = Engine::new();
+        e.add_input("A", nv("a0"));
+        e.add_derived("C", &["A"], |_| nv("CONST")); // C ignores A's content
+        e.add_derived("D", &["C"], concat);
+        e.request_parallel("D", 4).unwrap();
+        e.reset_recomputes();
+        e.set_input("A", nv("a1"));
+        e.request_parallel("D", 4).unwrap();
+        assert_eq!(e.recomputes(), 1, "C re-ran (A changed) but its value held → D firewalled");
+    }
+
+    #[test]
+    fn parallel_detects_cycles() {
+        let e = Engine::new();
+        e.add_derived("X", &["Y"], concat);
+        e.add_derived("Y", &["X"], concat);
+        assert!(e.request_parallel("X", 4).is_err());
+    }
+
+    #[test]
+    fn parallel_action_error_propagates() {
+        let e = Engine::new();
+        e.add_input("src", nv("s0"));
+        e.add_action("boom", &["src"], |_| Err("action failed: rc=1".into()));
+        let r = e.request_parallel("boom", 4);
+        assert!(r.is_err() && r.unwrap_err().contains("rc=1"));
+    }
+
+    #[test]
+    fn parallel_equals_from_scratch_with_manifests() {
+        let mk = |seed: &str| {
+            let e = Engine::new();
+            e.add_input("src", nv(seed));
+            e.add_action("act", &["src"], |deps| {
+                let h = digest_of(&deps[0].value);
+                Ok(NodeValue::Manifest(vec![("o.rlib".into(), Digest::of(h.as_bytes()))]))
+            });
+            e.add_derived("top", &["act"], concat);
+            e
+        };
+        let warm = mk("v0");
+        warm.request_parallel("top", 4).unwrap();
+        warm.set_input("src", nv("v9"));
+        let incremental = warm.request_parallel("top", 4).unwrap();
+        let cold = mk("v9");
+        assert_eq!(incremental, cold.request("top").unwrap());
+    }
+
+    #[test]
+    fn parallel_runs_a_wide_independent_fan() {
+        // 32 independent action nodes under one root → all run (concurrently), count == serial.
+        let e = Engine::new();
+        e.add_input("seed", nv("s"));
+        let tops: Vec<String> = (0..32).map(|i| format!("a{i}")).collect();
+        for a in &tops {
+            e.add_action(a, &["seed"], |_| Ok(NodeValue::Digest(Digest::of(b"x"))));
+        }
+        let refs: Vec<&str> = tops.iter().map(String::as_str).collect();
+        e.add_derived("root", &refs, concat);
+        e.request_parallel("root", 8).unwrap();
+        assert_eq!(e.recomputes(), 33, "32 actions + root, each computed once");
+        // Warm no-op: nothing changed → zero recompute.
+        e.reset_recomputes();
+        e.request_parallel("root", 8).unwrap();
+        assert_eq!(e.recomputes(), 0, "warm no-op via the parallel path is zero work");
     }
 
     #[test]
