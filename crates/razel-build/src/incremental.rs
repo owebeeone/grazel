@@ -220,6 +220,14 @@ impl IncrementalBuilder {
         self.engine.set_cancel(flag);
     }
 
+    /// Every generated output path in the warm graph (the producer map keys). The daemon shares
+    /// this with the file watcher so it ignores the daemon's OWN output writes — without it, an
+    /// in-tree declared output (e.g. `widget.o`) would re-trigger the watcher and cancel the build
+    /// that produced it (self-restart livelock).
+    pub fn output_paths(&self) -> HashSet<String> {
+        self.producer.keys().cloned().collect()
+    }
+
     /// Is `path` a known leaf (source) input node? The daemon actor uses this to classify a
     /// watcher event: a known leaf → [`sync_file`](Self::sync_file) (fast, re-digest one file);
     /// an unknown path (new/deleted source, BUILD edit) → a full re-analysis (`Rescan`, §3.5a).

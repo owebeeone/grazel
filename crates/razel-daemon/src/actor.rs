@@ -24,6 +24,7 @@ use razel_build::{
 use razel_core::Digest;
 use razel_exec::Cache;
 use razel_wire::{BuildResult, BuildState, BuildStatus, OutputArtifact, TargetKind, TargetStatus};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
@@ -41,13 +42,17 @@ pub enum ActorMessage {
 }
 
 /// The RPC plane's handle to the actor: enqueue builds, feed watcher invalidations, read the
-/// analysis counter. Cheap to clone the shared bits.
+/// analysis counter. Cheap to clone the shared bits (the watcher thread holds a clone).
+#[derive(Clone)]
 pub struct ActorHandle {
     inbox: Sender<ActorMessage>,
     /// Flipped by a watcher event to abort an in-flight build (cancel-and-restart).
     cancel: Arc<AtomicBool>,
     /// Changed paths awaiting fold-in; drained at the top of each build attempt.
     pending: Arc<Mutex<Vec<PathBuf>>>,
+    /// The live set of generated output paths (workspace-relative). The watcher ignores events on
+    /// these so the daemon never cancels on its own writes.
+    outputs: Arc<Mutex<HashSet<String>>>,
     /// How many times analysis actually ran (the warm-reuse signal; flat across no-op rebuilds).
     analyses: Arc<AtomicUsize>,
 }
@@ -69,11 +74,18 @@ impl ActorHandle {
     }
 
     /// Watcher hook: record a changed path and cancel any in-flight build so it restarts folding
-    /// the change. The caller drops excluded paths (outputs, `.git`, …) BEFORE calling this — see
-    /// the watcher wiring in `rpc::serve` — so the daemon never cancels on its own writes.
+    /// the change. The caller drops excluded paths (infra dirs, `.git`, …) and known outputs
+    /// (via [`is_known_output`](Self::is_known_output)) BEFORE calling this, so the daemon never
+    /// cancels on its own writes.
     pub fn notify_change(&self, path: PathBuf) {
         self.pending.lock().unwrap().push(path);
         self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Is `rel` (workspace-relative) a generated output of the current graph? The watcher uses this
+    /// to drop the daemon's own output writes (else they self-cancel the producing build).
+    pub fn is_known_output(&self, rel: &str) -> bool {
+        self.outputs.lock().unwrap().contains(rel)
     }
 
     /// Stop the actor thread (best-effort).
@@ -105,6 +117,7 @@ pub struct WorkspaceActor {
     analysis: Option<Analysis>,
     cancel: Arc<AtomicBool>,
     pending: Arc<Mutex<Vec<PathBuf>>>,
+    outputs: Arc<Mutex<HashSet<String>>>,
     analyses: Arc<AtomicUsize>,
     state: Arc<Mutex<BuildState>>,
     bump: Arc<Condvar>,
@@ -122,11 +135,13 @@ impl WorkspaceActor {
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(Mutex::new(Vec::new()));
+        let outputs = Arc::new(Mutex::new(HashSet::new()));
         let analyses = Arc::new(AtomicUsize::new(0));
         let handle = ActorHandle {
             inbox: tx,
             cancel: cancel.clone(),
             pending: pending.clone(),
+            outputs: outputs.clone(),
             analyses: analyses.clone(),
         };
         std::thread::Builder::new()
@@ -141,6 +156,7 @@ impl WorkspaceActor {
                     analysis: None,
                     cancel,
                     pending,
+                    outputs,
                     analyses,
                     state,
                     bump,
@@ -264,6 +280,9 @@ impl WorkspaceActor {
         let mut builder = IncrementalBuilder::new(self.exec_root.clone(), cache);
         builder.engine_set_cancel(Some(self.cancel.clone()));
         builder.configure_targets(targets.clone())?;
+        // Publish the output set BEFORE any build writes them, so the watcher drops the daemon's
+        // own output events (no self-cancellation).
+        *self.outputs.lock().unwrap() = builder.output_paths();
         self.builder = Some(builder);
         self.analysis = Some(Analysis {
             digest,

@@ -73,6 +73,8 @@ struct Inner {
     events_bump: Condvar,
     /// Invocation-id source (per-daemon monotonic).
     invocations: AtomicUsize,
+    /// Whether `serve` starts the OS file watcher (real daemon only; off for in-process tests).
+    watch_enabled: bool,
 }
 
 /// A daemon bound to one workspace + cache. Warm (analysis reused across builds),
@@ -82,7 +84,19 @@ pub struct Server {
 }
 
 impl Server {
+    /// A server WITHOUT the OS file watcher (in-process/test use, and the grazel host path which
+    /// drives connections via `serve_conn`). Invalidation must be fed via the actor directly.
     pub fn new(workspace: PathBuf, cache_dir: PathBuf) -> Self {
+        Self::build(workspace, cache_dir, false)
+    }
+
+    /// The real per-workspace daemon: `serve` also starts the file watcher so source edits between
+    /// builds reach the warm graph (no stale builds).
+    pub fn new_watching(workspace: PathBuf, cache_dir: PathBuf) -> Self {
+        Self::build(workspace, cache_dir, true)
+    }
+
+    fn build(workspace: PathBuf, cache_dir: PathBuf, watch_enabled: bool) -> Self {
         let state = Arc::new(Mutex::new(BuildState {
             revision: 0,
             targets: vec![],
@@ -101,6 +115,7 @@ impl Server {
                 events: Mutex::new(Vec::new()),
                 events_bump: Condvar::new(),
                 invocations: AtomicUsize::new(0),
+                watch_enabled,
             }),
         }
     }
@@ -134,6 +149,50 @@ impl Server {
         let _writer = crate::outlock::acquire(&self.inner.workspace, "razeld", "")
             .map_err(|e| io::Error::other(e))?;
         let listener = transport::bind(socket)?;
+
+        // Wire the file watcher → the actor's invalidation. This is what makes the warm path
+        // CORRECT (not just fast): a source edit between builds must reach the warm graph, or the
+        // daemon would serve a stale build. Exclude the daemon's OWN writes (outputs, sandboxes,
+        // VCS) — else a build's output churn would cancel the very build that produced it, an
+        // infinite self-restart. `_watcher` lives for the serve loop's life (drop = stop). A
+        // watcher that fails to start is loud: incremental invalidation is off (restart after
+        // edits) rather than silently serving stale.
+        //
+        // Gated to the real daemon (`new_watching`): the in-process integration tests drive
+        // invalidation directly via `ActorHandle::notify_change` (see the `warm_actor_folds…` lib
+        // test), so they don't pay for — or depend on — the OS watcher backend.
+        let _watcher = if self.inner.watch_enabled {
+            let actor = self.inner.actor.clone();
+            let watch_root = self.inner.workspace.clone();
+            match crate::watch(&self.inner.workspace, move |path| {
+                // Drop infra dirs (static) AND the daemon's own declared outputs (dynamic) —
+                // either would self-cancel the producing build.
+                if is_watch_excluded(&watch_root, &path) {
+                    return;
+                }
+                let rel = path
+                    .strip_prefix(&watch_root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+                if actor.is_known_output(&rel) {
+                    return;
+                }
+                actor.notify_change(path);
+            }) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    eprintln!(
+                        "razel daemon: file watcher failed to start ({e}); incremental \
+                         invalidation is OFF — restart the daemon after editing sources"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         loop {
             let mut conn = listener.accept()?;
             let inner = self.inner.clone();
@@ -382,6 +441,23 @@ fn target_ref(a: &razel_build::AffectedTarget) -> TargetRef {
     }
 }
 
+/// Should a watcher event for `path` be ignored? True for the daemon's own managed state and
+/// build outputs (mirrors `prepare_exec_root`'s exclusion set): `.razel-*` (sandboxes, exec-root,
+/// socket), `.git*`, and the output trees. Without this a build's writes would re-trigger the
+/// watcher → cancel the in-flight build → infinite self-restart.
+fn is_watch_excluded(workspace: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(workspace).unwrap_or(path);
+    rel.components().any(|c| {
+        let s = c.as_os_str().to_string_lossy();
+        s.starts_with(".razel-")
+            || s.starts_with(".git")
+            || matches!(
+                s.as_ref(),
+                "target" | "bazel-out" | "razel-out" | "razel-bin" | "razel-testlogs"
+            )
+    })
+}
+
 fn version_info() -> VersionInfo {
     VersionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -572,6 +648,66 @@ noop(name = "widget")
         .unwrap();
         build(&srv);
         assert_eq!(srv.analyses_run(), 2, "changed BUILD re-analyzed");
+    }
+
+    #[test]
+    fn warm_actor_folds_a_source_edit_and_no_ops_are_free() {
+        // The WS-D payoff, end to end through the actor: a source edit is folded warmly
+        // (warm == cold), and a no-op rebuild does zero work (the ~34s no-op fix). The watcher
+        // event is injected directly (notify_change) so the test is not OS-timing-flaky.
+        if !std::path::Path::new("/bin/sh").exists() {
+            return;
+        }
+        let ws = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("x.txt"), "hello").unwrap();
+        let build_src = r#"
+def _impl(ctx):
+    o = "x.txt.out"
+    ctx.actions.run(executable = "/bin/sh", outputs = [o], inputs = ["x.txt"],
+                    arguments = ["-c", "cat x.txt > x.txt.out"])
+    return [DefaultInfo(files = [o])]
+copy = rule(implementation = _impl, attrs = {})
+copy(name = "lib")
+"#;
+        std::fs::write(ws.path().join("BUILD"), build_src).unwrap();
+        let srv = Server::new(ws.path().to_path_buf(), cache.path().to_path_buf());
+        let build = |s: &Server| {
+            BuildResult::from_cbor(
+                &payload(&s.dispatch(&req_build(&["lib".into()], "."))).expect("build ok"),
+            )
+        };
+
+        // Build 1 (cold → warm): produces x.txt.out = "hello".
+        let r1 = build(&srv);
+        assert_eq!(r1.status, BuildStatus::Built);
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("x.txt.out")).unwrap(),
+            "hello"
+        );
+
+        // Edit the source on disk + tell the actor (what the watcher does).
+        std::fs::write(ws.path().join("x.txt"), "WORLD").unwrap();
+        srv.inner.actor.notify_change(ws.path().join("x.txt"));
+
+        // Build 2 (warm incremental): the edit is folded → output reflects it (warm == cold).
+        let r2 = build(&srv);
+        assert_eq!(r2.status, BuildStatus::Built, "edited input forces a real rebuild");
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("x.txt.out")).unwrap(),
+            "WORLD",
+            "warm rebuild folded the source edit"
+        );
+
+        // Build 3 (warm no-op): no change, no event → zero recompute → Cached. THE 34s fix.
+        let r3 = build(&srv);
+        assert_eq!(
+            r3.status,
+            BuildStatus::Cached,
+            "a no-op rebuild does zero work (no input re-hash)"
+        );
+        // Analysis ran exactly once across all three builds (warm reuse held throughout).
+        assert_eq!(srv.analyses_run(), 1, "BUILD unchanged → analyzed once");
     }
 
     #[test]

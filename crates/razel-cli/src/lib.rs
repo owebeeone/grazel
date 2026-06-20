@@ -1147,7 +1147,8 @@ fn cmd_daemon(args: &[String]) -> ExitCode {
         o.workspace.display(),
         socket.display()
     );
-    match Server::new(o.workspace, cache).serve(&socket) {
+    // The real daemon watches the workspace so source edits between builds reach the warm graph.
+    match Server::new_watching(o.workspace, cache).serve(&socket) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("razel daemon: {e}");
