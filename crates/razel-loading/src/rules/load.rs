@@ -161,6 +161,31 @@ impl BzlLoader<'_> {
             path.to_string()
         }
     }
+
+    /// Resolve an `@repo//pkg:file.bzl` load to a real file, MATERIALIZING the `@crates` repo on
+    /// first demand when the file isn't on disk yet. A clean-checkout workspace BUILD's very first
+    /// `load("@crates//:defs.bzl", …)` misses [`external_bzl_path`] (file-existence only) because
+    /// nothing has been fetched — and `@crates//:defs.bzl` then falls to [`resolve_bzl`], which
+    /// rejects it ("unsupported load path"). The root repo is only ever written by the PACKAGE-load
+    /// path (pkg.rs), which can't run until this `load()` succeeds — a chicken-and-egg that left a
+    /// fresh clone unable to build any workspace target. Here we mirror the package-load seed: if
+    /// the lock canonicalizes this repo and a base is set, materialize it (the root is inline +
+    /// network-free) and re-resolve. Gated on lock+base both `Some`, so it's inert on a non-`@crates`
+    /// workspace. Returns the resolved path (the error channel `external_bzl_path` lacks).
+    fn resolve_external_bzl(&self, path: &str) -> Result<Option<PathBuf>, String> {
+        let global = &self.session.global;
+        if let Some(p) = external_bzl_path(global, path) {
+            return Ok(Some(p));
+        }
+        if let Some((repo, _)) = parse_external(path)
+            && let (Some(lock), Some(base)) = (&global.crate_lock, &global.fetched_external_base)
+            && let Some(canon) = lock.canonical_repo(&repo)
+        {
+            crate::materialize::materialize_one_repo(lock, &canon, base)?;
+            return Ok(external_bzl_path(global, path));
+        }
+        Ok(None)
+    }
 }
 
 
@@ -187,7 +212,8 @@ impl FileLoader for BzlLoader<'_> {
         let real_external = if host.is_some() {
             None
         } else {
-            external_bzl_path(&self.session.global, path)
+            // Materializes the root `@crates` repo on a clean checkout's first workspace load.
+            self.resolve_external_bzl(path).map_err(err)?
         };
         let ctx = if host.is_some() || real_external.is_some() {
             parse_external(path)
