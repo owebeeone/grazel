@@ -13,6 +13,7 @@
 //! `razel-build`'s `IncrementalBuilder` (the action graph). The real warm path is the actor in
 //! `rpc.rs` (WS-D).
 
+pub mod actor; // §3.5a the warm single-owner build actor (WS-D)
 pub mod outlock; // §1b cross-daemon workspace writer lock (contract: ws-razel/inbox/0005)
 pub mod rpc;
 pub mod transport;

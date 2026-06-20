@@ -595,7 +595,9 @@ fn cmd_build(args: &[String]) -> ExitCode {
             .socket
             .clone()
             .unwrap_or_else(|| default_socket(&o.workspace));
-        match daemon_call(&socket, &rpc::req_build(&target_arg)) {
+        // C3: forward the raw build args + cwd; the daemon parses them server-side.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| o.workspace.clone());
+        match daemon_call(&socket, &rpc::req_build(args, &cwd.to_string_lossy())) {
             Ok(p) => BuildResult::from_cbor(&p),
             Err(c) => return c,
         }

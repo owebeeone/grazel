@@ -82,7 +82,7 @@ fn build_over_the_socket_produces_a_real_object() {
     // Root-package label (the fixture's BUILD is at the ws root): the loader-capable
     // daemon path resolves packages FOR REAL now (RG 0008) — the old single-BUILD
     // path silently ignored a bogus `//x` package here.
-    let resp = rpc::call(&socket, &rpc::req_build("//:widget")).unwrap();
+    let resp = rpc::call(&socket, &rpc::req_build(&["//:widget".into()], ".")).unwrap();
     let r = BuildResult::from_cbor(&rpc::payload(&resp).unwrap());
     assert_eq!(r.status, BuildStatus::Built, "msg: {:?}", r.message);
     assert_eq!(r.outputs.len(), 1);
@@ -123,7 +123,7 @@ fn build_subscribe_streams_state_when_a_build_lands() {
     assert!(s0.targets.is_empty());
 
     // Trigger a build on a separate connection → publishes a new state.
-    let r = rpc::call(&socket, &rpc::req_build("widget")).unwrap();
+    let r = rpc::call(&socket, &rpc::req_build(&["widget".into()], ".")).unwrap();
     rpc::payload(&r).unwrap();
 
     // The subscriber receives the updated snapshot (atom: whole state, revision++).

@@ -18,14 +18,12 @@
 //!   request  `{1: method:text, 2: args:cbor}`
 //!   response `{1: ok:bool, 2: payload:cbor|null, 3: error:text|null}`  (one per frame)
 
+use crate::actor::{ActorHandle, WorkspaceActor};
 use crate::transport;
-use razel_build::{AnalyzedTarget, affected, analyze_build, execute};
-use razel_core::Digest;
-use razel_exec::Cache;
+use razel_build::affected;
 use razel_wire::{
     BuildResult, BuildState, BuildStatus, Cbor, Hello, ImpactSet, InvocationEvent,
-    InvocationStarted, OutputArtifact, Progress, TargetRef, TargetStatus, VersionInfo, decode,
-    encode,
+    InvocationStarted, Progress, TargetRef, VersionInfo, decode, encode,
 };
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -56,23 +54,18 @@ fn read_frame(stream: &mut impl Read) -> io::Result<Vec<u8>> {
 
 // --- server -----------------------------------------------------------------
 
-/// Analysis cached in RAM, keyed by the BUILD file's content digest.
-struct WarmAnalysis {
-    build_digest: Digest,
-    targets: Vec<AnalyzedTarget>,
-}
-
 /// Shared daemon state, behind an `Arc` so each connection runs on its own thread
 /// (a long-lived `build.subscribe` stream must not block other clients).
 struct Inner {
     workspace: PathBuf,
-    cache_dir: PathBuf,
-    warm: Mutex<Option<WarmAnalysis>>,
-    analyses: AtomicUsize,
-    /// The live build-graph state (the `build.subscribe` atom); `revision` advances
-    /// on every build, and `bump` wakes subscribers.
-    state: Mutex<BuildState>,
-    bump: Condvar,
+    /// The warm single-owner build actor (§3.5a). All builds flow through it; analysis +
+    /// the incremental engine graph live there, not here.
+    actor: ActorHandle,
+    /// The live build-graph state (the `build.subscribe` atom); `revision` advances on every
+    /// build, and `bump` wakes subscribers. Shared (`Arc`) with the actor, which commits the
+    /// post-build snapshot on its own thread.
+    state: Arc<Mutex<BuildState>>,
+    bump: Arc<Condvar>,
     /// S3c: the invocation-event LOG (`invocation.events`, shape=log — ordered,
     /// append-only; subscribers replay from 0 then follow). Unbounded v1 — the
     /// bounded-buffer + drop-with-resync discipline arrives with the View work.
@@ -90,17 +83,21 @@ pub struct Server {
 
 impl Server {
     pub fn new(workspace: PathBuf, cache_dir: PathBuf) -> Self {
+        let state = Arc::new(Mutex::new(BuildState {
+            revision: 0,
+            targets: vec![],
+        }));
+        let bump = Arc::new(Condvar::new());
+        // Spawn the warm actor up front (the `!Send` engine graph lives on its thread). It blocks
+        // on its inbox until the first build; on `Server` drop the inbox `Sender` drops and the
+        // actor thread exits cleanly.
+        let actor = WorkspaceActor::spawn(workspace.clone(), cache_dir, state.clone(), bump.clone());
         Self {
             inner: Arc::new(Inner {
                 workspace,
-                cache_dir,
-                warm: Mutex::new(None),
-                analyses: AtomicUsize::new(0),
-                state: Mutex::new(BuildState {
-                    revision: 0,
-                    targets: vec![],
-                }),
-                bump: Condvar::new(),
+                actor,
+                state,
+                bump,
                 events: Mutex::new(Vec::new()),
                 events_bump: Condvar::new(),
                 invocations: AtomicUsize::new(0),
@@ -111,7 +108,7 @@ impl Server {
     /// How many times analysis has actually run (cold + each BUILD change). Stays
     /// flat across rebuilds of an unchanged BUILD — the warm-reuse signal.
     pub fn analyses_run(&self) -> usize {
-        self.inner.analyses.load(Ordering::SeqCst)
+        self.inner.actor.analyses_run()
     }
 
     /// Route one request envelope and produce a response (the unary path; exposed
@@ -151,26 +148,6 @@ impl Server {
 }
 
 impl Inner {
-    /// Analyze `build_src`, reusing the warm cache when its content digest is
-    /// unchanged. Returns the analyzed targets (cloned out so execution doesn't
-    /// hold the lock).
-    fn warm_analyze(&self, build_src: &str) -> Result<Vec<AnalyzedTarget>, String> {
-        let digest = Digest::of(build_src.as_bytes());
-        let mut warm = self.warm.lock().unwrap();
-        if let Some(w) = warm.as_ref()
-            && w.build_digest == digest
-        {
-            return Ok(w.targets.clone()); // warm hit — no re-analysis
-        }
-        let targets = analyze_build(build_src)?;
-        self.analyses.fetch_add(1, Ordering::SeqCst);
-        *warm = Some(WarmAnalysis {
-            build_digest: digest,
-            targets: targets.clone(),
-        });
-        Ok(targets)
-    }
-
     /// One connection: a `build.subscribe`/`invocation.events` request streams until
     /// the client disconnects; everything else is one request → one response.
     /// Generic over the byte stream — the transport decides the concrete type.
@@ -274,8 +251,10 @@ impl Inner {
                 }),
                 None,
             ));
+            // Synthesize a build through the warm actor (the same path `build` takes).
             let result = me
-                .do_build(&Cbor::Map(vec![(1, Cbor::Text(target.clone()))]))
+                .actor
+                .build(vec![target.clone()], me.workspace.clone())
                 .unwrap_or_else(|e| BuildResult {
                     target: target.clone(),
                     status: BuildStatus::Failed,
@@ -333,106 +312,26 @@ impl Inner {
         }
     }
 
+    /// Decode the C3 build envelope (`{1: args:[text], 2: cwd:text}`) and run it through the warm
+    /// actor; the actor parses the args server-side (the one shared parser), drives the warm engine,
+    /// and commits the post-build snapshot itself. A failed build is a `BuildResult{Failed}`; `Err`
+    /// is reserved for protocol problems.
     fn do_build(&self, args: &Cbor) -> Result<BuildResult, String> {
-        let Cbor::Text(target_arg) = args.get(1) else {
-            return Err("build: missing target".into());
+        let Cbor::Array(items) = args.get(1) else {
+            return Err("build: missing args".into());
         };
-        let target_arg = target_arg.clone();
-        let name = target_arg
-            .rsplit(':')
-            .next()
-            .unwrap_or(&target_arg)
-            .to_string();
-        let cache = Cache::new(&self.cache_dir).map_err(|e| e.to_string())?;
-
-        // RG 0008: the daemon rides the SAME loader-capable pipeline as razel-local
-        // (`load()` must work through the front door — §1d byte-identical claim).
-        // `//label` → the workspace loader; bare name → the warm single-BUILD path
-        // (digest-keyed re-analysis skip; the workspace path goes warm with the
-        // committed-snapshot work).
-        let report = if target_arg.starts_with("//") {
-            razel_build::build_workspace_with(
-                &self.workspace,
-                &target_arg,
-                &cache,
-                razel_build::GlobalFlags::default(),
-            )
-        } else {
-            let build_path = ["BUILD", "BUILD.bazel"]
-                .iter()
-                .map(|f| self.workspace.join(f))
-                .find(|p| p.exists())
-                .ok_or_else(|| format!("no BUILD in {}", self.workspace.display()))?;
-            let build_src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
-            let targets = self.warm_analyze(&build_src)?;
-            execute(&targets, &name, &self.workspace, &cache)
+        let arg_tokens: Vec<String> = items
+            .iter()
+            .filter_map(|c| match c {
+                Cbor::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        let cwd = match args.get(2) {
+            Cbor::Text(s) => PathBuf::from(s),
+            _ => self.workspace.clone(),
         };
-
-        // Build success vs. action failure both yield a BuildResult (Built/Failed);
-        // Err is reserved for protocol/IO problems (no BUILD, unreadable, …).
-        let result = match report {
-            Ok(report) => BuildResult {
-                target: target_arg,
-                status: if report.executed == 0 {
-                    BuildStatus::Cached
-                } else {
-                    BuildStatus::Built
-                },
-                recomputes: report.executed as i64,
-                // DefaultInfo, not intermediates (mirrors razel-cli local_build).
-                outputs: if report.default_outputs.is_empty() {
-                    &report.produced
-                } else {
-                    &report.default_outputs
-                }
-                .iter()
-                .map(|p| OutputArtifact {
-                    path: p.clone(),
-                    digest: digest_of(&self.workspace.join(p)),
-                })
-                .collect(),
-                message: None,
-            },
-            Err(e) => BuildResult {
-                target: target_arg,
-                status: BuildStatus::Failed,
-                recomputes: 0,
-                outputs: vec![],
-                message: Some(e),
-            },
-        };
-        // Publish into the live state and wake `build.subscribe` streams.
-        self.record_state(&result, &name);
-        Ok(result)
-    }
-
-    /// Fold a completed build into the live `BuildState` and notify subscribers.
-    fn record_state(&self, result: &BuildResult, name: &str) {
-        use razel_wire::TargetKind as Tk;
-        let kind = if name.ends_with("_test") {
-            Tk::Test
-        } else if name.ends_with("_binary") {
-            Tk::Binary
-        } else {
-            Tk::Library
-        };
-        let ts = TargetStatus {
-            label: result.target.clone(),
-            kind,
-            status: result.status,
-            output_digest: result
-                .outputs
-                .first()
-                .map(|o| o.digest.clone())
-                .unwrap_or_default(),
-        };
-        let mut st = self.state.lock().unwrap();
-        st.targets.retain(|t| t.label != ts.label);
-        st.targets.push(ts);
-        st.targets.sort_by(|a, b| a.label.cmp(&b.label));
-        st.revision += 1;
-        drop(st);
-        self.bump.notify_all();
+        self.actor.build(arg_tokens, cwd)
     }
 
     fn do_affected(&self, args: &Cbor) -> Result<ImpactSet, String> {
@@ -506,12 +405,6 @@ fn err(msg: &str) -> Cbor {
     ])
 }
 
-fn digest_of(path: &Path) -> Vec<u8> {
-    std::fs::read(path)
-        .map(|b| Digest::of(&b).as_bytes().to_vec())
-        .unwrap_or_default()
-}
-
 // --- client -----------------------------------------------------------------
 
 /// `version` request envelope.
@@ -519,11 +412,21 @@ pub fn req_version() -> Cbor {
     Cbor::Map(vec![(1, Cbor::Text("version".into())), (2, Cbor::Null)])
 }
 
-/// `build <target>` request envelope.
-pub fn req_build(target: &str) -> Cbor {
+/// `build` request envelope (C3): forward the raw client arg tokens + cwd; the daemon parses them
+/// server-side with the one shared parser (so daemon == local == bazel parse identically).
+pub fn req_build(args: &[String], cwd: &str) -> Cbor {
     Cbor::Map(vec![
         (1, Cbor::Text("build".into())),
-        (2, Cbor::Map(vec![(1, Cbor::Text(target.to_string()))])),
+        (
+            2,
+            Cbor::Map(vec![
+                (
+                    1,
+                    Cbor::Array(args.iter().map(|a| Cbor::Text(a.clone())).collect()),
+                ),
+                (2, Cbor::Text(cwd.to_string())),
+            ]),
+        ),
     ])
 }
 
@@ -653,7 +556,8 @@ noop(name = "widget")
         std::fs::write(ws.path().join("BUILD"), v1).unwrap();
         let srv = Server::new(ws.path().to_path_buf(), cache.path().to_path_buf());
 
-        let build = |s: &Server| payload(&s.dispatch(&req_build("widget"))).expect("build ok");
+        let build =
+            |s: &Server| payload(&s.dispatch(&req_build(&["widget".into()], "."))).expect("build ok");
 
         // Two builds of the unchanged BUILD: analysis runs once, reused on the 2nd.
         build(&srv);
@@ -698,7 +602,7 @@ thing(name = "widget_test", src = "widget.c")
     fn dispatch_build_missing_build_file_is_error() {
         let dir = tempfile::tempdir().unwrap();
         let srv = Server::new(dir.path().to_path_buf(), std::env::temp_dir());
-        let resp = srv.dispatch(&req_build("widget"));
+        let resp = srv.dispatch(&req_build(&["widget".into()], "."));
         assert!(payload(&resp).unwrap_err().contains("no BUILD"));
     }
 }

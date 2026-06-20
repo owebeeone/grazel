@@ -8,7 +8,7 @@ use super::*;
 /// (`external/<repo>/src/lib.rs`) resolves at execution. Generated outputs land in
 /// `<exec_root>/bazel-out/…` (under `--bazel_build_compat`), SEPARATE from sources — the bazel-faithful
 /// layout, never mixed into the fetched-source cache. Razel-managed state + build outputs are excluded.
-pub(crate) fn prepare_exec_root(workspace: &Path) -> std::io::Result<std::path::PathBuf> {
+pub fn prepare_exec_root(workspace: &Path) -> std::io::Result<std::path::PathBuf> {
     let exec_root = workspace.join(".razel-exec");
     let _ = std::fs::remove_dir_all(&exec_root);
     std::fs::create_dir_all(&exec_root)?;

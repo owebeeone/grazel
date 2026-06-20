@@ -89,7 +89,7 @@ fn daemon_build_supports_load() {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let resp = rpc::call(&socket, &rpc::req_build("//app:go")).unwrap();
+    let resp = rpc::call(&socket, &rpc::req_build(&["//app:go".into()], ".")).unwrap();
     let r = razel_wire::BuildResult::from_cbor(&rpc::payload(&resp).expect("build accepted"));
     assert!(
         !matches!(r.status, razel_wire::BuildStatus::Failed),

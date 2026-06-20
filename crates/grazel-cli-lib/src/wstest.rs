@@ -587,8 +587,11 @@ cc_obj(name="widget", src="widget.c")
             .map(|s| {
                 let s = s.clone();
                 std::thread::spawn(move || -> Result<(), String> {
-                    let resp = razel_daemon::rpc::call(&s, &razel_daemon::rpc::req_build("widget"))
-                        .map_err(|e| e.to_string())?;
+                    let resp = razel_daemon::rpc::call(
+                        &s,
+                        &razel_daemon::rpc::req_build(&["widget".into()], "."),
+                    )
+                    .map_err(|e| e.to_string())?;
                     let r = razel_wire::BuildResult::from_cbor(
                         &razel_daemon::rpc::payload(&resp)?,
                     );
@@ -1327,7 +1330,7 @@ fn view_fanout_dedup(ctx: &StageCtx) -> Result<(), String> {
         }
         // A revision bump reaches BOTH, byte-identical.
         let socket = ScopePaths::new(&home, "vf")?.socket;
-        razel_daemon::rpc::call(&socket, &razel_daemon::rpc::req_build("hello"))
+        razel_daemon::rpc::call(&socket, &razel_daemon::rpc::req_build(&["hello".into()], "."))
             .map_err(|e| e.to_string())?;
         let (a1, b1) = (a.recv()?, b.recv()?);
         if a1 != b1 {

@@ -17,16 +17,15 @@ use razel_analysis::wire_to_ir;
 use razel_core::{Digest, FileId, TargetId};
 use razel_exec::{Cache, build_action};
 use razel_ir::TargetKind;
-use razel_loading::{
-    analyze_bazel_with, analyze_starlark, analyze_workspace_resolved, load_tree_report_with_targets,
-};
+use razel_loading::{analyze_bazel_with, analyze_starlark, load_tree_report_with_targets};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Condvar, Mutex};
-// Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split).
+// Re-exported so the daemon/clients can hold warm analysis (the analyze/execute split) and the
+// daemon actor can drive the workspace-label path itself (WS-D).
 pub use razel_loading::{
-    AnalyzedTarget, GlobalFlags, args, bazel_flags, config_segment, convenience_symlinks,
-    resolve_build_file,
+    AnalyzedTarget, GlobalFlags, analyze_workspace_resolved, args, bazel_flags, config_segment,
+    convenience_symlinks, resolve_build_file,
 };
 
 
