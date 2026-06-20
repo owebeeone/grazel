@@ -126,6 +126,12 @@ impl Server {
         self.inner.actor.analyses_run()
     }
 
+    /// The executor concurrency the last build resolved — machine cores by default, or that
+    /// request's `-j N`. Re-resolved per request (an override never persists). For tests/introspection.
+    pub fn last_jobs(&self) -> usize {
+        self.inner.actor.last_jobs()
+    }
+
     /// Route one request envelope and produce a response (the unary path; exposed
     /// for in-process tests).
     pub fn dispatch(&self, req: &Cbor) -> Cbor {
@@ -761,6 +767,55 @@ noop(name = "widget")
         .unwrap();
         build(&srv);
         assert_eq!(srv.analyses_run(), 2, "changed BUILD re-analyzed");
+    }
+
+    #[test]
+    fn server_jobs_default_to_machine_optimal_and_override_is_per_request() {
+        // The server assumes jobs = the machine's optimal (logical CPU count) unless overridden;
+        // a `-j N` override applies ONLY to the request that carries it (never sticky on the warm
+        // daemon). cc-independent: a no-op /usr/bin/true rule.
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join("BUILD"),
+            r#"
+def _impl(ctx):
+    ctx.actions.run(executable = "/usr/bin/true", outputs = [], inputs = [], arguments = [])
+    return [DefaultInfo(files = [])]
+noop = rule(implementation = _impl, attrs = {})
+noop(name = "widget")
+"#,
+        )
+        .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let srv = Server::new(ws.path().to_path_buf(), cache.path().to_path_buf());
+        let build = |toks: &[&str]| {
+            let args: Vec<String> = toks.iter().map(|s| s.to_string()).collect();
+            payload(&srv.dispatch(&req_build(&args, "."))).expect("build ok");
+        };
+
+        // 1. No -j → the server resolves jobs to the machine's optimal (cores).
+        build(&["widget"]);
+        assert_eq!(srv.last_jobs(), cores, "default jobs = machine logical cores");
+
+        // 2. A per-invocation override applies to THIS request (cores+1 ⇒ distinct from the default).
+        let over = cores + 1;
+        build(&[&format!("--jobs={over}"), "widget"]);
+        assert_eq!(srv.last_jobs(), over, "the request's -j override is honored");
+
+        // 3. ...and ONLY to that request: the next build with no -j is back to the optimal default,
+        //    proving the override did not persist on the warm daemon.
+        build(&["widget"]);
+        assert_eq!(
+            srv.last_jobs(),
+            cores,
+            "a per-request override must not stick across builds"
+        );
+
+        // 4. Changing -j between builds did NOT force re-analysis (jobs is execution-only).
+        assert_eq!(srv.analyses_run(), 1, "varying -j reuses the warm analysis");
     }
 
     #[test]

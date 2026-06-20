@@ -57,6 +57,9 @@ pub struct ActorHandle {
     outputs: Arc<Mutex<HashSet<String>>>,
     /// How many times analysis actually ran (the warm-reuse signal; flat across no-op rebuilds).
     analyses: Arc<AtomicUsize>,
+    /// The executor concurrency the LAST build resolved (auto = machine cores, or the request's
+    /// `-j N`). Re-resolved per request from that request's args, so an override never persists.
+    jobs: Arc<AtomicUsize>,
 }
 
 impl ActorHandle {
@@ -100,6 +103,12 @@ impl ActorHandle {
     /// Times analysis ran. Stays flat across rebuilds of an unchanged BUILD (warm-reuse).
     pub fn analyses_run(&self) -> usize {
         self.analyses.load(Ordering::SeqCst)
+    }
+
+    /// The executor concurrency the last build resolved — machine cores by default, or that
+    /// request's `-j N`. Re-resolved per request, so an override applies only to its own build.
+    pub fn last_jobs(&self) -> usize {
+        self.jobs.load(Ordering::SeqCst)
     }
 
     /// Watcher hook: record a changed path and cancel any in-flight build so it restarts folding
@@ -148,6 +157,7 @@ pub struct WorkspaceActor {
     pending: Arc<Mutex<Vec<PathBuf>>>,
     outputs: Arc<Mutex<HashSet<String>>>,
     analyses: Arc<AtomicUsize>,
+    jobs: Arc<AtomicUsize>,
     state: Arc<Mutex<BuildState>>,
     bump: Arc<Condvar>,
 }
@@ -166,12 +176,14 @@ impl WorkspaceActor {
         let pending = Arc::new(Mutex::new(Vec::new()));
         let outputs = Arc::new(Mutex::new(HashSet::new()));
         let analyses = Arc::new(AtomicUsize::new(0));
+        let jobs = Arc::new(AtomicUsize::new(0));
         let handle = ActorHandle {
             inbox: tx,
             cancel: cancel.clone(),
             pending: pending.clone(),
             outputs: outputs.clone(),
             analyses: analyses.clone(),
+            jobs: jobs.clone(),
         };
         std::thread::Builder::new()
             .name("razel-actor".into())
@@ -187,6 +199,7 @@ impl WorkspaceActor {
                     pending,
                     outputs,
                     analyses,
+                    jobs,
                     state,
                     bump,
                 };
@@ -267,6 +280,15 @@ impl WorkspaceActor {
         // does (parity — a daemon build must use the same compiler flags as a local build).
         let opts = parse_opts_with_rc(&["common", "build"], args)?;
         let flags = opts.global_flags();
+        // Resolve + record this request's executor concurrency: machine cores by default (bazel
+        // `auto`), or the request's `-j N`. Re-resolved every build from THIS request's args, so an
+        // override applies only to its own build — never sticky on the warm daemon. (The warm engine
+        // path is serial today; this drives the cold/`--batch` executor and is the per-request
+        // contract for when warm-parallel execution lands.)
+        self.jobs.store(
+            razel_build::effective_jobs(flags.jobs),
+            Ordering::SeqCst,
+        );
         let token = opts
             .positionals
             .last()
@@ -421,7 +443,12 @@ impl WorkspaceActor {
                 buf.push(0);
             }
         }
-        buf.extend_from_slice(format!("flags:{flags:?}").as_bytes());
+        // Fingerprint the SEMANTIC flags (copts/linkopt/compilation_mode/defines/…) — but NOT
+        // `jobs`, which is execution-phase concurrency: changing `-j` between requests must reuse
+        // the warm analysis, not re-run it.
+        let mut fp = flags.clone();
+        fp.jobs = 0;
+        buf.extend_from_slice(format!("flags:{fp:?}").as_bytes());
         Digest::of(&buf)
     }
 

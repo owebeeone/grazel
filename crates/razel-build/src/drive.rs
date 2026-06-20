@@ -161,6 +161,21 @@ pub fn execute(
 }
 
 
+/// Resolve executor concurrency: an explicit `--jobs N` wins; `0` (unset) means "auto" — the
+/// machine's logical CPU count (bazel's `--jobs=auto`), so a build saturates the host by default
+/// instead of running on a single core. The single source of truth for the default, shared by the
+/// CLI's in-process path ([`execute_jobs`]) and the daemon actor (which records it per request).
+pub fn effective_jobs(requested: usize) -> usize {
+    if requested == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        requested
+    }
+}
+
+
 /// [`execute`] with up to `jobs` targets running CONCURRENTLY (S5x). A Kahn ready-queue over
 /// the dep DAG: a target runs only once all its deps complete, so the shared `exec_root` sees
 /// the same writes-before-reads a serial build would; independent targets (same topo layer)
@@ -175,6 +190,8 @@ pub fn execute_jobs(
     cache: &Cache,
     jobs: usize,
 ) -> Result<BuildReport, String> {
+    // `0` ⇒ auto = the machine's logical cores (bazel parity); an explicit `-j N` is honored as-is.
+    let jobs = effective_jobs(jobs);
     let by_name: HashMap<String, AnalyzedTarget> = targets
         .iter()
         .map(|t| (t.name.clone(), t.clone()))
