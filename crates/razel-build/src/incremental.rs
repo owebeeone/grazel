@@ -59,6 +59,10 @@ pub struct IncrementalBuilder {
     /// path's `report.executed`. Shared (`Rc<Cell>`) into each action closure; reset per build.
     /// Distinct from the engine recompute count (which also counts aggregation nodes + cache HITs).
     executed: Rc<Cell<usize>>,
+    /// Optional per-action progress sink, called with a `"<mnemonic> <output>"` line each time an
+    /// action actually EXECUTES (not on a cache hit) — so a daemon build can stream progress to the
+    /// client (WS-E.2), matching the cold path's per-action stderr lines. Set per build by the actor.
+    progress: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
 }
 
 fn file_key(path: &str) -> String {
@@ -96,7 +100,15 @@ impl IncrementalBuilder {
             isolation: Isolation::default(),
             producer: HashMap::new(),
             executed: Rc::new(Cell::new(0)),
+            progress: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Install (or clear) the per-action progress sink — called with a `"<mnemonic> <output>"` line
+    /// for each action that EXECUTES (cache miss) during a [`build`](Self::build). The daemon actor
+    /// sets this per build to forward lines to the streaming client (WS-E.2).
+    pub fn set_progress(&self, sink: Option<Box<dyn Fn(&str)>>) {
+        *self.progress.borrow_mut() = sink;
     }
 
     /// Choose how sandboxes materialize inputs (symlink, the default, or hardlink).
@@ -172,6 +184,8 @@ impl IncrementalBuilder {
                 let cache = self.cache.clone();
                 let exec_root = self.exec_root.clone();
                 let executed = self.executed.clone();
+                let progress = self.progress.clone();
+                let mnemonic = act.mnemonic.clone();
                 let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
                 self.engine.add_action(&akey, &dep_refs, move |dep_values| {
                     run_action(
@@ -183,6 +197,8 @@ impl IncrementalBuilder {
                         &exec_root,
                         &sandbox,
                         &executed,
+                        &mnemonic,
+                        &progress,
                     )
                 });
                 act_keys.push(akey);
@@ -291,6 +307,8 @@ fn run_action(
     exec_root: &Path,
     sandbox: &Rc<RefCell<Sandbox>>,
     executed: &Cell<usize>,
+    mnemonic: &str,
+    progress: &Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
 ) -> Result<NodeValue, String> {
     let mut input_digests = BTreeMap::new();
     for (inp, dv) in input_paths.iter().zip(dep_values.iter()) {
@@ -317,6 +335,10 @@ fn run_action(
         ExecOutcome::Cached(m) => Ok(NodeValue::Manifest(m)),
         ExecOutcome::Executed(m) => {
             executed.set(executed.get() + 1); // a real cache miss (cold path's `executed`)
+            if let Some(sink) = progress.borrow().as_ref() {
+                let out = outputs.first().map(String::as_str).unwrap_or("");
+                sink(&format!("{mnemonic} {out}"));
+            }
             Ok(NodeValue::Manifest(m))
         }
         ExecOutcome::Failed(msg) => Err(msg),
@@ -507,6 +529,32 @@ boom(name = "boom")
         b.sync_file("x.txt");
         b.build("lib").unwrap();
         assert_eq!(b.executed_actions(), 1, "only act(x) executed");
+    }
+
+    #[test]
+    fn progress_sink_fires_once_per_executed_action() {
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("x.txt"), "hello").unwrap();
+        std::fs::write(exec.path().join("y.txt"), "world").unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let mut b = IncrementalBuilder::new(exec.path(), cache);
+        b.configure(BUILD).unwrap();
+
+        let lines = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = lines.clone();
+        b.set_progress(Some(Box::new(move |s: &str| sink.borrow_mut().push(s.to_string()))));
+
+        // Cold build: both actions execute → two progress lines.
+        b.build("lib").unwrap();
+        assert_eq!(lines.borrow().len(), 2, "one progress line per executed action");
+
+        // No-op rebuild: cache hits → no executions → no progress.
+        lines.borrow_mut().clear();
+        b.build("lib").unwrap();
+        assert_eq!(lines.borrow().len(), 0, "a cache hit emits no progress");
     }
 
     #[test]
