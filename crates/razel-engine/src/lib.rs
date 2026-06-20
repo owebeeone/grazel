@@ -20,6 +20,8 @@ use razel_core::Digest;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type Key = String;
 type Rev = u64;
@@ -85,6 +87,9 @@ pub struct Engine {
     revision: Cell<Rev>,
     recomputes: Cell<usize>,
     in_progress: RefCell<HashSet<Key>>,
+    /// Cooperative cancellation flag, checked between node validations (bazel cancel-and-restart,
+    /// R-9.5). Shared (`Arc`) with the daemon's watcher thread; `None` = never cancels.
+    cancel: RefCell<Option<Arc<AtomicBool>>>,
 }
 
 impl Engine {
@@ -167,6 +172,22 @@ impl Engine {
         self.recomputes.set(0);
     }
 
+    /// Install (or clear with `None`) a cancellation flag, checked between node validations. When
+    /// it reads true, an in-flight [`request`](Self::request) aborts with `Err("cancelled")` at
+    /// the next action boundary (an in-flight action is atomic — never interrupted mid-spawn). The
+    /// daemon actor sets it when a watcher event arrives during a build, then drains the
+    /// invalidations and re-`request`s — bazel cancel-and-restart (R-9.5). A cancelled-then-
+    /// restarted build re-validates from the current revision, so warm == cold still holds.
+    pub fn set_cancel(&self, flag: Option<Arc<AtomicBool>>) {
+        *self.cancel.borrow_mut() = flag;
+    }
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .borrow()
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+    }
+
     /// Demand the (validated, up-to-date) value of `key`.
     pub fn request(&self, key: &str) -> Result<NodeValue, ComputeError> {
         if self.in_progress.borrow().contains(key) {
@@ -179,6 +200,11 @@ impl Engine {
     }
 
     fn request_inner(&self, key: &str) -> Result<NodeValue, ComputeError> {
+        // Cooperative cancellation: checked before each node's validation/recompute, so a build
+        // aborts promptly at an action boundary (bazel cancel-and-restart, R-9.5).
+        if self.cancelled() {
+            return Err("cancelled".into());
+        }
         let cur = self.revision.get();
 
         // Snapshot what we need without holding the borrow across recursion.
@@ -461,5 +487,32 @@ mod tests {
         let cold = mk("v9");
         let from_scratch = cold.request("top").unwrap();
         assert_eq!(incremental, from_scratch);
+    }
+
+    #[test]
+    fn request_aborts_when_cancel_flag_set_then_restarts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let e = graph();
+        let cancel = Arc::new(AtomicBool::new(false));
+        e.set_cancel(Some(cancel.clone()));
+        assert!(e.request("D").is_ok(), "uncancelled build succeeds");
+
+        // A watcher event arrives mid-build: set the flag + invalidate → the next request aborts.
+        cancel.store(true, Ordering::Relaxed);
+        e.set_input("A", nv("a-changed"));
+        let r = e.request("D");
+        assert!(
+            r.is_err() && r.unwrap_err().contains("cancelled"),
+            "build cancels when the flag is set"
+        );
+
+        // Drain + clear + restart → completes, equal to a fresh build of the final state
+        // (cancel-AND-restart preserves warm == cold).
+        cancel.store(false, Ordering::Relaxed);
+        let restarted = e.request("D").expect("restart succeeds");
+        let fresh = graph();
+        fresh.set_input("A", nv("a-changed"));
+        assert_eq!(restarted, fresh.request("D").unwrap());
     }
 }
