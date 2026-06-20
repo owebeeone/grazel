@@ -16,10 +16,9 @@
 //! action boundary; the actor folds the queued change and re-builds. Builds (which carry a reply)
 //! travel a SEPARATE channel from invalidations, so a build is never dropped by a drain.
 
-use razel_build::args::parse_opts;
+use razel_build::args::parse_opts_with_rc;
 use razel_build::{
-    AnalyzedTarget, GlobalFlags, IncrementalBuilder, analyze_build, analyze_workspace_resolved,
-    prepare_exec_root,
+    AnalyzedTarget, GlobalFlags, IncrementalBuilder, analyze_workspace_resolved, prepare_exec_root,
 };
 use razel_core::Digest;
 use razel_exec::Cache;
@@ -179,15 +178,24 @@ impl WorkspaceActor {
         }
     }
 
-    /// One client build, with bazel cancel-and-restart: if a watcher event raced the build (it
-    /// pushes `pending` then sets `cancel`), discard the result and rebuild so the change is folded
-    /// — a stale snapshot is never committed.
+    /// One client build, with bazel cancel-and-restart: if a watcher event raced the build,
+    /// discard the result and rebuild so the change is folded — a stale snapshot is never committed.
+    ///
+    /// The restart gate must read the SAME state the watcher writes FIRST. `notify_change` pushes
+    /// the path onto `pending` (under its Mutex) and only THEN sets `cancel`. So checking `cancel`
+    /// alone has a hole: an edit whose `push` landed after this build's drain but whose `cancel`
+    /// store lands after our `cancel.load` would be stranded in `pending` and never folded — a
+    /// stale commit (the exact R-9.5 failure). Checking `pending` under its lock closes the window:
+    /// any edit that became knowable (pushed) before we finalize forces a restart; an edit pushed
+    /// strictly after this check is genuinely post-build and folds on the next request.
     fn handle_build(&mut self, args: &[String], cwd: &Path) -> Result<BuildResult, String> {
         let result = loop {
             self.cancel.store(false, Ordering::SeqCst);
             let r = self.build_once(args, cwd);
-            // Restart on an explicit engine cancel OR a race observed after the build finished.
-            if matches!(&r, Err(e) if e == "cancelled") || self.cancel.load(Ordering::SeqCst) {
+            let raced = matches!(&r, Err(e) if e == "cancelled")
+                || self.cancel.load(Ordering::SeqCst)
+                || !self.pending.lock().unwrap().is_empty();
+            if raced {
                 continue;
             }
             break r;
@@ -206,7 +214,9 @@ impl WorkspaceActor {
         let _ = cwd;
         self.apply_pending_changes();
 
-        let opts = parse_opts(args)?;
+        // rc-lite: read `.bazelrc`/`.razelrc` build/common flags server-side, the SAME way the CLI
+        // does (parity — a daemon build must use the same compiler flags as a local build).
+        let opts = parse_opts_with_rc(&["common", "build"], args)?;
         let flags = opts.global_flags();
         let token = opts
             .positionals
@@ -216,7 +226,10 @@ impl WorkspaceActor {
 
         let build_name = self.ensure_analysis(&token, &flags)?;
         let builder = self.builder.as_ref().expect("analysis populated the builder");
-        let recomputes = builder.build(&build_name)?; // may Err("cancelled")
+        builder.build(&build_name)?; // drives the warm engine; may Err("cancelled")
+        // Built-vs-Cached uses ACTIONS EXECUTED (cache misses) — the cold path's `report.executed`
+        // — NOT the engine recompute count (which also counts aggregation nodes + cache HITs).
+        let executed = builder.executed_actions();
         let default_info = self.default_info_for(&build_name);
         let outputs = builder
             .produced_outputs(&default_info)?
@@ -229,13 +242,12 @@ impl WorkspaceActor {
 
         Ok(BuildResult {
             target: token,
-            // No engine recompute ⇒ nothing rebuilt ⇒ Cached; else something rebuilt ⇒ Built.
-            status: if recomputes == 0 {
+            status: if executed == 0 {
                 BuildStatus::Cached
             } else {
                 BuildStatus::Built
             },
-            recomputes: recomputes as i64,
+            recomputes: executed as i64,
             outputs,
             message: None,
         })
@@ -253,21 +265,17 @@ impl WorkspaceActor {
             return Ok(self.analysis.as_ref().unwrap().build_name.clone());
         }
 
-        // Re-analyze. Label path → the workspace loader (resolves external aliases); bare name →
-        // the single root BUILD (preserves the existing warm-reuse contract).
-        let (targets, build_name) = if token.starts_with("//") {
-            analyze_workspace_resolved(&self.workspace, token, flags.clone())?
+        // Re-analyze through the workspace loader for BOTH bare names and //-labels, so
+        // cross-package aliases resolve (e.g. `//:razel` → `//crates/razel-cli:razel`) and dep
+        // packages load — matching the CLI's local build_one + bazel. A bare token is the root
+        // package's same-named target (`razel` → `//:razel`); the single-BUILD `analyze_build`
+        // path could not follow aliases and built an action-less stub (the WS-D-review #6 bug).
+        let label = if token.starts_with("//") {
+            token.to_string()
         } else {
-            let build_path = ["BUILD", "BUILD.bazel"]
-                .iter()
-                .map(|f| self.workspace.join(f))
-                .find(|p| p.exists())
-                .ok_or_else(|| format!("no BUILD in {}", self.workspace.display()))?;
-            let src = std::fs::read_to_string(&build_path).map_err(|e| e.to_string())?;
-            let targets = analyze_build(&src)?;
-            let name = token.rsplit(':').next().unwrap_or(token).to_string();
-            (targets, name)
+            format!("//:{token}")
         };
+        let (targets, build_name) = analyze_workspace_resolved(&self.workspace, &label, flags.clone())?;
 
         // Persistent exec-root forest for external-crate builds; else build in the workspace.
         self.exec_root = if self.workspace.join(".razel-crates").is_dir() {
@@ -326,20 +334,29 @@ impl WorkspaceActor {
         }
     }
 
-    /// Content digest over the graph-shape files (`BUILD`/`MODULE`/rc) plus the semantic flags.
-    /// Unchanged ⇒ analysis is reused; a BUILD edit or a flag change ⇒ re-analysis.
+    /// Content digest over the graph-shape files plus the semantic flags. Unchanged ⇒ analysis is
+    /// reused; ANY graph-topology change ⇒ re-analysis. Covers EVERY package's `BUILD`/`BUILD.bazel`
+    /// (not just the root), so a sub-package BUILD edit invalidates the cache even when the file
+    /// watcher is off (the grazel host path / a failed watcher) — the §3.6b digest-is-the-backstop
+    /// invariant. (Glob membership of NEW source files is still watcher-driven; a residual gap on
+    /// the watcher-off path.)
     fn compute_analysis_digest(&self, flags: &GlobalFlags) -> Digest {
         let mut buf = Vec::new();
-        for f in [
-            "BUILD",
-            "BUILD.bazel",
-            "MODULE.bazel",
-            "MODULE.bazel.lock",
-            ".bazelrc",
-            ".razelrc",
-        ] {
+        for f in ["MODULE.bazel", "MODULE.bazel.lock", ".bazelrc", ".razelrc"] {
             if let Ok(bytes) = std::fs::read(self.workspace.join(f)) {
                 buf.extend_from_slice(f.as_bytes());
+                buf.push(0);
+                buf.extend_from_slice(&bytes);
+                buf.push(0);
+            }
+        }
+        // Every BUILD/BUILD.bazel in the source tree, canonical sorted order.
+        let mut build_files = Vec::new();
+        collect_build_files(&self.workspace, &self.workspace, &mut build_files);
+        build_files.sort();
+        for rel in &build_files {
+            if let Ok(bytes) = std::fs::read(self.workspace.join(rel)) {
+                buf.extend_from_slice(rel.as_bytes());
                 buf.push(0);
                 buf.extend_from_slice(&bytes);
                 buf.push(0);
@@ -377,5 +394,35 @@ impl WorkspaceActor {
         st.revision += 1;
         drop(st);
         self.bump.notify_all();
+    }
+}
+
+/// Recursively collect workspace-relative paths of every `BUILD`/`BUILD.bazel`, skipping the same
+/// infra dirs `prepare_exec_root` excludes (`.razel-*`, `.git*`, output trees, `target`). Used by
+/// the analysis digest so a sub-package BUILD edit invalidates the warm graph.
+fn collect_build_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let n = name.to_string_lossy();
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            if n.starts_with(".razel-")
+                || n.starts_with(".git")
+                || matches!(
+                    n.as_ref(),
+                    "target" | "bazel-out" | "razel-out" | "razel-bin" | "razel-testlogs"
+                )
+            {
+                continue;
+            }
+            collect_build_files(root, &entry.path(), out);
+        } else if matches!(n.as_ref(), "BUILD" | "BUILD.bazel")
+            && let Ok(rel) = entry.path().strip_prefix(root)
+        {
+            out.push(rel.to_string_lossy().to_string());
+        }
     }
 }

@@ -30,7 +30,7 @@ use razel_actions::Action;
 use razel_core::Digest;
 use razel_engine::{DepValue, Engine, NodeValue};
 use razel_exec::{Cache, Isolation, Materialize, Sandbox, digest_path, execute_action};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -55,6 +55,10 @@ pub struct IncrementalBuilder {
     /// straight from the cached action manifests (no filesystem re-hash). Rebuilt fresh on each
     /// [`configure_targets`].
     producer: HashMap<String, String>,
+    /// Actions that actually EXECUTED (cache misses) in the last [`build`](Self::build) — the cold
+    /// path's `report.executed`. Shared (`Rc<Cell>`) into each action closure; reset per build.
+    /// Distinct from the engine recompute count (which also counts aggregation nodes + cache HITs).
+    executed: Rc<Cell<usize>>,
 }
 
 fn file_key(path: &str) -> String {
@@ -91,6 +95,7 @@ impl IncrementalBuilder {
             materialize: Materialize::default(),
             isolation: Isolation::default(),
             producer: HashMap::new(),
+            executed: Rc::new(Cell::new(0)),
         }
     }
 
@@ -166,6 +171,7 @@ impl IncrementalBuilder {
                 let outputs = act.outputs.clone();
                 let cache = self.cache.clone();
                 let exec_root = self.exec_root.clone();
+                let executed = self.executed.clone();
                 let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
                 self.engine.add_action(&akey, &dep_refs, move |dep_values| {
                     run_action(
@@ -176,6 +182,7 @@ impl IncrementalBuilder {
                         &cache,
                         &exec_root,
                         &sandbox,
+                        &executed,
                     )
                 });
                 act_keys.push(akey);
@@ -209,8 +216,17 @@ impl IncrementalBuilder {
     /// action failure surfaces as the engine request's `Err`.
     pub fn build(&self, target: &str) -> Result<usize, String> {
         self.engine.reset_recomputes();
+        self.executed.set(0);
         self.engine.request(&target_key(target))?;
         Ok(self.engine.recomputes())
+    }
+
+    /// Actions that actually EXECUTED (cache misses) in the last [`build`](Self::build) — the cold
+    /// path's `report.executed`, the basis for `Built` vs `Cached`. Distinct from `build`'s
+    /// recompute count (which also counts the per-target aggregation nodes and cache-HIT re-runs,
+    /// so it over-reports work — that mismatch was the daemon's Built-vs-Cached regression).
+    pub fn executed_actions(&self) -> usize {
+        self.executed.get()
     }
 
     /// Install (or clear) the engine's cooperative cancel flag — the daemon actor sets this so a
@@ -274,6 +290,7 @@ fn run_action(
     cache: &Cache,
     exec_root: &Path,
     sandbox: &Rc<RefCell<Sandbox>>,
+    executed: &Cell<usize>,
 ) -> Result<NodeValue, String> {
     let mut input_digests = BTreeMap::new();
     for (inp, dv) in input_paths.iter().zip(dep_values.iter()) {
@@ -297,7 +314,11 @@ fn run_action(
     };
     let mut sb = sandbox.borrow_mut();
     match execute_action(&action, cache, exec_root, &mut sb) {
-        ExecOutcome::Cached(m) | ExecOutcome::Executed(m) => Ok(NodeValue::Manifest(m)),
+        ExecOutcome::Cached(m) => Ok(NodeValue::Manifest(m)),
+        ExecOutcome::Executed(m) => {
+            executed.set(executed.get() + 1); // a real cache miss (cold path's `executed`)
+            Ok(NodeValue::Manifest(m))
+        }
         ExecOutcome::Failed(msg) => Err(msg),
     }
 }
@@ -459,6 +480,33 @@ boom(name = "boom")
         b.configure(bad).unwrap();
         let err = b.build("boom").unwrap_err();
         assert!(err.contains("action failed"), "got: {err}");
+    }
+
+    #[test]
+    fn executed_actions_counts_only_cache_misses() {
+        if !Path::new("/bin/sh").exists() {
+            return;
+        }
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("x.txt"), "hello").unwrap();
+        std::fs::write(exec.path().join("y.txt"), "world").unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let mut b = IncrementalBuilder::new(exec.path(), cache);
+        b.configure(BUILD).unwrap();
+
+        // Fresh cache: both actions execute (cache misses) — recomputes also counts the tgt node.
+        b.build("lib").unwrap();
+        assert_eq!(b.executed_actions(), 2, "cold build: act(x) + act(y) executed");
+
+        // No change → nothing recomputes → nothing executes (Cached, the no-op signal).
+        b.build("lib").unwrap();
+        assert_eq!(b.executed_actions(), 0, "warm no-op: zero executed");
+
+        // Edit x → only act(x) re-executes (cache miss); act(y) is firewalled.
+        std::fs::write(exec.path().join("x.txt"), "HELLO").unwrap();
+        b.sync_file("x.txt");
+        b.build("lib").unwrap();
+        assert_eq!(b.executed_actions(), 1, "only act(x) executed");
     }
 
     #[test]
