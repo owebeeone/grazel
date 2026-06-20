@@ -34,6 +34,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// One incremental build session over a fixed exec root + cache. Holds the warm
 /// engine graph; not `Send` (the engine is single-threaded — serialize builds
@@ -48,6 +50,11 @@ pub struct IncrementalBuilder {
     materialize: Materialize,
     /// OS-level confinement for each action (e.g. macOS Seatbelt).
     isolation: Isolation,
+    /// `output path → producing action node key` for every generated file in the warm graph.
+    /// Lets [`produced_outputs`](Self::produced_outputs) read a built target's output digests
+    /// straight from the cached action manifests (no filesystem re-hash). Rebuilt fresh on each
+    /// [`configure_targets`].
+    producer: HashMap<String, String>,
 }
 
 fn file_key(path: &str) -> String {
@@ -83,6 +90,7 @@ impl IncrementalBuilder {
             leaf_inputs: HashSet::new(),
             materialize: Materialize::default(),
             isolation: Isolation::default(),
+            producer: HashMap::new(),
         }
     }
 
@@ -180,6 +188,8 @@ impl IncrementalBuilder {
                 NodeValue::Digest(Digest::of(s.as_bytes()))
             });
         }
+        // Record the producer map so a completed build can read its output digests warmly.
+        self.producer = producer;
         Ok(())
     }
 
@@ -201,6 +211,45 @@ impl IncrementalBuilder {
         self.engine.reset_recomputes();
         self.engine.request(&target_key(target))?;
         Ok(self.engine.recomputes())
+    }
+
+    /// Install (or clear) the engine's cooperative cancel flag — the daemon actor sets this so a
+    /// watcher event mid-build aborts the in-flight [`build`](Self::build) at an action boundary
+    /// (bazel cancel-and-restart, R-9.5). Pass-through to [`razel_engine::Engine::set_cancel`].
+    pub fn engine_set_cancel(&self, flag: Option<Arc<AtomicBool>>) {
+        self.engine.set_cancel(flag);
+    }
+
+    /// Is `path` a known leaf (source) input node? The daemon actor uses this to classify a
+    /// watcher event: a known leaf → [`sync_file`](Self::sync_file) (fast, re-digest one file);
+    /// an unknown path (new/deleted source, BUILD edit) → a full re-analysis (`Rescan`, §3.5a).
+    pub fn knows_leaf(&self, path: &str) -> bool {
+        self.leaf_inputs.contains(&file_key(path))
+    }
+
+    /// The `(path, digest)` outputs for a just-built target's `default_info` paths, read from the
+    /// warm action manifests — **no filesystem re-hash** for generated files (the digest the engine
+    /// already holds). A `default_info` entry that is a plain source pass-through (no producing
+    /// action) is digested once from the exec root. Cheap on a warm graph: each `request` is an
+    /// early-cutoff hit (verified this revision ⇒ returns the cached value, zero recompute).
+    pub fn produced_outputs(&self, default_info: &[String]) -> Result<Vec<(String, Digest)>, String> {
+        let mut out = Vec::with_capacity(default_info.len());
+        for path in default_info {
+            let digest = if let Some(akey) = self.producer.get(path) {
+                match self.engine.request(akey)? {
+                    NodeValue::Manifest(m) => m
+                        .iter()
+                        .find(|(p, _)| p == path)
+                        .map(|(_, g)| *g)
+                        .ok_or_else(|| format!("output `{path}` absent from `{akey}` manifest"))?,
+                    NodeValue::Digest(g) => g,
+                }
+            } else {
+                digest_path(&self.exec_root.join(path)).unwrap_or_else(|| Digest::of(b""))
+            };
+            out.push((path.clone(), digest));
+        }
+        Ok(out)
     }
 }
 
@@ -402,6 +451,37 @@ boom(name = "boom")
         b.configure(bad).unwrap();
         let err = b.build("boom").unwrap_err();
         assert!(err.contains("action failed"), "got: {err}");
+    }
+
+    #[test]
+    fn produced_outputs_and_knows_leaf_read_the_warm_graph() {
+        let exec = tempfile::tempdir().unwrap();
+        std::fs::write(exec.path().join("x.txt"), "hello").unwrap();
+        std::fs::write(exec.path().join("y.txt"), "world").unwrap();
+        let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
+        let mut b = IncrementalBuilder::new(exec.path(), cache);
+        b.configure(BUILD).unwrap();
+        b.build("lib").unwrap();
+
+        // Leaf classification (the actor's sync-vs-rescan authority).
+        assert!(b.knows_leaf("x.txt"), "x.txt is a wired source leaf");
+        assert!(!b.knows_leaf("nope.txt"), "an unknown path is not a leaf");
+
+        // Output digests come from the warm manifests and equal the canonical path digest.
+        let outs = b
+            .produced_outputs(&["x.txt.out".to_string(), "y.txt.out".to_string()])
+            .unwrap();
+        let by_path: HashMap<_, _> = outs.into_iter().collect();
+        assert_eq!(by_path.len(), 2);
+        assert_eq!(
+            by_path["x.txt.out"],
+            digest_path(&exec.path().join("x.txt.out")).unwrap(),
+            "warm output digest == canonical digest_path of the produced file"
+        );
+        assert_eq!(
+            by_path["y.txt.out"],
+            digest_path(&exec.path().join("y.txt.out")).unwrap()
+        );
     }
 
     #[test]
