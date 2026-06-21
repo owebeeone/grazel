@@ -1,27 +1,30 @@
-//! Bazel-style build progress: a status line pinned to the bottom of the terminal that updates IN
-//! PLACE — it never scrolls past one line — while logs (warnings, INFO) scroll above it. This
-//! mirrors bazel's curses UI (`UiEventHandler`: clearProgressBar → print the log → addProgressBar):
-//! the bar carries no trailing newline, so it is always the bottom line and a bare `\r\x1b[K`
-//! (carriage-return + clear-to-end-of-line) erases it before anything else is written, then it is
-//! redrawn underneath.
+//! Bazel-style build progress: a small status block pinned to the bottom of the terminal that
+//! updates IN PLACE — it never scrolls past a few lines — while logs (warnings, INFO) scroll above
+//! it. This mirrors bazel's curses UI (`UiEventHandler`: clearProgressBar → print the log →
+//! addProgressBar). Each render is a snapshot from the daemon: a `[done / total]` counter, the first
+//! running action on the header line, up to a few more beneath it, and a `… (N more)` tail — bazel's
+//! `sampleSize` block.
 //!
-//! On a non-tty (piped / CI / `--cbor`) the live bar is suppressed entirely — there is no cursor to
-//! steer and the final summary carries the result. Cross-platform: only ANSI on a detected tty, no
-//! unix-specific calls.
+//! Erase is by ANSI cursor control: every block line ends with a newline, so the cursor sits below
+//! the block; to redraw, move up by the block height and erase to the end of the screen, then write
+//! the new block. On a non-tty (piped / CI / `--cbor`) the live block is suppressed — there is no
+//! cursor to steer and the final summary carries the result. Cross-platform: ANSI only on a detected
+//! tty, no unix-specific calls.
 
 use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
-/// A bottom-pinned, in-place progress bar for one build (the daemon-streamed path).
+/// Running actions shown in the block (bazel's default `sampleSize`); the rest collapse to `(N more)`.
+const SAMPLE: usize = 3;
+
+/// A bottom-pinned, in-place progress block for one build (the daemon-streamed path).
 pub(crate) struct Progress {
     tty: bool,
     start: Instant,
-    /// Whether a bar line is currently on screen (so `clear` is a no-op when there's nothing to erase).
-    drawn: bool,
-    /// The bar's current text, redrawn after a log line scrolls above it.
-    bar: String,
-    /// Actions completed, counted from the stream (the daemon sends one progress frame per action).
-    done: i64,
+    /// Block height currently on screen, for the in-place erase.
+    drawn: usize,
+    /// The last block rendered, redrawn after a log line scrolls above it.
+    last: Vec<String>,
 }
 
 impl Progress {
@@ -29,70 +32,86 @@ impl Progress {
         Self {
             tty: std::io::stderr().is_terminal(),
             start: Instant::now(),
-            drawn: false,
-            bar: String::new(),
-            done: 0,
+            drawn: 0,
+            last: Vec::new(),
         }
     }
 
-    /// One action finished (`detail` = its mnemonic + primary output). Advance the counter and redraw
-    /// the bar in place. `total` is the build's action count when known (`0` ⇒ unknown, shown as
-    /// `[done]` without a denominator until the daemon supplies it).
-    pub(crate) fn action(&mut self, total: i64, detail: &str) {
-        self.done += 1;
-        self.bar = clip(&bar_line(self.done, total, detail, self.start.elapsed().as_secs()));
-        self.redraw();
+    /// Render a daemon snapshot: `done`/`total` actions and the descriptions of the actions currently
+    /// running. Redraws the block in place.
+    pub(crate) fn update(&mut self, done: i64, total: i64, running: &[&str]) {
+        if !self.tty {
+            return;
+        }
+        self.last = block_lines(done, total, running, self.start.elapsed().as_secs());
+        self.draw();
     }
 
-    /// Print `line` ABOVE the bar (a warning / INFO), then restore the bar beneath it.
+    /// Print `line` ABOVE the block (a warning / INFO), then restore the block beneath it.
     pub(crate) fn log(&mut self, line: &str) {
         self.clear();
         eprintln!("{line}");
-        self.redraw();
+        self.draw();
     }
 
-    /// Erase the bar — call before printing the final summary so it lands on a clean line.
+    /// Erase the block — call before the final summary so it lands on a clean line.
     pub(crate) fn finish(&mut self) {
         self.clear();
+        self.last.clear();
     }
 
-    fn redraw(&mut self) {
-        if !self.tty || self.bar.is_empty() {
+    fn draw(&mut self) {
+        if !self.tty || self.last.is_empty() {
             return;
         }
         self.clear();
         let mut e = std::io::stderr().lock();
-        // No trailing newline: the bar IS the bottom line, so `\r\x1b[K` alone erases it next time.
-        let _ = write!(e, "{}\x1b[K", self.bar);
+        for l in &self.last {
+            let _ = write!(e, "{l}\x1b[K\n"); // clear-to-EOL guards a now-shorter line
+        }
         let _ = e.flush();
-        self.drawn = true;
+        self.drawn = self.last.len();
     }
 
     fn clear(&mut self) {
-        if !self.tty || !self.drawn {
+        if !self.tty || self.drawn == 0 {
             return;
         }
         let mut e = std::io::stderr().lock();
-        let _ = write!(e, "\r\x1b[K");
+        // Cursor is on the fresh line below the block: move up over it, erase to end of screen.
+        let _ = write!(e, "\x1b[{}A\x1b[0J", self.drawn);
         let _ = e.flush();
-        self.drawn = false;
+        self.drawn = 0;
     }
 }
 
-/// The bar's content: bazel's `[done / total] <mnemonic> <output>; <Ns>` counter (or `[done]` until
-/// the daemon supplies a total). `secs` is the build's elapsed so the bar shows forward motion.
-fn bar_line(done: i64, total: i64, detail: &str, secs: u64) -> String {
+/// The block's lines: `[done / total] <first running>; <Ns>`, then up to `SAMPLE-1` more running
+/// actions, then `… (N more)` if the run is wider than the sample. `secs` is the build's elapsed so
+/// the header advances. Pure (no I/O) so it's unit-testable.
+fn block_lines(done: i64, total: i64, running: &[&str], secs: u64) -> Vec<String> {
     let counter = if total > 0 {
         format!("[{done} / {total}]")
     } else {
         format!("[{done}]")
     };
-    format!("{counter} {detail}; {secs}s")
+    let head = match running.first() {
+        Some(a) => format!("{counter} {a}; {secs}s"),
+        None => format!("{counter}; {secs}s"),
+    };
+    let mut lines = vec![clip(&head)];
+    for a in running.iter().skip(1).take(SAMPLE - 1) {
+        lines.push(clip(&format!("    {a}")));
+    }
+    let extra = running.len().saturating_sub(SAMPLE);
+    if extra > 0 {
+        lines.push(format!("    … ({extra} more)"));
+    }
+    lines
 }
 
 /// The terminal width for clipping: `$COLUMNS` when exported, else a safe 80. (A
 /// `TIOCGWINSZ`/Windows console-size probe would be exact but needs a dep / per-OS code — deferred;
-/// clipping to 80 only ever shortens the bar, never corrupts it.)
+/// clipping to 80 only ever shortens a line, never corrupts the block's height accounting.)
 fn term_width() -> usize {
     std::env::var("COLUMNS")
         .ok()
@@ -101,7 +120,7 @@ fn term_width() -> usize {
         .max(20)
 }
 
-/// Clip a bar line to the terminal width so it never wraps (a wrapped line breaks the single-line
+/// Clip a block line to the terminal width so it never wraps (a wrapped line breaks the in-place
 /// erase); an over-long line is truncated with an ellipsis.
 fn clip(s: &str) -> String {
     clip_to(s, term_width())
@@ -118,7 +137,7 @@ fn clip_to(s: &str, w: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{bar_line, clip_to};
+    use super::{block_lines, clip_to};
 
     #[test]
     fn clip_truncates_to_width_with_ellipsis() {
@@ -129,8 +148,18 @@ mod tests {
     }
 
     #[test]
-    fn bar_line_shows_counter_and_falls_back_without_a_total() {
-        assert_eq!(bar_line(3, 10, "CcCompile widget.o", 5), "[3 / 10] CcCompile widget.o; 5s");
-        assert_eq!(bar_line(1, 0, "Rustc razel", 0), "[1] Rustc razel; 0s", "no total → no denominator");
+    fn block_shows_counter_first_action_and_sample() {
+        // Counter + first running on the header; a total of 0 drops the denominator.
+        assert_eq!(block_lines(3, 10, &["CcCompile a.o"], 5), vec!["[3 / 10] CcCompile a.o; 5s"]);
+        assert_eq!(block_lines(1, 0, &[], 0), vec!["[1]; 0s"], "no total → no denominator");
+
+        // Wider than the sample → header + (SAMPLE-1) more + a "(N more)" tail.
+        let r = ["a", "b", "c", "d", "e"];
+        let lines = block_lines(2, 9, &r, 4);
+        assert_eq!(lines[0], "[2 / 9] a; 4s");
+        assert_eq!(lines[1], "    b");
+        assert_eq!(lines[2], "    c");
+        assert_eq!(lines[3], "    … (2 more)", "5 running, sample 3 → 2 collapse");
+        assert_eq!(lines.len(), 4);
     }
 }

@@ -303,6 +303,9 @@ impl WorkspaceActor {
                 // Forward per-action progress to the streaming client (if any). Set after
                 // ensure_analysis (which may have built a fresh builder); always cleared.
                 if let Some(tx) = progress {
+                    // Announce the action total first (the `[done / total]` denominator), then forward
+                    // each tagged start/finish line (S/F) the executor emits.
+                    let _ = tx.send(format!("T\x1f{}", builder.action_count()));
                     let tx = tx.clone();
                     builder.set_progress(Some(Box::new(move |line: &str| {
                         let _ = tx.send(line.to_string());

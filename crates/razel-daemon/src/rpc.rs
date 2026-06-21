@@ -276,8 +276,31 @@ impl Inner {
 
         let (progress, result) = self.actor.build_streaming(arg_tokens, cwd);
         let mut seq = 0i64;
-        // Progress frames stream as actions execute (the channel closes when the build finishes).
+        // Tagged executor events drive bazel's `[done / total]` bar: `T\x1f<n>` = the action total
+        // (once), `S\x1f<desc>` = an action started, `F\x1f<desc>` = finished. Fold the start/finish
+        // pairs into a running-set + completed count, and stream a snapshot per event — `detail` is
+        // the running action descriptions (newline-joined) for the CLI's running-action sample.
+        let (mut total, mut done) = (0i64, 0i64);
+        let mut running: Vec<String> = Vec::new();
         while let Ok(line) = progress.recv() {
+            match line.split_once('\x1f') {
+                // A new total starts a fresh pass (e.g. the re-materialization rebuild) — reset the
+                // counter + running set so the bar restarts at `[0 / total]` rather than continuing
+                // past it.
+                Some(("T", n)) => {
+                    total = n.parse().unwrap_or(0);
+                    done = 0;
+                    running.clear();
+                }
+                Some(("S", desc)) => running.push(desc.to_string()),
+                Some(("F", desc)) => {
+                    done += 1;
+                    if let Some(i) = running.iter().position(|d| d == desc) {
+                        running.remove(i);
+                    }
+                }
+                _ => {}
+            }
             seq += 1;
             let ev = InvocationEvent {
                 invocation_id: "build".into(),
@@ -285,9 +308,9 @@ impl Inner {
                 progress: Some(Progress {
                     invocation_id: "build".into(),
                     phase: "execute".into(),
-                    done: 0,
-                    total: 0,
-                    detail: Some(line),
+                    done,
+                    total,
+                    detail: Some(running.join("\n")),
                 }),
                 result: None,
             };

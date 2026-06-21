@@ -57,11 +57,15 @@ pub struct IncrementalBuilder {
     /// path's `report.executed`. Shared (`Arc<Atomic>`) into each action closure; reset per build.
     /// Distinct from the engine recompute count (which also counts aggregation nodes + cache HITs).
     executed: Arc<AtomicUsize>,
-    /// Optional per-action progress sink, called with a `"<mnemonic> <output>"` line each time an
-    /// action actually EXECUTES (not on a cache hit) — so a daemon build can stream progress to the
-    /// client (WS-E.2), matching the cold path's per-action stderr lines. `Send` so it can fire from
-    /// a worker thread under the parallel evaluator. Set per build by the actor.
+    /// Optional per-action progress sink. Called when an action node recomputes, with a TAGGED line
+    /// so the daemon can drive bazel's `[done / total]` bar: `"S\x1f<mnemonic> <output>"` when the
+    /// action starts and `"F\x1f<mnemonic> <output>"` when it finishes (hit or miss). `Send` so it can
+    /// fire from a worker thread under the parallel evaluator. Set per build by the actor; the daemon
+    /// turns the start/finish pairs into a running-set + completed count.
     progress: Arc<Mutex<Option<Box<dyn Fn(&str) + Send>>>>,
+    /// Total actions in the configured graph — the denominator for the daemon's `[done / total]`
+    /// progress. Set by [`configure_targets`].
+    action_count: usize,
 }
 
 fn file_key(path: &str) -> String {
@@ -100,7 +104,13 @@ impl IncrementalBuilder {
             producer: HashMap::new(),
             executed: Arc::new(AtomicUsize::new(0)),
             progress: Arc::new(Mutex::new(None)),
+            action_count: 0,
         }
+    }
+
+    /// Total actions in the configured graph — the `[done / total]` denominator for the daemon's bar.
+    pub fn action_count(&self) -> usize {
+        self.action_count
     }
 
     /// Install (or clear) the per-action progress sink — called with a `"<mnemonic> <output>"` line
@@ -132,6 +142,9 @@ impl IncrementalBuilder {
     /// transitive deps) here, not a single BUILD. Each leaf input node is inserted once
     /// (`leaf_inputs` guard), so this is safe to call once per warm graph.
     pub fn configure_targets(&mut self, targets: Vec<AnalyzedTarget>) -> Result<(), String> {
+        // Total actions across the configured targets — the `[done / total]` denominator (bazel's
+        // analyzed action count; a cold build runs all of them, so `done` climbs to this).
+        self.action_count = targets.iter().map(|t| t.actions.len()).sum();
         // Which action produces each generated file → that file depends on it.
         let mut producer: HashMap<String, String> = HashMap::new();
         for t in &targets {
@@ -334,15 +347,23 @@ fn run_action(
         platform: "host".into(),
         outputs: outputs.to_vec(),
     };
+    // Tagged progress: the daemon turns start/finish pairs into bazel's `[done / total]` bar +
+    // running-action sample. `desc` = the bazel-style action label (mnemonic + primary output).
+    let out = outputs.first().map(String::as_str).unwrap_or("");
+    let desc = format!("{mnemonic} {out}");
+    let notify = |tag: char| {
+        if let Some(sink) = progress.lock().unwrap().as_ref() {
+            sink(&format!("{tag}\x1f{desc}"));
+        }
+    };
+    notify('S'); // started — joins the running set
     let mut sb = sandbox.lock().unwrap();
-    match execute_action(&action, cache, exec_root, &mut sb) {
+    let outcome = execute_action(&action, cache, exec_root, &mut sb);
+    notify('F'); // finished (hit or miss) — leaves the running set, advances `done`
+    match outcome {
         ExecOutcome::Cached(m) => Ok(NodeValue::Manifest(m)),
         ExecOutcome::Executed(m) => {
             executed.fetch_add(1, Ordering::Relaxed); // a real cache miss (cold path's `executed`)
-            if let Some(sink) = progress.lock().unwrap().as_ref() {
-                let out = outputs.first().map(String::as_str).unwrap_or("");
-                sink(&format!("{mnemonic} {out}"));
-            }
             Ok(NodeValue::Manifest(m))
         }
         ExecOutcome::Failed(msg) => Err(msg),
@@ -536,7 +557,7 @@ boom(name = "boom")
     }
 
     #[test]
-    fn progress_sink_fires_once_per_executed_action() {
+    fn progress_sink_emits_start_finish_per_recomputed_action() {
         if !Path::new("/bin/sh").exists() {
             return;
         }
@@ -546,6 +567,7 @@ boom(name = "boom")
         let cache = Cache::new(tempfile::tempdir().unwrap().path()).unwrap();
         let mut b = IncrementalBuilder::new(exec.path(), cache);
         b.configure(BUILD).unwrap();
+        assert_eq!(b.action_count(), 2, "two actions configured → the [done / total] denominator");
 
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let sink = lines.clone();
@@ -553,14 +575,18 @@ boom(name = "boom")
             sink.lock().unwrap().push(s.to_string())
         })));
 
-        // Cold build: both actions execute → two progress lines.
+        // Cold build: both actions recompute → a tagged START then FINISH for each.
         b.build("lib", 4).unwrap();
-        assert_eq!(lines.lock().unwrap().len(), 2, "one progress line per executed action");
+        {
+            let l = lines.lock().unwrap();
+            assert_eq!(l.iter().filter(|s| s.starts_with("S\x1f")).count(), 2, "a start per action");
+            assert_eq!(l.iter().filter(|s| s.starts_with("F\x1f")).count(), 2, "a finish per action");
+        }
 
-        // No-op rebuild: cache hits → no executions → no progress.
+        // No-op rebuild: early cutoff skips both action nodes → no recompute → no progress.
         lines.lock().unwrap().clear();
         b.build("lib", 4).unwrap();
-        assert_eq!(lines.lock().unwrap().len(), 0, "a cache hit emits no progress");
+        assert_eq!(lines.lock().unwrap().len(), 0, "a no-op rebuild recomputes nothing");
     }
 
     #[test]

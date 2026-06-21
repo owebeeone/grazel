@@ -64,13 +64,19 @@ pub(crate) fn daemon_build_streamed(
                 }
                 return Ok(r); // terminal frame
             }
-            // Per-action progress → the bottom-pinned in-place bar (bazel-style; never scrolls).
-            // `--cbor` is machine output, so the bar is suppressed there.
+            // Per-action progress snapshot → the bottom-pinned in-place block (bazel-style; never
+            // scrolls). `detail` is the running-action descriptions, newline-joined. `--cbor` is
+            // machine output, so the block is suppressed there.
             if !cbor
                 && let Some(p) = ev.progress
-                && let Some(detail) = p.detail
             {
-                progress.action(p.total, &detail);
+                let detail = p.detail.unwrap_or_default();
+                let running: Vec<&str> = if detail.is_empty() {
+                    Vec::new()
+                } else {
+                    detail.split('\n').collect()
+                };
+                progress.update(p.done, p.total, &running);
             }
         }
     })();
