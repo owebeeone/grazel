@@ -340,6 +340,28 @@ fn build_through_a_spawned_daemon() {
     assert!(ws.path().join("widget.o").exists());
 }
 
+/// A relative `:name` target (bazel shorthand for the root package's `name`) must build. The daemon
+/// canonicalized it to `//::name` (double colon → "unknown node `tgt://::name`") because its target
+/// resolution had drifted from the CLI's. Goes through the default warm path — where the bug lived —
+/// so it exercises the daemon's resolution, not just the CLI's.
+#[test]
+fn relative_colon_target_builds_through_the_daemon() {
+    if !std::path::Path::new("/usr/bin/cc").exists() {
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
+    std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+    let out = razel().args(["build", ":widget", "-C"]).arg(ws.path()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "`:widget` must build (not 'unknown node //::widget'); stderr: {stderr}"
+    );
+    assert!(ws.path().join("widget.o").exists(), "object produced for :widget");
+    let _ = razel().args(["shutdown", "-C"]).arg(ws.path()).output(); // don't leak the daemon
+}
+
 /// THE clean bug: the default `build` path reuses a WARM per-workspace daemon, so `clean` must
 /// invalidate it — otherwise the daemon keeps serving the pre-clean graph from memory and the very
 /// next build is wrongly "up-to-date". Reproduces `build; build; clean; build` end-to-end and

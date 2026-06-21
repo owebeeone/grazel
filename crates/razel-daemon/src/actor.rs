@@ -374,14 +374,10 @@ impl WorkspaceActor {
 
         // Re-analyze through the workspace loader for BOTH bare names and //-labels, so
         // cross-package aliases resolve (e.g. `//:razel` → `//crates/razel-cli:razel`) and dep
-        // packages load — matching the CLI's local build_one + bazel. A bare token is the root
-        // package's same-named target (`razel` → `//:razel`); the single-BUILD `analyze_build`
-        // path could not follow aliases and built an action-less stub (the WS-D-review #6 bug).
-        let label = if token.starts_with("//") {
-            token.to_string()
-        } else {
-            format!("//:{token}")
-        };
+        // packages load — matching the CLI's local build_one + bazel. Canonicalize via the ONE shared
+        // helper the CLI uses, so `:name` becomes `//:name` (not `//::name`) and a bare `name` →
+        // `//:name` — the daemon's old inline `format!("//:{token}")` doubled the colon for `:name`.
+        let label = razel_build::canonical_target(token);
         let (targets, build_name) = analyze_workspace_resolved(&self.workspace, &label, flags.clone())?;
 
         // Persistent exec-root forest for external-crate builds; else build in the workspace.

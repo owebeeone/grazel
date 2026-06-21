@@ -100,28 +100,18 @@ pub(crate) fn build_one(
     cache: &Cache,
     flags: GlobalFlags,
 ) -> Result<BuildResult, ExitCode> {
-    let report = if target_arg.starts_with("//")
-        || (target_arg.starts_with('@') && target_arg.contains("//"))
-    {
-        // Workspace label (`//pkg:name`) OR an external-repo label (`@crates//:blake3`,
-        // RazelRustParityPlan B1) → load packages on demand from the workspace root; the analysis
-        // path seeds the `@crates` lock + follows the alias chain to the versioned crate repo.
-        build_workspace_with(&o.workspace, target_arg, cache, flags)
-    } else {
-        // Bare name / :name → a target in the workspace's ROOT package. Confirm a root BUILD exists
-        // (clear error otherwise), then route through the WORKSPACE path so cross-package aliases are
-        // FOLLOWED (e.g. `//:razel` → `//crates/razel-cli:razel`) and dependency packages load on
-        // demand. The old single-package `build_bazel_with` analyzed an alias to an empty,
-        // action-less target — which `build_one` then reported as a vacuous "up-to-date". (RG 0011:
-        // canonical BUILD.bazel-over-BUILD discovery.)
-        let name = target_arg.rsplit(':').next().unwrap_or(target_arg);
+    // A bare `name` / relative `:name` resolves to the workspace's ROOT package — confirm a root
+    // BUILD exists first so the error is clear. An explicit `//pkg:name` / external `@repo//:name`
+    // instead loads packages on demand and follows cross-package aliases (e.g. `//:razel` →
+    // `//crates/razel-cli:razel`); the old single-package path analyzed an alias to an empty,
+    // action-less target that reported a vacuous "up-to-date" (RG 0011).
+    let is_explicit_label =
+        target_arg.starts_with("//") || (target_arg.starts_with('@') && target_arg.contains("//"));
+    if !is_explicit_label {
         match resolve_build_file(&o.workspace, flags.strict_bazel) {
             Ok(Some(_)) => {}
             Ok(None) => {
-                eprintln!(
-                    "razel build: no BUILD or BUILD.bazel in {}",
-                    o.workspace.display()
-                );
+                eprintln!("razel build: no BUILD or BUILD.bazel in {}", o.workspace.display());
                 return Err(ExitCode::FAILURE);
             }
             Err(e) => {
@@ -129,8 +119,10 @@ pub(crate) fn build_one(
                 return Err(ExitCode::FAILURE);
             }
         }
-        build_workspace_with(&o.workspace, &format!("//:{name}"), cache, flags)
-    };
+    }
+    // ONE canonicalization, shared with the daemon (`:name`/`name`/`//pkg:name`/`@repo//:name`).
+    let report =
+        build_workspace_with(&o.workspace, &razel_build::canonical_target(target_arg), cache, flags);
 
     Ok(match report {
         Ok(report) => {

@@ -37,6 +37,22 @@ pub fn build_bazel_with(
 /// Build `top_label` (`//pkg:name`) from a **multi-package Bazel workspace** rooted
 /// at `root`, loading dependency packages on demand. exec_root = the workspace root
 /// (paths are package-qualified, matching Bazel's workspace-relative includes).
+/// Canonicalize a user's build-target token to a workspace label — the ONE place the CLI and the
+/// daemon agree on. They used to inline this separately and drifted: the daemon turned the relative
+/// `:name` into `//::name` (double colon) while the CLI got it right. Bazel forms: an absolute
+/// `//pkg:name` or an external `@repo//:name` passes through; a bare `name` OR a relative `:name`
+/// both name the ROOT package's `name` target → `//:name` (the leading `:` is consumed, never
+/// doubled). `rsplit(':')` takes the name after the last colon, so `:name`, `name`, and even
+/// `pkg:name`-without-`//` all reduce to the root package's `name`.
+pub fn canonical_target(token: &str) -> String {
+    if token.starts_with("//") || (token.starts_with('@') && token.contains("//")) {
+        token.to_string()
+    } else {
+        let name = token.rsplit(':').next().unwrap_or(token);
+        format!("//:{name}")
+    }
+}
+
 pub fn build_workspace(root: &Path, top_label: &str, cache: &Cache) -> Result<BuildReport, String> {
     build_workspace_with(root, top_label, cache, GlobalFlags::default())
 }
@@ -221,6 +237,27 @@ pub fn execute_jobs(
     let executed = builder.executed_actions();
 
     Ok(BuildReport { produced, executed, default_outputs })
+}
+
+#[cfg(test)]
+mod canonical_target_tests {
+    use super::canonical_target;
+
+    /// The CLI and daemon used to inline this separately and drifted — `:razel` shipped as
+    /// `//::razel` ("unknown node") through the daemon. Pin every target form to its label.
+    #[test]
+    fn canonicalizes_every_target_form() {
+        assert_eq!(canonical_target(":razel"), "//:razel", "relative :name must consume the colon");
+        assert_eq!(canonical_target("razel"), "//:razel", "bare name → root package");
+        assert_eq!(canonical_target("//:razel"), "//:razel", "absolute root-package label passes through");
+        assert_eq!(
+            canonical_target("//crates/razel-cli:razel"),
+            "//crates/razel-cli:razel",
+            "absolute //pkg:name passes through"
+        );
+        assert_eq!(canonical_target("//crates/razel-cli"), "//crates/razel-cli", "//pkg passes through");
+        assert_eq!(canonical_target("@crates//:blake3"), "@crates//:blake3", "external @repo//:name passes through");
+    }
 }
 
 
