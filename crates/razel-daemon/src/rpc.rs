@@ -75,6 +75,10 @@ struct Inner {
     invocations: AtomicUsize,
     /// Whether `serve` starts the OS file watcher (real daemon only; off for in-process tests).
     watch_enabled: bool,
+    /// This razel binary's identity (exe size+mtime), captured at STARTUP and reported in `hello`.
+    /// The CLI compares it to its own and restarts the daemon on a mismatch, so the warm server is
+    /// always the same build as the CLI driving it (no stale-daemon skew).
+    build_id: String,
 }
 
 /// A daemon bound to one workspace + cache. Warm (analysis reused across builds),
@@ -116,6 +120,7 @@ impl Server {
                 events_bump: Condvar::new(),
                 invocations: AtomicUsize::new(0),
                 watch_enabled,
+                build_id: exe_build_id(),
             }),
         }
     }
@@ -241,6 +246,9 @@ impl Inner {
     /// separate lifecycle.)
     fn do_shutdown<C: Write>(&self, conn: &mut C) -> io::Result<()> {
         let _ = write_frame(conn, &encode(&ok(&Cbor::Bool(true))));
+        // `process::exit` skips destructors, so the workspace writer lock (held by `serve`) would
+        // outlive us and block the next daemon — release it explicitly first.
+        crate::outlock::release_if_ours(&self.workspace);
         std::process::exit(0);
     }
 
@@ -358,7 +366,13 @@ impl Inner {
                 asked.display()
             ));
         }
-        Ok(me)
+        // Workspace + protocol match. Report the binary identity in `version` (as `<ver>+<build_id>`)
+        // so the CLI can tell whether this warm daemon is the SAME build it's running, and restart it
+        // if not. (Plain `version` requests still return the bare CARGO_PKG_VERSION.)
+        Ok(VersionInfo {
+            version: format!("{}+{}", me.version, self.build_id),
+            protocol: me.protocol,
+        })
     }
 
     /// `run` (S3c, §4b stream-first): answer with the invocation id IMMEDIATELY;
@@ -547,6 +561,33 @@ fn version_info() -> VersionInfo {
     VersionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         protocol: PROTOCOL,
+    }
+}
+
+/// A cheap identity for "which razel binary is this": the executable file's size + mtime. The daemon
+/// captures it at startup and reports it via `hello`; the CLI compares it to its own and restarts a
+/// daemon whose build differs (so the warm server always matches the CLI — no stale-daemon skew).
+/// mtime+size (not a content hash) keeps the warm-build hot path microsecond-cheap, and any normal
+/// rebuild rewrites the binary and bumps its mtime. `RAZEL_BUILD_ID_OVERRIDE` forces the value — a
+/// test seam for simulating skew without a second build.
+pub fn exe_build_id() -> String {
+    if let Some(v) = std::env::var_os("RAZEL_BUILD_ID_OVERRIDE") {
+        return v.to_string_lossy().into_owned();
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return "unknown".into();
+    };
+    match std::fs::metadata(&exe) {
+        Ok(m) => {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{}.{mtime}", m.len())
+        }
+        Err(_) => "unknown".into(),
     }
 }
 

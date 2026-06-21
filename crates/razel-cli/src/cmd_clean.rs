@@ -27,7 +27,7 @@ use std::process::ExitCode;
 // razel-build). The CLI only wraps it to map the library's String parse error onto an ExitCode
 // (parse_opts/parse_opts_with_rc below); Opts + its fields + global_flags + default_socket + rc-lite
 // all come from the shared module, so the CLI and the daemon parse identically.
-use razel_build::args::bazel_build_compat_env;
+use razel_build::args::{bazel_build_compat_env, default_socket};
 
 
 use crate::*;
@@ -47,6 +47,12 @@ pub(crate) fn cmd_clean(args: &[String]) -> ExitCode {
         Err(c) => return c,
     };
     let compat = o.bazel_build_compat || bazel_build_compat_env();
+    // bazel parity: `clean` stops the workspace server too. Otherwise the WARM daemon keeps serving
+    // the pre-clean build graph from memory, and the very next `razel build` is wrongly "up-to-date"
+    // (the exact bug this fixes). Do it FIRST — the daemon's pid lives in
+    // `.razel-cache/workspace.lock`, which we're about to remove.
+    let socket = o.socket.clone().unwrap_or_else(|| default_socket(&o.workspace));
+    let stopped_daemon = matches!(stop_daemon(&socket, &o.workspace), StopOutcome::Stopped);
     // The REAL output storage is the exec-root forest `.razel-exec` (external-crate builds);
     // `razel-out`/`razel-bin`/`razel-testlogs` are convenience SYMLINKS into it, so removing only
     // those leaves the actual outputs behind (and the warm daemon keeps serving them). Remove
@@ -96,10 +102,14 @@ pub(crate) fn cmd_clean(args: &[String]) -> ExitCode {
     if errs > 0 {
         return ExitCode::FAILURE;
     }
-    if removed.is_empty() {
+    if removed.is_empty() && !stopped_daemon {
         eprintln!("razel: nothing to clean");
     } else {
-        eprintln!("razel: {how} ({})", removed.join(", "));
+        let mut what = removed.join(", ");
+        if stopped_daemon {
+            what = if what.is_empty() { "daemon".into() } else { format!("{what}, daemon") };
+        }
+        eprintln!("razel: {how} ({what})");
     }
     ExitCode::SUCCESS
 }

@@ -189,31 +189,68 @@ pub(crate) fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
     use std::process::{Command, Stdio};
     use std::time::Duration;
     // Probe with `hello`, NOT bare `version`: it validates that the daemon at this socket serves
-    // THIS workspace + a matching protocol (do_hello), so a shared `--socket` pointing at a daemon
-    // for a different tree never silently routes our build to the wrong workspace.
+    // THIS workspace + a matching protocol (do_hello) AND reports its binary identity (`build_id`),
+    // so we reuse only a daemon that is the SAME build as this CLI. A daemon running a different (or
+    // too-old) build of our workspace is auto-restarted — the warm server can never serve results
+    // from code the CLI no longer runs.
     let hello = Hello {
         protocol: PROTOCOL,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
         workspace_root: o.workspace.to_string_lossy().to_string(),
     };
-    let reachable = |sock: &Path| -> Option<bool> {
+    // What build this CLI is: `<ver>+<exe build_id>`, compared against the daemon's hello reply.
+    let my_build = format!("{}+{}", env!("CARGO_PKG_VERSION"), razel_daemon::rpc::exe_build_id());
+    enum Probe {
+        Mine,    // ours + same build → reuse
+        Skew,    // ours (workspace ok) but a DIFFERENT build → restart
+        Foreign, // rejected us (different workspace, or a daemon too old to speak `hello`)
+        Down,    // nothing bound
+    }
+    let probe = |sock: &Path| -> Probe {
         match rpc::call(sock, &rpc::req_hello(&hello)) {
-            Ok(resp) => Some(rpc::payload(&resp).is_ok()), // Some(true)=ours, Some(false)=mismatch
-            Err(_) => None,                                // no daemon bound
+            Ok(resp) => match rpc::payload(&resp) {
+                Ok(p) => {
+                    if razel_wire::VersionInfo::from_cbor(&p).version == my_build {
+                        Probe::Mine
+                    } else {
+                        Probe::Skew
+                    }
+                }
+                Err(_) => Probe::Foreign,
+            },
+            Err(_) => Probe::Down,
         }
     };
-    match reachable(socket) {
-        Some(true) => return true,
-        Some(false) => {
-            // A daemon is bound here but rejected us (different workspace, or protocol skew). Don't
-            // route the build to it; we can't bind over its socket → the caller builds in-process.
+    let explicit_socket = o.socket.is_some();
+    match probe(socket) {
+        Probe::Mine => return true,
+        Probe::Skew => {
+            // Same workspace, different build than this CLI → restart so the server matches the CLI.
+            eprintln!("razel: daemon at {} is a different build; restarting it", socket.display());
+            if matches!(stop_daemon(socket, &o.workspace), StopOutcome::Failed) {
+                eprintln!("razel: could not stop the old daemon; building in-process");
+                return false;
+            }
+        }
+        Probe::Foreign if explicit_socket => {
+            // A user-named `--socket` that rejected us is a DIFFERENT workspace's daemon — leave it
+            // alone and build in-process (we can't bind over its socket).
             eprintln!(
-                "razel: existing daemon at {} rejected this workspace/protocol; building in-process",
+                "razel: existing daemon at {} rejected this workspace; building in-process",
                 socket.display()
             );
             return false;
         }
-        None => {} // nothing bound → spawn one
+        Probe::Foreign => {
+            // Our OWN per-workspace socket, but the daemon there can't speak our `hello` — a stale
+            // build that predates the handshake (exactly the skew this guards against). Replace it.
+            eprintln!("razel: stale daemon at {}; restarting it", socket.display());
+            if matches!(stop_daemon(socket, &o.workspace), StopOutcome::Failed) {
+                eprintln!("razel: could not stop the stale daemon; building in-process");
+                return false;
+            }
+        }
+        Probe::Down => {} // nothing bound → spawn one
     }
     let Ok(exe) = std::env::current_exe() else {
         return false;
@@ -248,10 +285,10 @@ pub(crate) fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
     if spawned.is_err() {
         return false;
     }
-    // Poll for OUR daemon to come up + accept this workspace (~5s budget).
+    // Poll for OUR daemon to come up + accept this workspace as the matching build (~5s budget).
     for _ in 0..200 {
         std::thread::sleep(Duration::from_millis(25));
-        if reachable(socket) == Some(true) {
+        if matches!(probe(socket), Probe::Mine) {
             return true;
         }
     }

@@ -340,6 +340,138 @@ fn build_through_a_spawned_daemon() {
     assert!(ws.path().join("widget.o").exists());
 }
 
+/// THE clean bug: the default `build` path reuses a WARM per-workspace daemon, so `clean` must
+/// invalidate it — otherwise the daemon keeps serving the pre-clean graph from memory and the very
+/// next build is wrongly "up-to-date". Reproduces `build; build; clean; build` end-to-end and
+/// asserts the post-clean build REBUILDS. (No prior test cleans between warm builds; `clean` was
+/// only ever tested against hand-synthesized files with no daemon — which is why this slipped.)
+#[test]
+fn clean_invalidates_the_warm_daemon() {
+    if !std::path::Path::new("/usr/bin/cc").exists() {
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
+    std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+    let build = || {
+        let out = razel().args(["build", "widget", "--cbor", "-C"]).arg(ws.path()).output().unwrap();
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        razel_wire::BuildResult::from_cbor(&razel_wire::decode(&unhex(&String::from_utf8_lossy(
+            &out.stdout,
+        ))))
+    };
+
+    assert_eq!(build().status, razel_wire::BuildStatus::Built, "cold build");
+    assert_eq!(build().status, razel_wire::BuildStatus::Cached, "warm daemon serves a cache hit");
+
+    let cl = razel().args(["clean", "-C"]).arg(ws.path()).output().unwrap();
+    assert!(cl.status.success(), "clean stderr: {}", String::from_utf8_lossy(&cl.stderr));
+
+    // The crux: after clean, the build must be cold again — not the warm daemon's stale "up-to-date".
+    let after = build();
+    assert_eq!(
+        after.status,
+        razel_wire::BuildStatus::Built,
+        "build after clean must REBUILD, not reuse the warm daemon"
+    );
+    assert_eq!(after.recomputes, 1, "clean forces a cold rebuild of the one action");
+    let _ = razel().args(["shutdown", "-C"]).arg(ws.path()).output(); // don't leak the daemon
+}
+
+/// THE shutdown bug: the `shutdown` VERB must actually stop a running daemon. Every prior daemon
+/// test tears the daemon down with `kill()`, so the verb's effect was never asserted — a daemon
+/// that ignores `shutdown` (the stale-daemon case the user hit) would pass them all.
+#[test]
+fn shutdown_verb_stops_a_running_daemon() {
+    use std::time::{Duration, Instant};
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
+    let socket = format!("/tmp/razel-cli-shutdown-{}.sock", std::process::id());
+
+    let mut daemon = razel()
+        .args(["daemon", "--socket", &socket, "-C"])
+        .arg(ws.path())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::path::Path::new(&socket).exists() {
+        assert!(Instant::now() < deadline, "daemon never bound the socket");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let out = razel().args(["shutdown", "--socket", &socket, "-C"]).arg(ws.path()).output().unwrap();
+    assert!(out.status.success(), "shutdown stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let exited = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match daemon.try_wait().unwrap() {
+                Some(_) => break true,
+                None if Instant::now() > deadline => break false,
+                None => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
+    };
+    daemon.kill().ok();
+    daemon.wait().ok();
+    let _ = std::fs::remove_file(&socket);
+    assert!(exited, "the `shutdown` verb did not stop the daemon");
+}
+
+/// THE skew fix (the user's ask): a daemon running a DIFFERENT build than the CLI must be
+/// auto-restarted, so the warm server can never serve results from code the CLI no longer runs.
+/// A stale daemon is simulated with `RAZEL_BUILD_ID_OVERRIDE`; a normal build at the same socket
+/// must detect the mismatch, stop the old daemon, spawn a matching one, and succeed.
+#[test]
+fn stale_daemon_is_restarted_on_build_skew() {
+    if !std::path::Path::new("/usr/bin/cc").exists() {
+        return;
+    }
+    use std::time::{Duration, Instant};
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("BUILD"), BUILD).unwrap();
+    std::fs::write(ws.path().join("widget.c"), "int answer(void){return 42;}").unwrap();
+    let socket = format!("/tmp/razel-cli-skew-{}.sock", std::process::id());
+
+    let mut stale = razel()
+        .args(["daemon", "--socket", &socket, "-C"])
+        .arg(ws.path())
+        .env("RAZEL_BUILD_ID_OVERRIDE", "stale-build-xyz") // reports a different build than the CLI
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::path::Path::new(&socket).exists() {
+        assert!(Instant::now() < deadline, "stale daemon never bound");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // A normal build (this CLI's real build-id) must NOT route to the stale daemon — it restarts it.
+    let out = razel().args(["build", "widget", "--socket", &socket, "-C"]).arg(ws.path()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("different build") || stderr.contains("restarting"),
+        "should announce the restart; stderr: {stderr}"
+    );
+    assert!(ws.path().join("widget.o").exists(), "the restarted (matching) daemon built the object");
+
+    let gone = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match stale.try_wait().unwrap() {
+                Some(_) => break true,
+                None if Instant::now() > deadline => break false,
+                None => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
+    };
+    stale.kill().ok();
+    stale.wait().ok();
+    let _ = razel().args(["shutdown", "--socket", &socket, "-C"]).arg(ws.path()).output();
+    let _ = std::fs::remove_file(&socket);
+    assert!(gone, "the stale daemon should have been stopped by the auto-restart");
+}
+
 /// RG 0010: a BARE invocation from inside the workspace (no -C; default ".") must
 /// behave identically to absolute -C — relative workspaces broke COLD input staging
 /// (sandbox actions resolve a relative exec_root from their own dir; a warm hit
