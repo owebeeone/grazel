@@ -64,19 +64,26 @@ pub(crate) fn daemon_build_streamed(
                 }
                 return Ok(r); // terminal frame
             }
-            // Per-action progress snapshot → the bottom-pinned in-place block (bazel-style; never
-            // scrolls). `detail` is the running-action descriptions, newline-joined. `--cbor` is
-            // machine output, so the block is suppressed there.
             if !cbor
                 && let Some(p) = ev.progress
             {
-                let detail = p.detail.unwrap_or_default();
-                let running: Vec<&str> = if detail.is_empty() {
-                    Vec::new()
+                if p.phase == "log" {
+                    // An action's console output (compiler warnings) — print it above the bar,
+                    // bazel's "INFO: From <action>: …".
+                    if let Some(d) = p.detail {
+                        progress.log(&format!("INFO: {d}"));
+                    }
                 } else {
-                    detail.split('\n').collect()
-                };
-                progress.update(p.done, p.total, &running);
+                    // Per-action progress snapshot → the bottom-pinned in-place block (bazel-style;
+                    // never scrolls). `detail` is the running-action descriptions, newline-joined.
+                    let detail = p.detail.unwrap_or_default();
+                    let running: Vec<&str> = if detail.is_empty() {
+                        Vec::new()
+                    } else {
+                        detail.split('\n').collect()
+                    };
+                    progress.update(p.done, p.total, &running);
+                }
             }
         }
     })();

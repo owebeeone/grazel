@@ -351,22 +351,34 @@ fn run_action(
     // running-action sample. `desc` = the bazel-style action label (mnemonic + primary output).
     let out = outputs.first().map(String::as_str).unwrap_or("");
     let desc = format!("{mnemonic} {out}");
-    let notify = |tag: char| {
+    let emit = |line: String| {
         if let Some(sink) = progress.lock().unwrap().as_ref() {
-            sink(&format!("{tag}\x1f{desc}"));
+            sink(&line);
         }
     };
-    notify('S'); // started — joins the running set
+    emit(format!("S\x1f{desc}")); // started — joins the running set
     let mut sb = sandbox.lock().unwrap();
-    let outcome = execute_action(&action, cache, exec_root, &mut sb);
-    notify('F'); // finished (hit or miss) — leaves the running set, advances `done`
+    let (outcome, console) = execute_action(&action, cache, exec_root, &mut sb);
+    drop(sb);
+    emit(format!("F\x1f{desc}")); // finished (hit or miss) — leaves the running set, advances `done`
     match outcome {
         ExecOutcome::Cached(m) => Ok(NodeValue::Manifest(m)),
         ExecOutcome::Executed(m) => {
             executed.fetch_add(1, Ordering::Relaxed); // a real cache miss (cold path's `executed`)
+            // Surface the action's console output (compiler WARNINGS on a 0-exit) — bazel's
+            // "INFO: From <action>: …". `L` lines carry the desc + output for the driver to print.
+            if !console.is_empty() {
+                emit(format!("L\x1f{desc}\x1f{}", String::from_utf8_lossy(&console)));
+            }
             Ok(NodeValue::Manifest(m))
         }
-        ExecOutcome::Failed(msg) => Err(msg),
+        // A failure carries the captured output (the compiler ERROR) in its message, so the build's
+        // failure isn't a bare "action failed (rc=1)" with no reason.
+        ExecOutcome::Failed(msg) => Err(if console.is_empty() {
+            msg
+        } else {
+            format!("{msg}\n{}", String::from_utf8_lossy(&console))
+        }),
     }
 }
 

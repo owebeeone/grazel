@@ -283,6 +283,27 @@ impl Inner {
         let (mut total, mut done) = (0i64, 0i64);
         let mut running: Vec<String> = Vec::new();
         while let Ok(line) = progress.recv() {
+            // `L\x1f<desc>\x1f<output>` = an action's console output (compiler warnings) to pass
+            // through as a LOG line (phase "log"), distinct from the execute snapshot — the CLI
+            // prints it above the progress bar, bazel's "INFO: From <action>: …".
+            if let Some(("L", rest)) = line.split_once('\x1f') {
+                let (desc, output) = rest.split_once('\x1f').unwrap_or(("", rest));
+                seq += 1;
+                let ev = InvocationEvent {
+                    invocation_id: "build".into(),
+                    seq,
+                    progress: Some(Progress {
+                        invocation_id: "build".into(),
+                        phase: "log".into(),
+                        done,
+                        total,
+                        detail: Some(format!("From {desc}:\n{output}")),
+                    }),
+                    result: None,
+                };
+                write_frame(conn, &encode(&ok(&ev.to_cbor())))?;
+                continue;
+            }
             match line.split_once('\x1f') {
                 // A new total starts a fresh pass (e.g. the re-materialization rebuild) — reset the
                 // counter + running set so the bar restarts at `[0 / total]` rather than continuing

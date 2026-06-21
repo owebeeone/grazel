@@ -24,6 +24,8 @@ pub struct RunResult {
     pub exit_code: i32,
     pub cached: bool,
     pub outputs: Vec<PathBuf>,
+    /// The action's captured console output (stdout+stderr); empty on a cache hit.
+    pub output: Vec<u8>,
 }
 
 /// A canonical output manifest: `(path, digest)` per PRESENT declared output, sorted by path,
@@ -196,11 +198,12 @@ pub fn build_action_in(
     exec_root: &Path,
     sandbox: &mut Sandbox,
 ) -> io::Result<RunResult> {
-    let (cached, exit_code) = restore_or_run(action, cache, exec_root, sandbox)?;
+    let (cached, exit_code, output) = restore_or_run(action, cache, exec_root, sandbox)?;
     Ok(RunResult {
         exit_code,
         cached,
         outputs: action.outputs.iter().map(|o| exec_root.join(o)).collect(),
+        output,
     })
 }
 
@@ -214,21 +217,21 @@ fn restore_or_run(
     cache: &Cache,
     exec_root: &Path,
     sandbox: &mut Sandbox,
-) -> io::Result<(bool, i32)> {
+) -> io::Result<(bool, i32, Vec<u8>)> {
     let key = action.content_key();
     if cache.restore(&key, &action.outputs, exec_root)? {
-        return Ok((true, 0));
+        return Ok((true, 0, Vec::new())); // cache hit → nothing ran → no console output
     }
     // Miss: materialize only declared inputs, run isolated, capture outputs.
     let inputs: Vec<String> = action.inputs.keys().cloned().collect();
     sandbox.sync_inputs(exec_root, &inputs)?;
     sandbox.prepare_outputs(&action.outputs)?;
-    let code = sandbox.run(&action.argv, &action.env)?;
+    let (code, console) = sandbox.run(&action.argv, &action.env)?;
     if code == 0 {
         sandbox.capture_outputs(exec_root, &action.outputs)?;
         cache.store(&key, &action.outputs, exec_root)?;
     }
-    Ok((false, code))
+    Ok((false, code, console))
 }
 
 /// Execute one action and return its [`ExecOutcome`] + output [`Manifest`] (C2). The warm
@@ -242,14 +245,15 @@ pub fn execute_action(
     cache: &Cache,
     exec_root: &Path,
     sandbox: &mut Sandbox,
-) -> ExecOutcome {
+) -> (ExecOutcome, Vec<u8>) {
     match restore_or_run(action, cache, exec_root, sandbox) {
-        Ok((true, _)) => ExecOutcome::Cached(output_manifest(action, exec_root)),
-        Ok((false, 0)) => ExecOutcome::Executed(output_manifest(action, exec_root)),
-        Ok((false, code)) => {
-            ExecOutcome::Failed(format!("action failed (rc={code}): {:?}", action.argv))
-        }
-        Err(e) => ExecOutcome::Failed(format!("razel internal: exec error: {e}")),
+        Ok((true, _, _)) => (ExecOutcome::Cached(output_manifest(action, exec_root)), Vec::new()),
+        Ok((false, 0, out)) => (ExecOutcome::Executed(output_manifest(action, exec_root)), out),
+        Ok((false, code, out)) => (
+            ExecOutcome::Failed(format!("action failed (rc={code}): {:?}", action.argv)),
+            out,
+        ),
+        Err(e) => (ExecOutcome::Failed(format!("razel internal: exec error: {e}")), Vec::new()),
     }
 }
 
@@ -448,7 +452,7 @@ mod tests {
             ..Default::default()
         };
         // miss → Executed(manifest)
-        match execute_action(&action, &cache, exec.path(), &mut sb) {
+        match execute_action(&action, &cache, exec.path(), &mut sb).0 {
             ExecOutcome::Executed(m) => {
                 assert_eq!(m.len(), 1);
                 assert_eq!(m[0].0, "out.txt");
@@ -459,7 +463,7 @@ mod tests {
         let exec2 = tempfile::tempdir().unwrap();
         let mut sb2 = Sandbox::transient(&exec2.path().join(".razel-sandbox"), "k").unwrap();
         assert!(matches!(
-            execute_action(&action, &cache, exec2.path(), &mut sb2),
+            execute_action(&action, &cache, exec2.path(), &mut sb2).0,
             ExecOutcome::Cached(_)
         ));
         // failing action → Failed(msg) carrying the rc
@@ -471,7 +475,7 @@ mod tests {
         };
         let exec3 = tempfile::tempdir().unwrap();
         let mut sb3 = Sandbox::transient(&exec3.path().join(".razel-sandbox"), "b").unwrap();
-        match execute_action(&boom, &cache, exec3.path(), &mut sb3) {
+        match execute_action(&boom, &cache, exec3.path(), &mut sb3).0 {
             ExecOutcome::Failed(msg) => assert!(msg.contains("rc=7"), "msg: {msg}"),
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -494,7 +498,7 @@ mod tests {
             env: path_env(),
             ..Default::default()
         };
-        let ExecOutcome::Executed(m) = execute_action(&action, &cache, exec.path(), &mut sb) else {
+        let ExecOutcome::Executed(m) = execute_action(&action, &cache, exec.path(), &mut sb).0 else {
             panic!("expected Executed");
         };
         let paths: Vec<&str> = m.iter().map(|(p, _)| p.as_str()).collect();

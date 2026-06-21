@@ -219,9 +219,11 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Run `argv` with cwd = the sandbox and a default-deny env (only `env`),
-    /// optionally wrapped in the OS sandbox ([`Isolation`]).
-    pub fn run(&self, argv: &[String], env: &BTreeMap<String, String>) -> io::Result<i32> {
+    /// Run `argv` with cwd = the sandbox and a default-deny env (only `env`), optionally wrapped in
+    /// the OS sandbox ([`Isolation`]). Returns the exit code AND the action's captured console output
+    /// (stdout then stderr, combined) — so the build driver can surface compiler warnings/errors like
+    /// bazel's "INFO: From <action>: …" instead of leaking them to the daemon's own stderr.
+    pub fn run(&self, argv: &[String], env: &BTreeMap<String, String>) -> io::Result<(i32, Vec<u8>)> {
         let (prog, rest) = argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
@@ -243,13 +245,17 @@ impl Sandbox {
         };
         // Name the program on spawn failure — a bare "No such file or directory (os error 2)" from a
         // missing tool (e.g. an unresolved `razel-process-wrapper`) is otherwise undiagnosable.
-        let status = cmd
+        // `.output()` captures the action's stdout/stderr (instead of inheriting ours) so the driver
+        // can stream it to the client; build actions aren't interactive, so buffering is fine.
+        let out = cmd
             .current_dir(&self.dir)
             .env_clear()
             .envs(env)
-            .status()
+            .output()
             .map_err(|e| io::Error::new(e.kind(), format!("cannot spawn `{prog}`: {e}")))?;
-        Ok(status.code().unwrap_or(-1))
+        let mut console = out.stdout;
+        console.extend_from_slice(&out.stderr);
+        Ok((out.status.code().unwrap_or(-1), console))
     }
 
     /// Copy declared `outputs` produced in the sandbox back into `exec_root`. Dir-aware (the
@@ -350,7 +356,7 @@ mod tests {
             .with_isolation(Isolation::Seatbelt { network: false });
 
         // A write *inside* the sandbox (cwd) is allowed.
-        let inside = sb
+        let (inside, _) = sb
             .run(
                 &["/bin/sh".into(), "-c".into(), "echo ok > inside.txt".into()],
                 &env,
@@ -363,7 +369,7 @@ mod tests {
         // macOS, which is /var/folders/...) is denied by the profile.
         let escape = format!("/tmp/razel-seatbelt-escape-{}.txt", std::process::id());
         let _ = std::fs::remove_file(&escape);
-        let outside = sb
+        let (outside, _) = sb
             .run(
                 &["/bin/sh".into(), "-c".into(), format!("echo x > {escape}")],
                 &env,

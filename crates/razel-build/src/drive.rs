@@ -233,6 +233,15 @@ pub fn execute_jobs(
     // demanded closure's actions (reachable from `target`), exactly the set `order` covers.
     let mut builder = IncrementalBuilder::new(exec_root, cache.clone());
     builder.configure_targets(targets.to_vec())?;
+    // Cold/--batch path: no streaming client, so surface action console output (compiler WARNINGS)
+    // straight to stderr — bazel's "INFO: From <action>: …". The `S`/`F`/`T` progress tags drive the
+    // daemon's live bar; ignore them here. (Build FAILURES carry their output in the error already.)
+    builder.set_progress(Some(Box::new(|line: &str| {
+        if let Some(("L", rest)) = line.split_once('\x1f') {
+            let (desc, output) = rest.split_once('\x1f').unwrap_or(("", rest));
+            eprintln!("INFO: From {desc}:\n{output}");
+        }
+    })));
     builder.build(target, jobs)?;
     let executed = builder.executed_actions();
 
