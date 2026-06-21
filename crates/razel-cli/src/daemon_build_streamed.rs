@@ -21,6 +21,7 @@
 //! workspace's own `BUILD` single-package. exec_root = the workspace dir. The daemon
 //! does **cold** builds today; warm/incremental reuse + streaming surfaces are next.
 
+use crate::Progress;
 use razel_daemon::rpc::{self};
 use razel_wire::{
     BuildResult, InvocationEvent,
@@ -45,27 +46,35 @@ pub(crate) fn daemon_build_streamed(
     cwd: &str,
     target: &str,
     cbor: bool,
+    progress: &mut Progress,
 ) -> Result<BuildResult, ()> {
-    let mut stream = rpc::build_stream(socket, args, cwd).map_err(|_| ())?;
-    loop {
-        // An early/abnormal close (daemon crashed, actor died) or a protocol error → unreachable.
-        let frame = rpc::next_frame(&mut stream).map_err(|_| ())?;
-        let payload = rpc::payload(&frame).map_err(|_| ())?;
-        let ev = InvocationEvent::from_cbor(&payload);
-        if let Some(mut r) = ev.result {
-            // A streamed Failed result carries no target; fill it so the message isn't "ERROR: :".
-            if r.target.is_empty() {
-                r.target = target.to_string();
+    // Run the stream loop, then ALWAYS erase the bar on the way out (terminal result, build failure,
+    // or daemon-died) so the caller's summary / fallback lands on a clean line.
+    let result = (|| {
+        let mut stream = rpc::build_stream(socket, args, cwd).map_err(|_| ())?;
+        loop {
+            // An early/abnormal close (daemon crashed, actor died) or a protocol error → unreachable.
+            let frame = rpc::next_frame(&mut stream).map_err(|_| ())?;
+            let payload = rpc::payload(&frame).map_err(|_| ())?;
+            let ev = InvocationEvent::from_cbor(&payload);
+            if let Some(mut r) = ev.result {
+                // A streamed Failed result carries no target; fill it so the message isn't "ERROR: :".
+                if r.target.is_empty() {
+                    r.target = target.to_string();
+                }
+                return Ok(r); // terminal frame
             }
-            return Ok(r); // terminal frame
+            // Per-action progress → the bottom-pinned in-place bar (bazel-style; never scrolls).
+            // `--cbor` is machine output, so the bar is suppressed there.
+            if !cbor
+                && let Some(p) = ev.progress
+                && let Some(detail) = p.detail
+            {
+                progress.action(p.total, &detail);
+            }
         }
-        // Progress frame: stream the per-action line (mnemonic + output), like a local build.
-        if !cbor
-            && let Some(p) = ev.progress
-            && let Some(detail) = p.detail
-        {
-            eprintln!("  {detail}");
-        }
-    }
+    })();
+    progress.finish();
+    result
 }
 

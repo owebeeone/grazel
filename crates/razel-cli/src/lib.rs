@@ -38,6 +38,7 @@ mod cmd_shutdown;
 mod open_cache;
 mod daemon_build_streamed;
 mod print_build_result;
+mod progress;
 
 pub(crate) use tests::*;
 pub use cmd_test::*; // re-export the crate's public API (`run`) at the root for the bin
@@ -49,3 +50,4 @@ pub(crate) use cmd_shutdown::*;
 pub(crate) use open_cache::*;
 pub(crate) use daemon_build_streamed::*;
 pub(crate) use print_build_result::*;
+pub(crate) use progress::*;

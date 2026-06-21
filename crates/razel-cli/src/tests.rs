@@ -123,9 +123,11 @@ pub(crate) fn cmd_build(args: &[String]) -> ExitCode {
         }
     } else if ensure_daemon(&o, &socket) {
         // C3: forward the raw build args + cwd; the daemon parses them server-side. Stream per-action
-        // progress back so a daemon build isn't silent (WS-E.2).
+        // progress back into the bottom-pinned in-place bar (bazel-style) so a daemon build isn't
+        // silent and the output doesn't scroll past one line (WS-E.2).
         let cwd = std::env::current_dir().unwrap_or_else(|_| o.workspace.clone());
-        match daemon_build_streamed(&socket, args, &cwd.to_string_lossy(), &target_arg, o.cbor) {
+        let mut progress = Progress::new();
+        match daemon_build_streamed(&socket, args, &cwd.to_string_lossy(), &target_arg, o.cbor, &mut progress) {
             Ok(r) => r,
             // The daemon died mid-stream. "Builds never break": fall back to in-process unless the
             // user explicitly required the daemon with --daemon.
