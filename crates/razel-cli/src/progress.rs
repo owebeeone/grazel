@@ -14,9 +14,6 @@
 use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
-/// Running actions shown in the block (bazel's default `sampleSize`); the rest collapse to `(N more)`.
-const SAMPLE: usize = 3;
-
 /// A bottom-pinned, in-place progress block for one build (the daemon-streamed path).
 pub(crate) struct Progress {
     tty: bool,
@@ -43,7 +40,7 @@ impl Progress {
         if !self.tty {
             return;
         }
-        self.last = block_lines(done, total, running, self.start.elapsed().as_secs());
+        self.last = block_lines(done, total, running, self.start.elapsed().as_secs(), sample_size());
         self.draw();
     }
 
@@ -85,10 +82,10 @@ impl Progress {
     }
 }
 
-/// The block's lines: `[done / total] <first running>; <Ns>`, then up to `SAMPLE-1` more running
+/// The block's lines: `[done / total] <first running>; <Ns>`, then up to `sample-1` more running
 /// actions, then `… (N more)` if the run is wider than the sample. `secs` is the build's elapsed so
 /// the header advances. Pure (no I/O) so it's unit-testable.
-fn block_lines(done: i64, total: i64, running: &[&str], secs: u64) -> Vec<String> {
+fn block_lines(done: i64, total: i64, running: &[&str], secs: u64, sample: usize) -> Vec<String> {
     let counter = if total > 0 {
         format!("[{done} / {total}]")
     } else {
@@ -99,25 +96,69 @@ fn block_lines(done: i64, total: i64, running: &[&str], secs: u64) -> Vec<String
         None => format!("{counter}; {secs}s"),
     };
     let mut lines = vec![clip(&head)];
-    for a in running.iter().skip(1).take(SAMPLE - 1) {
+    for a in running.iter().skip(1).take(sample.saturating_sub(1)) {
         lines.push(clip(&format!("    {a}")));
     }
-    let extra = running.len().saturating_sub(SAMPLE);
+    let extra = running.len().saturating_sub(sample);
     if extra > 0 {
         lines.push(format!("    … ({extra} more)"));
     }
     lines
 }
 
-/// The terminal width for clipping: `$COLUMNS` when exported, else a safe 80. (A
-/// `TIOCGWINSZ`/Windows console-size probe would be exact but needs a dep / per-OS code — deferred;
-/// clipping to 80 only ever shortens a line, never corrupts the block's height accounting.)
+/// Running actions to show: fill the terminal (bazel-style), up to 20. From the real terminal height
+/// when we can read it, minus a few lines reserved for the "Building …" line + the eventual summary.
+fn sample_size() -> usize {
+    term_size()
+        .map(|(rows, _)| rows)
+        .or_else(|| std::env::var("LINES").ok().and_then(|l| l.parse().ok()))
+        .unwrap_or(24)
+        .saturating_sub(4)
+        .clamp(1, 20)
+}
+
+/// The terminal width for clipping: the real terminal when we can read it, else `$COLUMNS`, else 80.
 fn term_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|c| c.parse::<usize>().ok())
+    term_size()
+        .map(|(_, cols)| cols)
+        .filter(|&c| c > 0)
+        .or_else(|| std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()))
         .unwrap_or(80)
         .max(20)
+}
+
+/// The controlling terminal's `(rows, cols)` via `TIOCGWINSZ` on the stderr fd (where the bar draws)
+/// — so the block fills the window without overflowing it. Unix only (raw `ioctl`, no extra dep, like
+/// the writer-lock's `kill`); other platforms fall back to env/default. `None` if stderr isn't a tty
+/// or the call fails. (A Windows console-size probe would go here later.)
+#[cfg(unix)]
+fn term_size() -> Option<(usize, usize)> {
+    #[repr(C)]
+    struct Winsize {
+        rows: u16,
+        cols: u16,
+        xpix: u16,
+        ypix: u16,
+    }
+    // TIOCGWINSZ encodes the struct size, so it differs between macOS/BSD and Linux.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    const TIOCGWINSZ: u64 = 0x4008_7468;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+    const TIOCGWINSZ: u64 = 0x5413;
+    unsafe extern "C" {
+        fn ioctl(fd: i32, request: u64, arg: *mut Winsize) -> i32;
+    }
+    let mut ws = Winsize { rows: 0, cols: 0, xpix: 0, ypix: 0 };
+    // fd 2 = stderr (the bar's stream).
+    if unsafe { ioctl(2, TIOCGWINSZ, &mut ws) } == 0 && ws.rows > 0 {
+        Some((ws.rows as usize, ws.cols as usize))
+    } else {
+        None
+    }
+}
+#[cfg(not(unix))]
+fn term_size() -> Option<(usize, usize)> {
+    None
 }
 
 /// Clip a block line to the terminal width so it never wraps (a wrapped line breaks the in-place
@@ -150,16 +191,20 @@ mod tests {
     #[test]
     fn block_shows_counter_first_action_and_sample() {
         // Counter + first running on the header; a total of 0 drops the denominator.
-        assert_eq!(block_lines(3, 10, &["CcCompile a.o"], 5), vec!["[3 / 10] CcCompile a.o; 5s"]);
-        assert_eq!(block_lines(1, 0, &[], 0), vec!["[1]; 0s"], "no total → no denominator");
+        assert_eq!(block_lines(3, 10, &["CcCompile a.o"], 5, 3), vec!["[3 / 10] CcCompile a.o; 5s"]);
+        assert_eq!(block_lines(1, 0, &[], 0, 3), vec!["[1]; 0s"], "no total → no denominator");
 
-        // Wider than the sample → header + (SAMPLE-1) more + a "(N more)" tail.
+        // Wider than the sample → header + (sample-1) more + a "(N more)" tail.
         let r = ["a", "b", "c", "d", "e"];
-        let lines = block_lines(2, 9, &r, 4);
+        let lines = block_lines(2, 9, &r, 4, 3);
         assert_eq!(lines[0], "[2 / 9] a; 4s");
         assert_eq!(lines[1], "    b");
         assert_eq!(lines[2], "    c");
         assert_eq!(lines[3], "    … (2 more)", "5 running, sample 3 → 2 collapse");
         assert_eq!(lines.len(), 4);
+
+        // A larger sample shows more running actions and no tail.
+        let big = block_lines(0, 5, &r, 0, 20);
+        assert_eq!(big.len(), 5, "sample 20 ≥ 5 running → all shown, no '(N more)'");
     }
 }

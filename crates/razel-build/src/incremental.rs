@@ -78,6 +78,13 @@ fn action_key(target: &str, i: usize) -> String {
     format!("act:{target}#{i}")
 }
 
+/// The discriminating short name of a target label, for progress display: the segment after the last
+/// `:` or `/`. `//crates/razel-cli:razel` → `razel`; `@@…crate+crates__quote-1.0.38//:quote` →
+/// `quote`. Bazel's bar shows this kind of name (e.g. "Rustc quote"), not the long output path.
+fn short_label(name: &str) -> &str {
+    name.rsplit([':', '/']).next().unwrap_or(name)
+}
+
 /// A leaf source file's node value: its canonical content digest (C2 `digest_path`); a missing
 /// file digests as empty (symmetric with the executor skipping absent inputs).
 fn leaf_value(path: &Path) -> NodeValue {
@@ -200,7 +207,11 @@ impl IncrementalBuilder {
                 let exec_root = self.exec_root.clone();
                 let executed = self.executed.clone();
                 let progress = self.progress.clone();
-                let mnemonic = act.mnemonic.clone();
+                // The bazel-style action label for progress: mnemonic + the target's SHORT name (the
+                // discriminating bit) — NOT the long output path, whose common prefix
+                // (`razel-out/…/external/rules_rust++crate+…`) is all that survives the width clip,
+                // leaving every line identical. So "Rustc quote", not "Rustc razel-out/…/libquote…".
+                let desc = format!("{} {}", act.mnemonic, short_label(&t.name));
                 let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
                 self.engine.add_action(&akey, &dep_refs, move |dep_values| {
                     run_action(
@@ -212,7 +223,7 @@ impl IncrementalBuilder {
                         &exec_root,
                         &sandbox,
                         &executed,
-                        &mnemonic,
+                        &desc,
                         &progress,
                     )
                 });
@@ -324,7 +335,7 @@ fn run_action(
     exec_root: &Path,
     sandbox: &Arc<Mutex<Sandbox>>,
     executed: &AtomicUsize,
-    mnemonic: &str,
+    desc: &str,
     progress: &Arc<Mutex<Option<Box<dyn Fn(&str) + Send>>>>,
 ) -> Result<NodeValue, String> {
     let mut input_digests = BTreeMap::new();
@@ -349,8 +360,6 @@ fn run_action(
     };
     // Tagged progress: the daemon turns start/finish pairs into bazel's `[done / total]` bar +
     // running-action sample. `desc` = the bazel-style action label (mnemonic + primary output).
-    let out = outputs.first().map(String::as_str).unwrap_or("");
-    let desc = format!("{mnemonic} {out}");
     let emit = |line: String| {
         if let Some(sink) = progress.lock().unwrap().as_ref() {
             sink(&line);
