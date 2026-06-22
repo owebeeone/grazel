@@ -78,11 +78,12 @@ fn build_compiles_a_real_object_end_to_end() {
     assert!(ws.path().join("widget.o").exists(), "object not produced");
 }
 
-/// `razel clean` removes razel's output tree, cache, AND the Bazel-style convenience
-/// symlinks (like `bazel clean` wipes `bazel-out` + the `bazel-*` links) — but never a
-/// source file. Synthesizes a build's artifacts directly (no toolchain dependency).
+/// `razel clean` removes razel's output tree + the Bazel-style convenience symlinks (like `bazel
+/// clean` wipes `bazel-out` + the `bazel-*` links) but KEEPS the content cache, so the next build
+/// re-materializes fast — and never touches a source file. `--expunge` additionally wipes the cache.
+/// Synthesizes a build's artifacts directly (no toolchain dependency).
 #[test]
-fn clean_removes_output_tree_cache_and_convenience_symlinks() {
+fn clean_removes_output_tree_and_symlinks_keeps_cache_until_expunge() {
     let ws = tempfile::tempdir().unwrap();
     let p = ws.path();
     std::fs::create_dir_all(p.join("razel-out/cfg/bin")).unwrap();
@@ -97,7 +98,7 @@ fn clean_removes_output_tree_cache_and_convenience_symlinks() {
     let out = razel().args(["clean", "-C"]).arg(p).output().unwrap();
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(!p.join("razel-out").exists(), "razel-out not removed");
-    assert!(!p.join(".razel-cache").exists(), ".razel-cache not removed");
+    assert!(p.join(".razel-cache").exists(), "plain clean KEEPS the content cache (fast re-materialize)");
     assert!(p.join("BUILD").exists(), "clean must NOT touch source files");
     #[cfg(unix)]
     {
@@ -105,6 +106,12 @@ fn clean_removes_output_tree_cache_and_convenience_symlinks() {
         assert!(std::fs::symlink_metadata(p.join("razel-bin")).is_err(), "razel-bin link kept");
         assert!(std::fs::symlink_metadata(p.join("razel-testlogs")).is_err(), "razel-testlogs kept");
     }
+
+    // --expunge additionally wipes the content cache (the full nuke).
+    let out = razel().args(["clean", "--expunge", "-C"]).arg(p).output().unwrap();
+    assert!(out.status.success(), "expunge stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(!p.join(".razel-cache").exists(), "--expunge removes the content cache");
+    assert!(p.join("BUILD").exists(), "expunge must NOT touch source files");
 }
 
 /// RG 0011 (2): a BARE-name build routes through the canonical package-file resolver
@@ -362,13 +369,14 @@ fn relative_colon_target_builds_through_the_daemon() {
     let _ = razel().args(["shutdown", "-C"]).arg(ws.path()).output(); // don't leak the daemon
 }
 
-/// THE clean bug: the default `build` path reuses a WARM per-workspace daemon, so `clean` must
-/// invalidate it — otherwise the daemon keeps serving the pre-clean graph from memory and the very
-/// next build is wrongly "up-to-date". Reproduces `build; build; clean; build` end-to-end and
-/// asserts the post-clean build REBUILDS. (No prior test cleans between warm builds; `clean` was
-/// only ever tested against hand-synthesized files with no daemon — which is why this slipped.)
+/// THE clean bug + its snappy fix: the default `build` path reuses a WARM per-workspace daemon, so
+/// `clean` must invalidate the daemon's EXECUTION — otherwise it keeps serving the pre-clean graph
+/// from memory and the next build is wrongly "up-to-date" with the outputs gone. But `clean` must NOT
+/// redo the cold analysis: it keeps the warm analysis + content cache, so the next build
+/// RE-MATERIALIZES outputs from cache (a fast hit) instead of reloading + recompiling. Reproduces
+/// `build; build; clean; rm output; build` end-to-end and asserts the output is restored from cache.
 #[test]
-fn clean_invalidates_the_warm_daemon() {
+fn clean_rematerializes_from_cache_not_vacuous_up_to_date() {
     if !std::path::Path::new("/usr/bin/cc").exists() {
         return;
     }
@@ -389,14 +397,18 @@ fn clean_invalidates_the_warm_daemon() {
     let cl = razel().args(["clean", "-C"]).arg(ws.path()).output().unwrap();
     assert!(cl.status.success(), "clean stderr: {}", String::from_utf8_lossy(&cl.stderr));
 
-    // The crux: after clean, the build must be cold again — not the warm daemon's stale "up-to-date".
+    // Simulate the managed output being gone after clean. The build must RE-MATERIALIZE it — not
+    // report a vacuous "up-to-date" with the file missing (the original bug).
+    std::fs::remove_file(ws.path().join("widget.o")).unwrap();
     let after = build();
-    assert_eq!(
-        after.status,
-        razel_wire::BuildStatus::Built,
-        "build after clean must REBUILD, not reuse the warm daemon"
+    assert!(
+        ws.path().join("widget.o").exists(),
+        "build after clean must re-materialize the output, not leave a vacuous up-to-date"
     );
-    assert_eq!(after.recomputes, 1, "clean forces a cold rebuild of the one action");
+    // ...and it does so by RESTORING from the kept content cache (clean didn't delete it): a fast
+    // cache hit reusing the warm analysis, not a cold reload + recompile.
+    assert_eq!(after.status, razel_wire::BuildStatus::Cached, "re-materialized from the kept cache");
+    assert_eq!(after.recomputes, 0, "restored from cache, not recompiled");
     let _ = razel().args(["shutdown", "-C"]).arg(ws.path()).output(); // don't leak the daemon
 }
 

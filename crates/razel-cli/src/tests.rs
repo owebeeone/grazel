@@ -382,29 +382,35 @@ mod tests {
     }
 
     #[test]
-    fn clean_removes_real_exec_root_outputs_keeps_crates_until_expunge() {
+    fn clean_removes_outputs_keeps_cache_and_crates_until_expunge() {
         let ws = std::env::temp_dir().join(format!("razel-clean-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws);
         // The real outputs live in the exec-root forest; razel-out is a convenience symlink into it.
         std::fs::create_dir_all(ws.join(".razel-exec/razel-out")).unwrap();
         std::fs::write(ws.join(".razel-exec/razel-out/bin"), "x").unwrap();
         std::fs::create_dir_all(ws.join(".razel-crates/somecrate")).unwrap();
+        // The content-addressed cache: a plain clean must KEEP this so the next build re-materializes
+        // outputs from it instantly (the bazel-snappy clean) instead of recompiling from scratch.
+        std::fs::create_dir_all(ws.join(".razel-cache")).unwrap();
+        std::fs::write(ws.join(".razel-cache/entry"), "cached").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(".razel-exec/razel-out", ws.join("razel-out")).unwrap();
         let arg = ws.to_string_lossy().to_string();
 
-        // Plain clean: removes the REAL exec-root outputs + the convenience symlink; KEEPS the
-        // expensive fetched external deps.
+        // Plain clean: removes the REAL exec-root outputs + the convenience symlink; KEEPS the content
+        // cache and the expensive fetched external deps.
         cmd_clean(&["-C".into(), arg.clone()]);
         assert!(!ws.join(".razel-exec").exists(), "clean removed the real exec-root storage");
         assert!(
             std::fs::symlink_metadata(ws.join("razel-out")).is_err(),
             "clean removed the convenience symlink"
         );
+        assert!(ws.join(".razel-cache").exists(), "a plain clean KEEPS the content cache (fast re-materialize)");
         assert!(ws.join(".razel-crates").exists(), "a plain clean keeps fetched external deps");
 
-        // --expunge additionally drops the fetched external deps (bazel parity).
+        // --expunge additionally drops the content cache + fetched external deps (bazel parity).
         cmd_clean(&["--expunge".into(), "-C".into(), arg]);
+        assert!(!ws.join(".razel-cache").exists(), "--expunge removes the content cache too");
         assert!(!ws.join(".razel-crates").exists(), "--expunge removes the external deps");
 
         let _ = std::fs::remove_dir_all(&ws);

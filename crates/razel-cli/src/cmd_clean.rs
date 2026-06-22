@@ -33,33 +33,37 @@ use razel_daemon::rpc;
 
 use crate::*;
 
-/// `razel clean` (Bazel `clean`): remove razel's output/state for this workspace — the
-/// content-addressed cache (`.razel-cache/`), the output tree (`razel-out/`), and the
-/// Bazel-style convenience symlinks (`razel-bin`, `razel-testlogs`), just as `bazel clean`
-/// wipes `bazel-out` + its `bazel-*` symlinks. Under `--bazel_build_compat` (or the env var)
-/// razel wrote into Bazel's tree, so the `bazel-out` / `bazel-bin` / `bazel-testlogs` set is
-/// removed too. Symlinks are unlinked (never followed). `--expunge`/`--async` are accepted
-/// (Bazel-compat): razel keeps a single state dir, so `--expunge` is currently equivalent and
-/// `--async` runs synchronously. Idempotent (nothing present = success), like Bazel; the
-/// summary goes to stderr (Bazel stream discipline).
+/// `razel clean` (Bazel `clean`): remove razel's BUILD OUTPUTS for this workspace — the exec-root
+/// forest (`.razel-exec/`), the output tree (`razel-out/`), and the Bazel-style convenience symlinks
+/// (`razel-bin`, `razel-testlogs`), just as `bazel clean` wipes `bazel-out` + its `bazel-*` symlinks.
+/// The content-addressed cache (`.razel-cache/`) and fetched external deps (`.razel-crates/`) are
+/// KEPT, so the next build re-materializes outputs from cache near-instantly (bazel-with-disk-cache
+/// style) and the warm daemon REUSES its analysis rather than reloading cold (no ~8s clean stall).
+/// Under `--bazel_build_compat` (or the env var) razel wrote into Bazel's tree, so the `bazel-out` /
+/// `bazel-bin` / `bazel-testlogs` set is removed too. `--expunge` ADDITIONALLY wipes `.razel-cache`
+/// + `.razel-crates` and tells the daemon to drop its analysis (a genuine cold rebuild next).
+/// Symlinks are unlinked (never followed); `--async` runs synchronously. Idempotent (nothing present
+/// = success), like Bazel; the summary goes to stderr (Bazel stream discipline).
 pub(crate) fn cmd_clean(args: &[String]) -> ExitCode {
     let o = match parse_opts(args) {
         Ok(o) => o,
         Err(c) => return c,
     };
     let compat = o.bazel_build_compat || bazel_build_compat_env();
-    // INVALIDATE the warm daemon — drop its in-memory build graph so the next build re-runs cold,
-    // rather than reporting a vacuous "up-to-date" against state whose outputs we're about to delete.
-    // We do NOT kill it (clean ≠ shutdown; bazel keeps its server too). Best-effort: no daemon → no-op.
+    // Tell the warm daemon to re-validate. A plain clean invalidates only EXECUTION: the next build
+    // re-materializes outputs from the kept content cache but REUSES the warm analysis — no cold
+    // reload, so clean stays snappy. `--expunge` drops the analysis too (the on-disk cache is wiped
+    // below, so it genuinely must re-analyze). We do NOT kill the daemon (clean ≠ shutdown; bazel
+    // keeps its server too). Best-effort: no daemon → no-op.
     let socket = o.socket.clone().unwrap_or_else(|| default_socket(&o.workspace));
-    let _ = rpc::call(&socket, &rpc::req_clean());
+    let _ = rpc::call(&socket, &rpc::req_clean(o.expunge));
     // The REAL output storage is the exec-root forest `.razel-exec` (external-crate builds);
     // `razel-out`/`razel-bin`/`razel-testlogs` are convenience SYMLINKS into it, so removing only
     // those leaves the actual outputs behind (and the warm daemon keeps serving them). Remove
-    // `.razel-exec` too so a clean is a REAL clean. `.razel-crates` (the expensive fetched external
-    // deps) survives a plain clean and is dropped only by `--expunge` (bazel parity).
+    // `.razel-exec` too so a clean is a REAL clean. The content-addressed cache `.razel-cache` is
+    // KEPT (the next build re-materializes from it near-instantly, bazel-with-disk-cache style) along
+    // with the fetched external deps `.razel-crates` — both are dropped only by `--expunge`.
     let mut names: Vec<&str> = vec![
-        ".razel-cache",
         ".razel-exec",
         "razel-out",
         "razel-bin",
@@ -69,6 +73,7 @@ pub(crate) fn cmd_clean(args: &[String]) -> ExitCode {
         names.extend(["bazel-out", "bazel-bin", "bazel-testlogs"]);
     }
     if o.expunge {
+        names.push(".razel-cache");
         names.push(".razel-crates");
     }
     let how = if o.expunge { "expunged" } else { "cleaned" };

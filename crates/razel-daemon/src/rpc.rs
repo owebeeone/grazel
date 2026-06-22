@@ -518,10 +518,16 @@ impl Inner {
                 Ok(i) => ok(&i.to_cbor()),
                 Err(e) => err(&e),
             },
-            // `razel clean`: drop the warm analysis + engine graph so the next build is cold — the
-            // daemon keeps running (it is NOT killed; that was the old shortcut).
+            // `razel clean`: drop the warm ENGINE so the next build re-validates + re-materializes
+            // outputs, but KEEP the warm analysis (no cold reload — bazel-snappy). `--expunge` (field 2
+            // = true) drops the analysis too, matching the on-disk cache+crates wipe the CLI does.
+            // The daemon keeps running either way (it is NOT killed; that was the old shortcut).
             "clean" => {
-                self.actor.invalidate();
+                if req.get(2).boolean() {
+                    self.actor.invalidate();
+                } else {
+                    self.actor.invalidate_execution();
+                }
                 ok(&Cbor::Bool(true))
             }
             other => err(&format!("unknown method {other:?}")),
@@ -722,8 +728,9 @@ pub fn build_stream(
 /// `clean` request envelope: ask the daemon to drop its warm state (cold next build), staying alive.
 /// Carries an (unused) tag-2 arg slot because `dispatch` reads `req.get(2)` and `Cbor::get` panics on
 /// a missing key.
-pub fn req_clean() -> Cbor {
-    Cbor::Map(vec![(1, Cbor::Text("clean".into())), (2, Cbor::Null)])
+pub fn req_clean(expunge: bool) -> Cbor {
+    // Field 2 = expunge flag: false keeps the warm analysis (re-validate only), true drops it (cold).
+    Cbor::Map(vec![(1, Cbor::Text("clean".into())), (2, Cbor::Bool(expunge))])
 }
 
 /// `shutdown` request envelope: ask the daemon to terminate.
@@ -876,7 +883,7 @@ noop(name = "widget")
     }
 
     #[test]
-    fn clean_invalidates_warm_state_without_killing_the_daemon() {
+    fn clean_reuses_warm_analysis_but_expunge_drops_it() {
         let ws = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let v1 = r#"
@@ -895,11 +902,17 @@ noop(name = "widget")
         build(&srv);
         assert_eq!(srv.analyses_run(), 1, "unchanged BUILD analyzed once (warm reuse)");
 
-        // `clean` INVALIDATES the warm graph — the SAME server re-analyzes on the next build, proving
-        // it was reset, not killed (dispatch still works on `srv`).
-        payload(&srv.dispatch(&req_clean())).expect("clean ok");
+        // `clean` (non-expunge) invalidates only EXECUTION: the next build re-validates + re-materializes
+        // from the kept cache but REUSES the warm analysis — no cold reload (the ~8s clean-stall fix).
+        // analyses_run STAYS 1, proving the analysis wasn't dropped; the daemon is alive (dispatch works).
+        payload(&srv.dispatch(&req_clean(false))).expect("clean ok");
         build(&srv);
-        assert_eq!(srv.analyses_run(), 2, "clean dropped the warm graph → re-analyzed, daemon alive");
+        assert_eq!(srv.analyses_run(), 1, "clean reused the warm analysis (no cold reload), daemon alive");
+
+        // `clean --expunge` drops the analysis too → the next build re-analyzes cold.
+        payload(&srv.dispatch(&req_clean(true))).expect("expunge ok");
+        build(&srv);
+        assert_eq!(srv.analyses_run(), 2, "clean --expunge dropped the warm analysis → re-analyzed");
     }
 
     #[test]

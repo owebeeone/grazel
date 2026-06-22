@@ -40,10 +40,15 @@ pub enum ActorMessage {
         /// build executes — the streaming build path (WS-E.2). `None` for a unary build.
         progress: Option<Sender<String>>,
     },
-    /// Drop the warm analysis + engine graph (the next build re-analyzes + re-runs cold) WITHOUT
-    /// killing the process — `razel clean` sends this so a clean isn't a vacuous "up-to-date" against
-    /// the in-memory graph, but the daemon survives.
+    /// Drop the warm analysis AND engine graph (next build re-analyzes + re-runs COLD) WITHOUT
+    /// killing the process — `razel clean --expunge` (the on-disk cache + crates are wiped too, so the
+    /// analysis genuinely has to be redone).
     Invalidate,
+    /// Drop ONLY the engine/execution state, KEEPING the cached analysis — `razel clean` (non-expunge).
+    /// The next build re-validates + re-materializes outputs from the kept content cache (so a clean
+    /// isn't a vacuous "up-to-date"), but REUSES the warm analysis instead of paying the cold load
+    /// again — bazel-snappy. A BUILD edit still forces re-analysis via the digest check.
+    InvalidateExecution,
     Shutdown,
 }
 
@@ -86,10 +91,17 @@ impl ActorHandle {
             .map_err(|_| "razel daemon: build actor died mid-build".to_string())?
     }
 
-    /// Drop the warm analysis + engine graph so the next build is COLD — `razel clean`. Best-effort:
-    /// a stopped actor just means there's nothing to invalidate. Does NOT kill the daemon.
+    /// Drop the warm analysis + engine graph so the next build is COLD — `razel clean --expunge`.
+    /// Best-effort: a stopped actor just means there's nothing to invalidate. Does NOT kill the daemon.
     pub fn invalidate(&self) {
         let _ = self.inbox.send(ActorMessage::Invalidate);
+    }
+
+    /// Drop only the engine (execution state), KEEPING the warm analysis — `razel clean` (non-expunge).
+    /// The next build reuses the cached analysis (no cold reload — the ~8s clean-stall fix) and
+    /// re-materializes outputs from the kept content cache. Best-effort.
+    pub fn invalidate_execution(&self) {
+        let _ = self.inbox.send(ActorMessage::InvalidateExecution);
     }
 
     /// The requesting client disconnected (its ^C): abort the in-flight build and DON'T restart it —
@@ -252,9 +264,15 @@ impl WorkspaceActor {
                 }
                 ActorMessage::Invalidate => {
                     // Forget the warm analysis + engine graph; the next build re-analyzes + re-runs
-                    // cold (so `clean` can't be a vacuous "up-to-date"). The process stays up.
+                    // cold (`razel clean --expunge`). The process stays up.
                     self.builder = None;
                     self.analysis = None;
+                }
+                ActorMessage::InvalidateExecution => {
+                    // Drop ONLY the engine so the next build re-validates + re-materializes outputs,
+                    // but KEEP the cached analysis — reused on the next build (no cold reload). The
+                    // analysis digest still guards correctness: a BUILD edit re-analyzes anyway.
+                    self.builder = None;
                 }
                 ActorMessage::Shutdown => break,
             }
@@ -411,13 +429,23 @@ impl WorkspaceActor {
             return Ok(self.analysis.as_ref().unwrap().build_name.clone());
         }
 
-        // Re-analyze through the workspace loader for BOTH bare names and //-labels, so
-        // cross-package aliases resolve (e.g. `//:razel` → `//crates/razel-cli:razel`) and dep
-        // packages load — matching the CLI's local build_one + bazel. Canonicalize via the ONE shared
-        // helper the CLI uses, so `:name` becomes `//:name` (not `//::name`) and a bare `name` →
-        // `//:name` — the daemon's old inline `format!("//:{token}")` doubled the colon for `:name`.
-        let label = razel_build::canonical_target(token);
-        let (targets, build_name) = analyze_workspace_resolved(&self.workspace, &label, flags.clone())?;
+        // The analysis is still valid (same BUILD digest + token) but the engine was dropped — e.g.
+        // `razel clean` invalidated execution. REUSE the cached targets and just rebuild the engine
+        // graph below, skipping the cold load + rule analysis (the ~8s clean-stall). Otherwise (BUILD
+        // changed, or first build) do the full re-analysis through the workspace loader.
+        //
+        // The loader resolves cross-package aliases (`//:razel` → `//crates/razel-cli:razel`) and
+        // loads dep packages for BOTH bare names and //-labels, matching the CLI's local build_one +
+        // bazel. Canonicalize via the ONE shared helper the CLI uses, so `:name` becomes `//:name`
+        // (not `//::name`) — the daemon's old inline `format!("//:{token}")` doubled the colon.
+        let (targets, build_name, reanalyzed) = if hit {
+            let a = self.analysis.as_ref().unwrap();
+            (a.targets.clone(), a.build_name.clone(), false)
+        } else {
+            let label = razel_build::canonical_target(token);
+            let (t, n) = analyze_workspace_resolved(&self.workspace, &label, flags.clone())?;
+            (t, n, true)
+        };
 
         // Persistent exec-root forest for external-crate builds; else build in the workspace.
         self.exec_root = if self.workspace.join(".razel-crates").is_dir() {
@@ -434,13 +462,17 @@ impl WorkspaceActor {
         // own output events (no self-cancellation).
         *self.outputs.lock().unwrap() = builder.output_paths();
         self.builder = Some(builder);
-        self.analysis = Some(Analysis {
-            digest,
-            token: token.to_string(),
-            targets,
-            build_name: build_name.clone(),
-        });
-        self.analyses.fetch_add(1, Ordering::SeqCst);
+        // Only a genuine re-analysis records a new cached analysis + bumps the counter; a reuse-rebuild
+        // (after `clean`) keeps the existing entry — that's what makes the next build skip the reload.
+        if reanalyzed {
+            self.analysis = Some(Analysis {
+                digest,
+                token: token.to_string(),
+                targets,
+                build_name: build_name.clone(),
+            });
+            self.analyses.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(build_name)
     }
 

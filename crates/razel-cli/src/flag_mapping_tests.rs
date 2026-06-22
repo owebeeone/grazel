@@ -86,7 +86,7 @@ pub(crate) static COMMANDS: &[CmdHelp] = &[
         flags: &["compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "bazel_build_compat"] },
     CmdHelp { name: "test", args: "<target>...", summary: "Build and run the specified test targets.",
         flags: &["jobs", "compilation_mode", "copt", "cxxopt", "conlyopt", "linkopt", "define", "bazel_build_compat"] },
-    CmdHelp { name: "clean", args: "[--expunge]", summary: "Remove razel's outputs, cache, and convenience symlinks (razel-out, razel-bin, .razel-cache).",
+    CmdHelp { name: "clean", args: "[--expunge]", summary: "Remove build outputs + convenience symlinks (razel-out, razel-bin); keeps the cache for fast rebuilds (--expunge also wipes .razel-cache + deps).",
         flags: &["expunge"] },
     CmdHelp { name: "affected", args: "<file>...", summary: "List the targets affected by changed files.",
         flags: &["daemon", "socket", "cbor"] },
