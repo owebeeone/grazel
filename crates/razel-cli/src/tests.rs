@@ -272,8 +272,8 @@ pub(crate) fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null())
     };
-    let spawned = Command::new(exe)
-        .arg("daemon")
+    let mut cmd = Command::new(exe);
+    cmd.arg("daemon")
         .arg("-C")
         .arg(&o.workspace)
         .arg("--socket")
@@ -282,8 +282,16 @@ pub(crate) fn ensure_daemon(o: &Opts, socket: &Path) -> bool {
         .arg(&cache)
         .stdin(Stdio::null())
         .stdout(open_log())
-        .stderr(open_log())
-        .spawn();
+        .stderr(open_log());
+    // Put the daemon in its OWN process group so the client's ^C — SIGINT to the terminal's
+    // foreground process group — does NOT reach it. The daemon is a persistent server (bazel's is in
+    // its own session); ^C cancels the client only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let spawned = cmd.spawn();
     if spawned.is_err() {
         return false;
     }

@@ -28,6 +28,7 @@ use std::process::ExitCode;
 // (parse_opts/parse_opts_with_rc below); Opts + its fields + global_flags + default_socket + rc-lite
 // all come from the shared module, so the CLI and the daemon parse identically.
 use razel_build::args::{bazel_build_compat_env, default_socket};
+use razel_daemon::rpc;
 
 
 use crate::*;
@@ -47,12 +48,11 @@ pub(crate) fn cmd_clean(args: &[String]) -> ExitCode {
         Err(c) => return c,
     };
     let compat = o.bazel_build_compat || bazel_build_compat_env();
-    // bazel parity: `clean` stops the workspace server too. Otherwise the WARM daemon keeps serving
-    // the pre-clean build graph from memory, and the very next `razel build` is wrongly "up-to-date"
-    // (the exact bug this fixes). Do it FIRST — the daemon's pid lives in
-    // `.razel-cache/workspace.lock`, which we're about to remove.
+    // INVALIDATE the warm daemon — drop its in-memory build graph so the next build re-runs cold,
+    // rather than reporting a vacuous "up-to-date" against state whose outputs we're about to delete.
+    // We do NOT kill it (clean ≠ shutdown; bazel keeps its server too). Best-effort: no daemon → no-op.
     let socket = o.socket.clone().unwrap_or_else(|| default_socket(&o.workspace));
-    let stopped_daemon = matches!(stop_daemon(&socket, &o.workspace), StopOutcome::Stopped);
+    let _ = rpc::call(&socket, &rpc::req_clean());
     // The REAL output storage is the exec-root forest `.razel-exec` (external-crate builds);
     // `razel-out`/`razel-bin`/`razel-testlogs` are convenience SYMLINKS into it, so removing only
     // those leaves the actual outputs behind (and the warm daemon keeps serving them). Remove
@@ -102,14 +102,10 @@ pub(crate) fn cmd_clean(args: &[String]) -> ExitCode {
     if errs > 0 {
         return ExitCode::FAILURE;
     }
-    if removed.is_empty() && !stopped_daemon {
+    if removed.is_empty() {
         eprintln!("razel: nothing to clean");
     } else {
-        let mut what = removed.join(", ");
-        if stopped_daemon {
-            what = if what.is_empty() { "daemon".into() } else { format!("{what}, daemon") };
-        }
-        eprintln!("razel: {how} ({what})");
+        eprintln!("razel: {how} ({})", removed.join(", "));
     }
     ExitCode::SUCCESS
 }

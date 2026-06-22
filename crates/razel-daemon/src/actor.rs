@@ -40,6 +40,10 @@ pub enum ActorMessage {
         /// build executes — the streaming build path (WS-E.2). `None` for a unary build.
         progress: Option<Sender<String>>,
     },
+    /// Drop the warm analysis + engine graph (the next build re-analyzes + re-runs cold) WITHOUT
+    /// killing the process — `razel clean` sends this so a clean isn't a vacuous "up-to-date" against
+    /// the in-memory graph, but the daemon survives.
+    Invalidate,
     Shutdown,
 }
 
@@ -77,6 +81,12 @@ impl ActorHandle {
             .map_err(|_| "razel daemon: build actor stopped".to_string())?;
         rx.recv()
             .map_err(|_| "razel daemon: build actor died mid-build".to_string())?
+    }
+
+    /// Drop the warm analysis + engine graph so the next build is COLD — `razel clean`. Best-effort:
+    /// a stopped actor just means there's nothing to invalidate. Does NOT kill the daemon.
+    pub fn invalidate(&self) {
+        let _ = self.inbox.send(ActorMessage::Invalidate);
     }
 
     /// Enqueue a STREAMING build: returns a progress receiver (one `"<mnemonic> <output>"` line per
@@ -224,6 +234,12 @@ impl WorkspaceActor {
                     // progress until close, then the result).
                     drop(progress);
                     let _ = reply.send(r); // a gone client just drops the reply
+                }
+                ActorMessage::Invalidate => {
+                    // Forget the warm analysis + engine graph; the next build re-analyzes + re-runs
+                    // cold (so `clean` can't be a vacuous "up-to-date"). The process stays up.
+                    self.builder = None;
+                    self.analysis = None;
                 }
                 ActorMessage::Shutdown => break,
             }

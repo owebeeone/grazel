@@ -510,6 +510,12 @@ impl Inner {
                 Ok(i) => ok(&i.to_cbor()),
                 Err(e) => err(&e),
             },
+            // `razel clean`: drop the warm analysis + engine graph so the next build is cold — the
+            // daemon keeps running (it is NOT killed; that was the old shortcut).
+            "clean" => {
+                self.actor.invalidate();
+                ok(&Cbor::Bool(true))
+            }
             other => err(&format!("unknown method {other:?}")),
         }
     }
@@ -705,6 +711,13 @@ pub fn build_stream(
     Ok(conn)
 }
 
+/// `clean` request envelope: ask the daemon to drop its warm state (cold next build), staying alive.
+/// Carries an (unused) tag-2 arg slot because `dispatch` reads `req.get(2)` and `Cbor::get` panics on
+/// a missing key.
+pub fn req_clean() -> Cbor {
+    Cbor::Map(vec![(1, Cbor::Text("clean".into())), (2, Cbor::Null)])
+}
+
 /// `shutdown` request envelope: ask the daemon to terminate.
 pub fn req_shutdown() -> Cbor {
     Cbor::Map(vec![(1, Cbor::Text("shutdown".into())), (2, Cbor::Null)])
@@ -852,6 +865,33 @@ noop(name = "widget")
         .unwrap();
         build(&srv);
         assert_eq!(srv.analyses_run(), 2, "changed BUILD re-analyzed");
+    }
+
+    #[test]
+    fn clean_invalidates_warm_state_without_killing_the_daemon() {
+        let ws = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let v1 = r#"
+def _impl(ctx):
+    ctx.actions.run(executable = "/usr/bin/true", outputs = [], inputs = [], arguments = [])
+    return [DefaultInfo(files = [])]
+noop = rule(implementation = _impl, attrs = {})
+noop(name = "widget")
+"#;
+        std::fs::write(ws.path().join("BUILD"), v1).unwrap();
+        let srv = Server::new(ws.path().to_path_buf(), cache.path().to_path_buf());
+        let build =
+            |s: &Server| payload(&s.dispatch(&req_build(&["widget".into()], "."))).expect("build ok");
+
+        build(&srv);
+        build(&srv);
+        assert_eq!(srv.analyses_run(), 1, "unchanged BUILD analyzed once (warm reuse)");
+
+        // `clean` INVALIDATES the warm graph — the SAME server re-analyzes on the next build, proving
+        // it was reset, not killed (dispatch still works on `srv`).
+        payload(&srv.dispatch(&req_clean())).expect("clean ok");
+        build(&srv);
+        assert_eq!(srv.analyses_run(), 2, "clean dropped the warm graph → re-analyzed, daemon alive");
     }
 
     #[test]
