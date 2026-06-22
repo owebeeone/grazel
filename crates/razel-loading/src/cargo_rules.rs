@@ -224,10 +224,7 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
             // The bar's per-action label: `<crate> <version>` — the version names the source repo
             // (`crates__<crate>-<version>`), so it doubles as "which crate dir". Empty for a path /
             // workspace crate with no recorded version → the bar falls back to the output name.
-            let crate_desc = compile.pkg_name.as_deref().map_or(String::new(), |p| match &compile.version {
-                Some(v) => format!("{p} {v}"),
-                None => p.to_string(),
-            });
+            let crate_desc = compile.pkg_name.as_deref().map_or(String::new(), |p| crate_label(p, &compile.version));
             let mut t = AnalyzedTarget {
                 name: canon_label(sess, &name),
                 deps: dep_names,

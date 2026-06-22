@@ -7,6 +7,17 @@ use starlark::eval::Evaluator;
 
 pub(crate) const RUSTC: &str = "/usr/bin/rustc";
 
+/// The build bar's per-action label for a rust crate: `<crate> <version>` (e.g. "serde 1.0.228"),
+/// or just the crate when there's no recorded version. The version names the source repo
+/// (`crates__<crate>-<version>`), so it doubles as "which crate dir". One helper so library /
+/// binary / proc-macro / build-script compiles all read the same way.
+pub(crate) fn crate_label(name: &str, version: &Option<String>) -> String {
+    match version {
+        Some(v) => format!("{name} {v}"),
+        None => name.to_string(),
+    }
+}
+
 
 /// The `rustc` to invoke, resolved to an **absolute** path. Prefer the fixed
 /// `/usr/bin/rustc` (matching cc's pinned toolchain paths); when absent — e.g. a
