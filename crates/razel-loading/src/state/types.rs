@@ -11,6 +11,11 @@ pub struct AnalyzedAction {
     pub argv: Vec<String>,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
+    /// A human, per-action progress label for the build bar (bazel's `progress_message`): the rule
+    /// that builds the action sets it from what IT knows — the crate + version for rust, the source
+    /// file for C++, etc. Empty ⇒ the bar falls back to the primary output's basename. This is the
+    /// language-agnostic mechanism — the engine never parses target labels per language.
+    pub description: String,
 }
 
 

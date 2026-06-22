@@ -78,33 +78,6 @@ fn action_key(target: &str, i: usize) -> String {
     format!("act:{target}#{i}")
 }
 
-/// The discriminating short name of a target label, for progress display: the segment after the last
-/// `:` or `/`. `//crates/razel-cli:razel` → `razel`; `@@…crate+crates__quote-1.0.38//:quote` →
-/// `quote`. Bazel's bar shows this kind of name (e.g. "Rustc quote"), not the long output path.
-///
-/// rules_rust names EVERY crate's build-script target `_bs`, which says nothing — so for a
-/// `_`-prefixed (internal) target name, fall back to the crate in the repo segment
-/// (`@@…+crates__serde-1.0.219//:_bs` → `serde`, version stripped) so the bar reads
-/// "CargoBuildScriptRun serde", not "CargoBuildScriptRun _bs".
-fn short_label(name: &str) -> &str {
-    let tail = name.rsplit([':', '/']).next().unwrap_or(name);
-    if tail.starts_with('_')
-        && let Some((_, after)) = name.rsplit_once("crates__")
-    {
-        let crate_id = after.split([':', '/']).next().unwrap_or(after);
-        // Strip a trailing `-<version>` (the segment after the last `-` that starts with a digit),
-        // matching the `Rustc serde` line. Crate names never end in `-<digit…>`; versions always do.
-        let crate_name = crate_id
-            .rsplit_once('-')
-            .filter(|(_, ver)| ver.starts_with(|c: char| c.is_ascii_digit()))
-            .map_or(crate_id, |(n, _)| n);
-        if !crate_name.is_empty() {
-            return crate_name;
-        }
-    }
-    tail
-}
-
 /// A leaf source file's node value: its canonical content digest (C2 `digest_path`); a missing
 /// file digests as empty (symmetric with the executor skipping absent inputs).
 fn leaf_value(path: &Path) -> NodeValue {
@@ -227,11 +200,16 @@ impl IncrementalBuilder {
                 let exec_root = self.exec_root.clone();
                 let executed = self.executed.clone();
                 let progress = self.progress.clone();
-                // The bazel-style action label for progress: mnemonic + the target's SHORT name (the
-                // discriminating bit) — NOT the long output path, whose common prefix
-                // (`razel-out/…/external/rules_rust++crate+…`) is all that survives the width clip,
-                // leaving every line identical. So "Rustc quote", not "Rustc razel-out/…/libquote…".
-                let desc = format!("{} {}", act.mnemonic, short_label(&t.name));
+                // The bar's per-action label: the rule's own description (crate + version for rust,
+                // the source file for C++, …) when set, else a LANGUAGE-AGNOSTIC fallback — the
+                // primary output's basename. Either way it's `mnemonic + a discriminating bit`; the
+                // engine never parses target labels per-language (that lives in each rule).
+                let disc = if act.description.is_empty() {
+                    act.outputs.first().map_or("", |o| o.rsplit('/').next().unwrap_or(o))
+                } else {
+                    act.description.as_str()
+                };
+                let desc = format!("{} {}", act.mnemonic, disc);
                 let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
                 self.engine.add_action(&akey, &dep_refs, move |dep_values| {
                     run_action(
@@ -595,17 +573,6 @@ boom(name = "boom")
         b.sync_file("x.txt");
         b.build("lib", 4).unwrap();
         assert_eq!(b.executed_actions(), 1, "only act(x) executed");
-    }
-
-    #[test]
-    fn short_label_is_discriminating_for_crate_and_build_script_targets() {
-        assert_eq!(short_label("//crates/razel-cli:razel"), "razel");
-        assert_eq!(short_label("@@rules_rust++crate+crates__serde-1.0.219//:serde"), "serde");
-        // Build-script targets are all named `_bs` → derive the crate (version stripped) from the repo.
-        assert_eq!(short_label("@@rules_rust++crate+crates__serde-1.0.219//:_bs"), "serde");
-        assert_eq!(short_label("@@rules_rust++crate+crates__aho-corasick-1.1.3//:_bs"), "aho-corasick");
-        // No `crates__` to fall back to → keep the (generic) tail.
-        assert_eq!(short_label("//some:_internal"), "_internal");
     }
 
     #[test]

@@ -109,6 +109,7 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
                 argv: vec!["/bin/ln".into(), "-sf".into(), target.clone(), output.clone()],
                 inputs: vec![target.clone()],
                 outputs: vec![output.clone()],
+                description: String::new(),
             })
         });
         Ok(NoneType)
@@ -154,6 +155,7 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
                 argv: vec!["/usr/bin/sed".into(), prog.clone(), tpl.clone()],
                 inputs: vec![tpl.clone()],
                 outputs: vec![out.clone()],
+                description: String::new(),
             })
         });
         Ok(NoneType)
@@ -178,6 +180,7 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
                 argv: vec!["/bin/bash".into(), "-c".into(), cmd.clone()],
                 inputs: ins.clone(),
                 outputs: outs.clone(),
+                description: String::new(),
             })
         });
         Ok(NoneType)
@@ -208,6 +211,7 @@ pub(crate) fn actions_methods(b: &mut MethodsBuilder) {
                 argv: vec!["/bin/sh".into(), "-c".into(), script],
                 inputs: Vec::new(),
                 outputs: vec![output],
+                description: String::new(),
             })
         });
         Ok(NoneType)
@@ -528,6 +532,7 @@ pub(crate) fn push_run_action<'v>(
             argv,
             inputs: paths(inputs),
             outputs: paths(outputs),
+            description: String::new(),
         })
     });
 }

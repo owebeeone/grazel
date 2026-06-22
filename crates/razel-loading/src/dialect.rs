@@ -616,6 +616,7 @@ pub(crate) fn rule_globals(b: &mut GlobalsBuilder) {
                             argv: vec!["/bin/bash".into(), "-c".into(), expanded],
                             inputs,
                             outputs: outs.clone(),
+                            description: String::new(),
                         }],
                         default_info: outs,
                         ..Default::default()

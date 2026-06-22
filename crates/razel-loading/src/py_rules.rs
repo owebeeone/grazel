@@ -192,6 +192,7 @@ fn py_executable<'v>(
         argv: vec![SH.into(), "-c".into(), script],
         inputs,
         outputs: vec![out.clone()],
+        description: String::new(),
     };
     record_target(sess, AnalyzedTarget {
         name: canon_label(sess, &name),

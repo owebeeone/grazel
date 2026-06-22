@@ -30,6 +30,7 @@ cc_obj(name = "widget", src = "widget.c")
             argv: vec!["/bin/sh".into(), "-c".into(), format!("touch {out}")],
             inputs: vec![],
             outputs: vec![out.into()],
+            description: String::new(),
         };
         let targets = vec![
             AnalyzedTarget {

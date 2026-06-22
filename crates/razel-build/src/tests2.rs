@@ -480,6 +480,7 @@ cc_binary(name = "app", src = "app.c", deps = [":math"])
             argv: argv.iter().map(|s| s.to_string()).collect(),
             inputs: ins.iter().map(|s| s.to_string()).collect(),
             outputs: vec![out.into()],
+            description: String::new(),
         };
         let t = |name: &str, deps: &[&str], a: AnalyzedAction, out: &str| AnalyzedTarget {
             name: name.into(),

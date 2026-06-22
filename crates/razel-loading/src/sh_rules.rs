@@ -29,6 +29,7 @@ fn install_action(src: &str, out: &str) -> AnalyzedAction {
         argv: vec!["/bin/sh".into(), "-c".into(), script],
         inputs: vec![src.to_string()],
         outputs: vec![out.to_string()],
+        description: String::new(),
     }
 }
 

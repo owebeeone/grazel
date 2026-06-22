@@ -35,6 +35,7 @@ fn sample() -> AnalyzedTarget {
             argv: vec!["clang".into(), "-c".into(), "widget.c".into()],
             inputs: vec!["widget.c".into()],
             outputs: vec!["widget.o".into()],
+            description: String::new(),
         }],
         default_info: vec!["widget.o".into()],
         providers,

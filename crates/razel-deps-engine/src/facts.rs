@@ -185,6 +185,7 @@ fn action_of(c: &Cbor) -> R<AnalyzedAction> {
         argv: texts_of(at(a, 1)?)?,
         inputs: texts_of(at(a, 2)?)?,
         outputs: texts_of(at(a, 3)?)?,
+        description: String::new(),
     })
 }
 

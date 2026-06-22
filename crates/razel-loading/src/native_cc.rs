@@ -89,6 +89,7 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
             argv: ar_argv,
             inputs: objs,
             outputs: vec![lib.clone()],
+            description: String::new(),
         });
 
         // Store OWN providers (C2d); dependents recover the transitive closure via the DDS fold.
@@ -162,6 +163,7 @@ pub(crate) fn cc_rules(b: &mut GlobalsBuilder) {
             argv: link_argv,
             inputs: link_inputs,
             outputs: vec![out.clone()],
+            description: String::new(),
         });
         record_target(sess, AnalyzedTarget {
             name: canon_label(sess, &name),
@@ -221,6 +223,9 @@ pub(crate) fn compile_action(cc: &str, src: &str, obj: &str, flags: &[String], i
         argv,
         inputs,
         outputs: vec![obj.into()],
+        // The C++ rule's per-action label is the SOURCE file (bazel's "Compiling foo.cc") — a
+        // different discriminator than rust's crate, set by THIS rule. That's the generalization.
+        description: src.rsplit('/').next().unwrap_or(src).to_string(),
     }
 }
 

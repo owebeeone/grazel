@@ -221,6 +221,13 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
             run_inputs.extend(env_files);
             run_inputs.extend(dep_metadata.iter().map(|(_, f)| f.clone())); // P4.5: link_deps flags-files
 
+            // The bar's per-action label: `<crate> <version>` — the version names the source repo
+            // (`crates__<crate>-<version>`), so it doubles as "which crate dir". Empty for a path /
+            // workspace crate with no recorded version → the bar falls back to the output name.
+            let crate_desc = compile.pkg_name.as_deref().map_or(String::new(), |p| match &compile.version {
+                Some(v) => format!("{p} {v}"),
+                None => p.to_string(),
+            });
             let mut t = AnalyzedTarget {
                 name: canon_label(sess, &name),
                 deps: dep_names,
@@ -230,12 +237,14 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
                         argv: compile_argv,
                         inputs: compile_inputs,
                         outputs: vec![bin.clone(), dsym],
+                        description: crate_desc.clone(),
                     },
                     AnalyzedAction {
                         mnemonic: "CargoBuildScriptRun".into(),
                         argv: run_argv,
                         inputs: run_inputs,
                         outputs: vec![flags_out.clone(), out_dir.clone()],
+                        description: crate_desc.clone(),
                     },
                 ],
                 default_info: Vec::new(),
@@ -291,6 +300,7 @@ pub(crate) fn cargo_rules(b: &mut GlobalsBuilder) {
                     argv: vec!["/bin/sh".into(), "-c".into(), script],
                     inputs: Vec::new(),
                     outputs: vec![out.clone()],
+                    description: String::new(),
                 }],
                 default_info: vec![out],
                 ..Default::default()

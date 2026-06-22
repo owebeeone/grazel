@@ -60,6 +60,7 @@ fn js_binary_action(entry_q: &str, srcs_q: &[String], out_q: &str) -> AnalyzedAc
         argv: vec!["/bin/sh".into(), "-c".into(), script],
         inputs,
         outputs: vec![out_q.to_string()],
+        description: String::new(),
     }
 }
 
@@ -114,6 +115,7 @@ fn analyze_ts_project(
             argv: vec!["/bin/sh".into(), "-c".into(), script],
             inputs: srcs_q,
             outputs: outputs.clone(),
+            description: String::new(),
         }],
         default_info: outputs,
         providers: Default::default(),
