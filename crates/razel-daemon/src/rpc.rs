@@ -301,7 +301,10 @@ impl Inner {
                     }),
                     result: None,
                 };
-                write_frame(conn, &encode(&ok(&ev.to_cbor())))?;
+                if write_frame(conn, &encode(&ok(&ev.to_cbor()))).is_err() {
+                    self.actor.cancel_build(); // client gone → cancel, don't orphan the build
+                    return Ok(());
+                }
                 continue;
             }
             match line.split_once('\x1f') {
@@ -335,7 +338,12 @@ impl Inner {
                 }),
                 result: None,
             };
-            write_frame(conn, &encode(&ok(&ev.to_cbor())))?; // Err == client gone → stop
+            // A failed write means the client is gone (e.g. its ^C closed the socket). Cancel the
+            // in-flight build instead of letting it run to completion orphaned, then stop streaming.
+            if write_frame(conn, &encode(&ok(&ev.to_cbor()))).is_err() {
+                self.actor.cancel_build();
+                return Ok(());
+            }
         }
         // Build finished → the terminal result frame. A real build FAILURE is an honest terminal
         // Failed frame; but if the actor DIED (channel closed, no result), close the stream WITHOUT
@@ -892,6 +900,66 @@ noop(name = "widget")
         payload(&srv.dispatch(&req_clean())).expect("clean ok");
         build(&srv);
         assert_eq!(srv.analyses_run(), 2, "clean dropped the warm graph → re-analyzed, daemon alive");
+    }
+
+    #[test]
+    fn client_disconnect_cancels_the_build_instead_of_orphaning_it() {
+        // The bug: when the streaming client (the CLI) went away mid-build — e.g. the user hit ^C,
+        // closing the socket — the warm daemon kept running the build to completion in the background.
+        // The NEXT build then found everything already done and reported a vacuous "up-to-date". bazel
+        // STOPS the build when the requesting command is terminated; razel must too. We disconnect
+        // mid-stream and prove the follow-up build still has real work (status == Built, not Cached).
+        let ws = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        // A CHAIN of slow actions (o_0 → o_1 → o_2 → o_3): each takes the previous output as input, so
+        // they run strictly serially regardless of -j / core count. When the client drops, only the
+        // in-flight action can finish; the rest stay pending and must be cancelled.
+        let build_file = r#"
+def _impl(ctx):
+    outs = []
+    prev = []
+    for i in range(4):
+        o = ctx.actions.declare_file("o_%d" % i)
+        ctx.actions.run(executable = "/bin/sh", outputs = [o], inputs = prev, arguments = ["-c", "sleep 1; : > " + o.path])
+        outs.append(o)
+        prev = [o]
+    return [DefaultInfo(files = outs)]
+chain = rule(implementation = _impl, attrs = {})
+chain(name = "many")
+"#;
+        std::fs::write(ws.path().join("BUILD"), build_file).unwrap();
+        let srv = Server::new(ws.path().to_path_buf(), cache.path().to_path_buf());
+
+        // A connection whose writes always fail: the client closed the socket the instant streaming
+        // began (its ^C). stream_build must notice the failed frame write and CANCEL the warm build.
+        struct Disconnected;
+        impl Read for Disconnected {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Ok(0)
+            }
+        }
+        impl Write for Disconnected {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "client gone"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut conn = Disconnected;
+        let _ = srv.inner.stream_build(&mut conn, &req_build_stream(&["many".into()], "."));
+
+        // The daemon is alive and the cancelled build left real work undone: a fresh build must re-RUN
+        // actions (Built), not find them all already done by an orphaned background build (Cached).
+        let resp = payload(&srv.dispatch(&req_build(&["many".into()], "."))).expect("rebuild ok");
+        let result = BuildResult::from_cbor(&resp);
+        assert_eq!(
+            result.status,
+            BuildStatus::Built,
+            "a client disconnect must STOP the build; the follow-up build should still have work \
+             (Built) but reported {:?} — the cancelled build was orphaned to completion",
+            result.status
+        );
     }
 
     #[test]

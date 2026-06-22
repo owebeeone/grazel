@@ -54,6 +54,9 @@ pub struct ActorHandle {
     inbox: Sender<ActorMessage>,
     /// Flipped by a watcher event to abort an in-flight build (cancel-and-restart).
     cancel: Arc<AtomicBool>,
+    /// Flipped when the requesting client disconnects (its ^C): abort the in-flight build and do NOT
+    /// restart — the requester is gone, so the build stops (unlike `cancel`, which restarts).
+    aborted: Arc<AtomicBool>,
     /// Changed paths awaiting fold-in; drained at the top of each build attempt.
     pending: Arc<Mutex<Vec<PathBuf>>>,
     /// The live set of generated output paths (workspace-relative). The watcher ignores events on
@@ -87,6 +90,14 @@ impl ActorHandle {
     /// a stopped actor just means there's nothing to invalidate. Does NOT kill the daemon.
     pub fn invalidate(&self) {
         let _ = self.inbox.send(ActorMessage::Invalidate);
+    }
+
+    /// The requesting client disconnected (its ^C): abort the in-flight build and DON'T restart it —
+    /// the build stops (unlike a watcher `cancel`, which restarts to fold the edit). The next build
+    /// request runs fresh and streams progress.
+    pub fn cancel_build(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        self.cancel.store(true, Ordering::SeqCst); // abort the in-flight request_parallel
     }
 
     /// Enqueue a STREAMING build: returns a progress receiver (one `"<mnemonic> <output>"` line per
@@ -164,6 +175,7 @@ pub struct WorkspaceActor {
     builder: Option<IncrementalBuilder>,
     analysis: Option<Analysis>,
     cancel: Arc<AtomicBool>,
+    aborted: Arc<AtomicBool>,
     pending: Arc<Mutex<Vec<PathBuf>>>,
     outputs: Arc<Mutex<HashSet<String>>>,
     analyses: Arc<AtomicUsize>,
@@ -183,6 +195,7 @@ impl WorkspaceActor {
     ) -> ActorHandle {
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let aborted = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(Mutex::new(Vec::new()));
         let outputs = Arc::new(Mutex::new(HashSet::new()));
         let analyses = Arc::new(AtomicUsize::new(0));
@@ -190,6 +203,7 @@ impl WorkspaceActor {
         let handle = ActorHandle {
             inbox: tx,
             cancel: cancel.clone(),
+            aborted: aborted.clone(),
             pending: pending.clone(),
             outputs: outputs.clone(),
             analyses: analyses.clone(),
@@ -206,6 +220,7 @@ impl WorkspaceActor {
                     builder: None,
                     analysis: None,
                     cancel,
+                    aborted,
                     pending,
                     outputs,
                     analyses,
@@ -264,7 +279,12 @@ impl WorkspaceActor {
     ) -> Result<BuildResult, String> {
         let result = loop {
             self.cancel.store(false, Ordering::SeqCst);
+            self.aborted.store(false, Ordering::SeqCst);
             let r = self.build_once(args, cwd, progress);
+            // Client gone (its ^C): stop here — do NOT restart (the requester won't see a result).
+            if self.aborted.load(Ordering::SeqCst) {
+                break r;
+            }
             let raced = matches!(&r, Err(e) if e == "cancelled")
                 || self.cancel.load(Ordering::SeqCst)
                 || !self.pending.lock().unwrap().is_empty();
